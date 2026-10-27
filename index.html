@@ -382,6 +382,29 @@ const periodMap = {'daily':101,'weekly':102,'5min':1};
 return periodMap[period] || 101;
 }
 
+function sanitizeKlineData(data) {
+  if (!Array.isArray(data)) return [];
+  const clean = [];
+  const numeric = function(value) {
+    if (value === null || value === undefined || typeof value === 'boolean' || (typeof value === 'string' && value.trim() === '')) return NaN;
+    return Number(value);
+  };
+  for (const bar of data) {
+    if (!bar || typeof bar !== 'object') continue;
+    const o = numeric(bar.o);
+    const h = numeric(bar.h);
+    const l = numeric(bar.l);
+    const c = numeric(bar.c);
+    if (![o, h, l, c].every(Number.isFinite) || o <= 0 || h <= 0 || l <= 0 || c <= 0 || h < l || h < Math.max(o, c) || l > Math.min(o, c)) continue;
+    let timestamp = numeric(bar.timestamp);
+    if (!Number.isFinite(timestamp)) timestamp = Date.parse(String(bar.date || ''));
+    if (!Number.isFinite(timestamp)) continue;
+    clean.push({ ...bar, timestamp, o, h, l, c });
+  }
+  clean.sort(function(a, b) { return a.timestamp - b.timestamp; });
+  return clean;
+}
+
 async function fetchMarketData(symbol, assetType, cycle) {
   showLoading(`🔄 正在從東方財富抓取 ${symbol} 真實數據...`);
   try {
@@ -450,8 +473,11 @@ async function fetchMarketData(symbol, assetType, cycle) {
       };
     });
 
-    showStatus(`✅ ${symbol} 東方財富真實數據加載成功，共${klines.length}根K線`, 'success');
-    return klines.slice(-180);
+    const safeKlines = sanitizeKlineData(klines);
+    if (safeKlines.length < klines.length) console.warn(`[${symbol}] 已略過 ${klines.length - safeKlines.length} 根無效 OHLC K 線`);
+    if (safeKlines.length === 0) throw new Error('沒有可用的有效 OHLC K 線數據');
+    showStatus(`✅ ${symbol} 東方財富真實數據加載成功，共${safeKlines.length}根有效K線`, 'success');
+    return safeKlines.slice(-180);
 
   } catch (e) {
     console.error("數據獲取異常：", e);
@@ -644,6 +670,7 @@ function displayResonanceAnalysis(analysis, lastPrice, buyPrice = null) {
 
 function calculateModel(rawData, coreNum, sentiment = "中性") {
 showLoading('🧮 計算數律樞軸點...');
+rawData = sanitizeKlineData(rawData);
 if (rawData.length === 0) return [];
 const period = Math.min(50, rawData.length);
 const recentData = rawData.slice(-period);
@@ -765,7 +792,8 @@ function runBacktestEngine(modelData) {
 }
 
 function renderChart(modelData, isReplay = false) {
-if (!modelData || modelData.length === 0) return;
+modelData = sanitizeKlineData(modelData);
+if (modelData.length === 0) return;
 const dataToRender = isReplay ? modelData.slice(0, replayIndex + 1) : modelData;
 const statusBar = dataToRender[dataToRender.length - 1];
 const statusEl = document.getElementById('cosmic-status');

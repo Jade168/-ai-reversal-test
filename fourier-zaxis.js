@@ -454,10 +454,15 @@ else init();
 // 142857 / 1836.15 reversal experiment. Historical anchors use prior bars only.
 (function attachCosmicReversalSignal() {
   const TIME_WINDOWS = Object.freeze([14, 28, 57, 142, 285, 571]);
-  const TIME_WINDOW_SET = new Set(TIME_WINDOWS);
+  const TIME_TOLERANCE_BARS = 1;
   const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
   const INDEX_LEVELS = Object.freeze([1.836, 18.36, 36.72]);
   const OTHER_LEVELS = Object.freeze([14.28, 28.57, 57.14]);
+  const SPACE_TOLERANCE_PERCENT = 1.5;
+  function matchesTimeWindow(distance) {
+    return TIME_WINDOWS.some(function(windowSize) { return Math.abs(distance - windowSize) <= TIME_TOLERANCE_BARS; });
+  }
+
   const INDEX_SYMBOLS = new Set(['DJI', '^DJI', 'GSPC', '^GSPC', 'SPX', '^SPX', 'NDX', '^NDX', 'IXIC', '^IXIC', 'HSI', '^HSI', 'N225', '^N225']);
 
   function readBar(bar) {
@@ -545,8 +550,8 @@ else init();
 
       const barsFromHigh = i - highAnchor.index;
       const barsFromLow = i - lowAnchor.index;
-      const buyTimeMatch = TIME_WINDOW_SET.has(barsFromHigh);
-      const sellTimeMatch = TIME_WINDOW_SET.has(barsFromLow);
+      const buyTimeMatch = matchesTimeWindow(barsFromHigh);
+      const sellTimeMatch = matchesTimeWindow(barsFromLow);
       const downtrend = previous.close < prior.close && previous.close < highAnchor.price;
       const uptrend = previous.close > prior.close && previous.close > lowAnchor.price;
       const bullishReversal = downtrend && current.close > current.open && current.close > previous.close;
@@ -558,21 +563,24 @@ else init();
       let spaceResonance = false;
 
       if (buyTimeMatch && bullishReversal) {
-        for (const threshold of asset.levels) {
+        const drawdownPercent = ((highAnchor.price - current.low) / highAnchor.price) * 100;
+        const threshold = asset.levels.find(function(value) { return Math.abs(drawdownPercent - value) <= SPACE_TOLERANCE_PERCENT; });
+        if (threshold !== undefined) {
           const level = highAnchor.price * (1 - threshold / 100);
-          if (current.low <= level && current.close > level) {
+          if (current.close > level) {
             signal = 'STRONG_BUY';
             matchedThreshold = threshold;
             spaceResonance = true;
-            break;
           }
         }
       }
 
       if (sellTimeMatch && bearishReversal) {
-        for (const threshold of asset.levels) {
+        const reboundPercent = ((current.high - lowAnchor.price) / lowAnchor.price) * 100;
+        const threshold = asset.levels.find(function(value) { return Math.abs(reboundPercent - value) <= SPACE_TOLERANCE_PERCENT; });
+        if (threshold !== undefined) {
           const level = lowAnchor.price * (1 + threshold / 100);
-          if (current.high >= level && current.close < level) {
+          if (current.close < level) {
             if (signal === 'STRONG_BUY') {
               signal = 'HOLD';
               matchedThreshold = null;
@@ -581,7 +589,6 @@ else init();
               matchedThreshold = threshold;
             }
             spaceResonance = true;
-            break;
           }
         }
       }
