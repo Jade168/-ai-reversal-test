@@ -451,82 +451,161 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
 else init();
 })();
 
-// 1836.15 / 142857 / 369 reversal signal helper (experimental; not investment advice).
-(function attachCosmicSignal() {
-  const TIME_WINDOWS_BY_PERIOD = Object.freeze({
-    '5min': [3, 6, 9, 14, 28],
-    daily: [3, 6, 9, 14, 28, 36, 69, 99],
-    weekly: [3, 6, 9, 14, 28, 36, 69, 99]
-  });
-  const ATR_PERIOD = 14;
-  const BASE_NUM = 1836.15;
-  const LOWER_ATR_FACTOR = 0.142857;
-  const UPPER_ATR_FACTOR = 0.0183615;
+// 142857 / 1836.15 reversal experiment. Historical anchors use prior bars only.
+(function attachCosmicReversalSignal() {
+  const TIME_WINDOWS = Object.freeze([14, 28, 57, 142, 285, 571]);
+  const TIME_WINDOW_SET = new Set(TIME_WINDOWS);
+  const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+  const INDEX_LEVELS = Object.freeze([1.836, 18.36, 36.72]);
+  const OTHER_LEVELS = Object.freeze([14.28, 28.57, 57.14]);
+  const INDEX_SYMBOLS = new Set(['DJI', '^DJI', 'GSPC', '^GSPC', 'SPX', '^SPX', 'NDX', '^NDX', 'IXIC', '^IXIC', 'HSI', '^HSI', 'N225', '^N225']);
 
-  function calculateCosmicSignal(klineData, currentPeriod, ticker) {
+  function readBar(bar) {
+    if (!bar || typeof bar !== 'object') return null;
+    const open = Number(bar.o);
+    const high = Number(bar.h);
+    const low = Number(bar.l);
+    const close = Number(bar.c);
+    if (![open, high, low, close].every(Number.isFinite) || open <= 0 || close <= 0 || high < low || high < Math.max(open, close) || low > Math.min(open, close)) return null;
+    return { open: open, high: high, low: low, close: close };
+  }
+
+  function readTime(bar) {
+    if (!bar) return null;
+    const raw = bar.timestamp !== undefined && bar.timestamp !== null ? bar.timestamp : bar.date;
+    if (typeof raw === 'number' && Number.isFinite(raw)) return raw < 1000000000000 ? raw * 1000 : raw;
+    if (raw === undefined || raw === null) return null;
+    const parsed = Date.parse(String(raw));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function yearWindowStart(data, index, period) {
+    const now = readTime(data[index]);
+    if (now !== null) {
+      const cutoff = now - YEAR_MS;
+      let start = index;
+      while (start > 0) {
+        const priorTime = readTime(data[start - 1]);
+        if (priorTime === null || priorTime < cutoff) break;
+        start -= 1;
+      }
+      return start;
+    }
+    const barsPerYear = period === 'weekly' ? 52 : (period === '5min' ? 19656 : 252);
+    return Math.max(0, index - barsPerYear);
+  }
+
+  function findAnchor(data, start, end, field, highest) {
+    let anchor = null;
+    for (let i = start; i < end; i += 1) {
+      const values = readBar(data[i]);
+      if (!values) continue;
+      const value = values[field];
+      if (!anchor || (highest ? value > anchor.price : value < anchor.price)) {
+        anchor = { index: i, price: value, date: data[i].date !== undefined ? data[i].date : data[i].timestamp };
+      }
+    }
+    return anchor;
+  }
+
+  function assetProfile(ticker, assetType) {
+    const symbol = String(ticker || '').trim().toUpperCase();
+    const type = String(assetType || '').trim().toLowerCase();
+    const preciousMetal = /^(XAU|XAG|GOLD|SILVER|GLD|SLV|GC=F|SI=F)/.test(symbol) || type === 'precious-metal';
+    const isIndex = type === 'index' || INDEX_SYMBOLS.has(symbol);
+    const profile = isIndex ? 'index' : (preciousMetal ? 'precious-metal' : 'stock-or-commodity');
+    return { profile: profile, levels: isIndex || preciousMetal ? INDEX_LEVELS : OTHER_LEVELS, longTermLow: isIndex };
+  }
+
+  function calculateCosmicReversalSignal(klineData, currentPeriod, ticker, assetType) {
     if (!Array.isArray(klineData) || klineData.length === 0) return [];
     const period = String(currentPeriod || 'daily').toLowerCase();
-    const timeWindows = TIME_WINDOWS_BY_PERIOD[period] || TIME_WINDOWS_BY_PERIOD.daily;
-    const symbol = String(ticker || '').trim().toUpperCase();
-    const usesAbsoluteResonance = ['DJI', '^DJI', 'GSPC', '^GSPC', 'SPX', '^SPX'].includes(symbol);
-    const atrValues = [];
+    const asset = assetProfile(ticker, assetType);
     const results = [];
-    let previous = null;
-    let trendCount = 0;
 
     for (let i = 0; i < klineData.length; i += 1) {
       const bar = klineData[i];
-      const open = Number(bar && bar.o);
-      const high = Number(bar && bar.h);
-      const low = Number(bar && bar.l);
-      const close = Number(bar && bar.c);
-      const valid = [open, high, low, close].every(Number.isFinite) && close > 0 && high >= low && high >= Math.max(open, close) && low <= Math.min(open, close);
-      if (!valid) {
-        results.push({ date: bar && (bar.date ?? bar.timestamp), close: Number.isFinite(close) ? close : null, signal: 'HOLD', support: null, resistance: null, trendCount: 0, spaceResonance: false });
-        previous = null;
-        trendCount = 0;
-        atrValues.length = 0;
+      const current = readBar(bar);
+      const hold = { date: bar && (bar.date !== undefined ? bar.date : bar.timestamp), close: current ? current.close : null, signal: 'HOLD', support: null, resistance: null, timeResonance: false, spaceResonance: false, matchedThreshold: null, anchor: null, assetClass: asset.profile };
+      if (!current || i === 0) {
+        results.push(hold);
         continue;
       }
 
-      const previousTrendCount = trendCount;
-      const previousAtr = atrValues.length === ATR_PERIOD ? atrValues.reduce((sum, value) => sum + value, 0) / ATR_PERIOD : null;
-      let trueRange = high - low;
-      if (previous) trueRange = Math.max(trueRange, Math.abs(high - previous.close), Math.abs(low - previous.close));
-
-      if (previous) {
-        if (close > previous.close) trendCount = trendCount > 0 ? trendCount + 1 : 1;
-        else if (close < previous.close) trendCount = trendCount < 0 ? trendCount - 1 : -1;
-        else trendCount = 0;
-      } else {
-        trendCount = 0;
+      const start = yearWindowStart(klineData, i, period);
+      const highAnchor = findAnchor(klineData, start, i, 'high', true);
+      const lowStart = asset.longTermLow ? 0 : start;
+      const lowAnchor = findAnchor(klineData, lowStart, i, 'low', false);
+      const previous = readBar(klineData[i - 1]);
+      const prior = i > 1 ? readBar(klineData[i - 2]) : null;
+      if (!highAnchor || !lowAnchor || !previous || !prior) {
+        results.push(hold);
+        continue;
       }
 
-      const support = previous && previousAtr !== null ? previous.close - previousAtr * LOWER_ATR_FACTOR : null;
-      const resistance = previous && previousAtr !== null ? previous.close + previousAtr * UPPER_ATR_FACTOR : null;
-      const nearestMultiplier = close > 0 ? Math.round(close / BASE_NUM) : 0;
-      const deviation = nearestMultiplier > 0 ? Math.abs(close - BASE_NUM * nearestMultiplier) / close : Infinity;
-      const spaceResonance = usesAbsoluteResonance && deviation < 0.015;
-      const timeResonance = timeWindows.includes(Math.abs(previousTrendCount));
-      const enoughHistory = previousAtr !== null;
-      const bullishReversal = previousTrendCount < 0 && close > open;
-      const bearishReversal = previousTrendCount > 0 && close < open;
-      const supportReclaimed = support !== null && low <= support && close > support;
-      const resistanceRejected = resistance !== null && high >= resistance && close < resistance;
+      const barsFromHigh = i - highAnchor.index;
+      const barsFromLow = i - lowAnchor.index;
+      const buyTimeMatch = TIME_WINDOW_SET.has(barsFromHigh);
+      const sellTimeMatch = TIME_WINDOW_SET.has(barsFromLow);
+      const downtrend = previous.close < prior.close && previous.close < highAnchor.price;
+      const uptrend = previous.close > prior.close && previous.close > lowAnchor.price;
+      const bullishReversal = downtrend && current.close > current.open && current.close > previous.close;
+      const bearishReversal = uptrend && current.close < current.open && current.close < previous.close;
+      const support = highAnchor.price * (1 - asset.levels[0] / 100);
+      const resistance = lowAnchor.price * (1 + asset.levels[0] / 100);
       let signal = 'HOLD';
+      let matchedThreshold = null;
+      let spaceResonance = false;
 
-      if (enoughHistory && timeResonance) {
-        if (bullishReversal && (supportReclaimed || spaceResonance)) signal = 'STRONG_IN';
-        else if (bearishReversal && (resistanceRejected || spaceResonance)) signal = 'STRONG_OUT';
+      if (buyTimeMatch && bullishReversal) {
+        for (const threshold of asset.levels) {
+          const level = highAnchor.price * (1 - threshold / 100);
+          if (current.low <= level && current.close > level) {
+            signal = 'STRONG_BUY';
+            matchedThreshold = threshold;
+            spaceResonance = true;
+            break;
+          }
+        }
       }
 
-      results.push({ date: bar.date ?? bar.timestamp, close, signal, support, resistance, trendCount, spaceResonance });
-      atrValues.push(trueRange);
-      if (atrValues.length > ATR_PERIOD) atrValues.shift();
-      previous = { close };
+      if (sellTimeMatch && bearishReversal) {
+        for (const threshold of asset.levels) {
+          const level = lowAnchor.price * (1 + threshold / 100);
+          if (current.high >= level && current.close < level) {
+            if (signal === 'STRONG_BUY') {
+              signal = 'HOLD';
+              matchedThreshold = null;
+            } else {
+              signal = 'CRITICAL_SELL';
+              matchedThreshold = threshold;
+            }
+            spaceResonance = true;
+            break;
+          }
+        }
+      }
+
+      results.push({
+        date: bar.date !== undefined ? bar.date : bar.timestamp,
+        close: current.close,
+        signal: signal,
+        support: support,
+        resistance: resistance,
+        timeResonance: buyTimeMatch || sellTimeMatch,
+        spaceResonance: spaceResonance,
+        matchedThreshold: matchedThreshold,
+        anchor: signal === 'STRONG_BUY' ? highAnchor : (signal === 'CRITICAL_SELL' ? lowAnchor : null),
+        barsFromHigh: barsFromHigh,
+        barsFromLow: barsFromLow,
+        assetClass: asset.profile
+      });
     }
     return results;
   }
 
-  if (typeof window !== 'undefined') window.calculateCosmicSignal = calculateCosmicSignal;
+  if (typeof window !== 'undefined') {
+    window.calculateCosmicReversalSignal = calculateCosmicReversalSignal;
+    window.calculateCosmicSignal = calculateCosmicReversalSignal;
+  }
 })();

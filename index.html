@@ -181,6 +181,8 @@ button:active{transform:scale(0.98)}
 <span id="live-price" class="tag-win" style="font-size:14px">--</span>
 </div>
 <div id="signal" class="signal sig-neutral">等待輸入...</div>
+<div id="cosmic-status" class="tag" style="display:block;text-align:center;margin:4px 0;color:#fbbf24">🟡 STATUS: HOLD · 實驗訊號</div>
+<div class="tag" style="display:block;text-align:center;color:#94a3b8">下一棒開市價模擬成交；未計手續費及滑點</div>
 <div class="stats-panel">
 <div class="stat-card"><div class="label">總收益率</div><div class="value" id="totalReturn">--</div></div>
 <div class="stat-card"><div class="label">勝率</div><div class="value profit" id="winRate">--</div></div>
@@ -690,57 +692,88 @@ return modelData;
 }
 
 function runBacktestEngine(modelData) {
-let position = 0;
-let entryPrice = 0;
-let currentFund = parseFloat(document.getElementById('fund').value) || 100000;
-const initialFund = currentFund;
-const trades = [];
-const logs = [];
-let maxDrawdown = 0;
-let peakFund = initialFund;
-modelData.forEach((item, idx) => {
-if (currentFund > peakFund) peakFund = currentFund;
-const drawdown = ((peakFund - currentFund) / peakFund) * 100;
-if (drawdown > maxDrawdown) maxDrawdown = drawdown;
-if (item.buySignal && position === 0) {
-position = 1;
-entryPrice = item.c;
-logs.push({ type: 'buy', msg: `[${item.date}] 🔴 買入 @ ${item.c.toFixed(2)} | 歸元:${item.priceGuiYuan} | 情感:${item.sentiment}` });
-}
-else if (item.sellSignal && position === 1) {
-position = 0;
-const profit = (item.c - entryPrice) * (initialFund / entryPrice);
-currentFund += profit;
-logs.push({ type: 'sell', msg: `[${item.date}] 🟢 賣出 @ ${item.c.toFixed(2)} | 盈虧: ${profit.toFixed(2)}` });
-trades.push({ profit: profit / initialFund });
-}
-});
-if (position === 1) {
-const last = modelData[modelData.length - 1];
-const profit = (last.c - entryPrice) * (initialFund / entryPrice);
-currentFund += profit;
-logs.push({ type: 'sell', msg: `[回測結束] ⚪ 強制平倉 @ ${last.c.toFixed(2)}` });
-}
-const totalReturn = ((currentFund - initialFund) / initialFund * 100).toFixed(2);
-const winTrades = trades.filter(t => t.profit > 0);
-const winRate = trades.length > 0 ? (winTrades.length / trades.length * 100).toFixed(2) : 0;
-const totalWin = winTrades.reduce((sum, t) => sum + t.profit, 0);
-const totalLoss = Math.abs(trades.filter(t => t.profit <= 0).reduce((sum, t) => sum + t.profit, 0));
-const profitLossRatio = totalLoss > 0 ? (totalWin / totalLoss).toFixed(2) : "無限";
-const dayCount = modelData.length;
-const annualReturn = dayCount > 0 ? ((Math.pow(1 + totalReturn/100, 252/dayCount) - 1) * 100).toFixed(2) : 0;
-return {
-stats: {
-totalReturn, winRate, profitLossRatio, maxDrawdown: maxDrawdown.toFixed(2),
-finalFund: currentFund.toFixed(2), tradeCount: trades.length, annualReturn
-},
-logs
-};
+  const configuredFund = Number.parseFloat(document.getElementById('fund').value);
+  const initialFund = Number.isFinite(configuredFund) && configuredFund > 0 ? configuredFund : 100000;
+  let cash = initialFund;
+  let shares = 0;
+  let entryCapital = 0;
+  let entryPrice = 0;
+  let peakEquity = initialFund;
+  let maxDrawdown = 0;
+  const trades = [];
+  const logs = [];
+
+  for (let idx = 0; idx < modelData.length; idx += 1) {
+    const item = modelData[idx];
+    const close = Number(item.c);
+    if (idx > 0) {
+      const signalBar = modelData[idx - 1];
+      const rawOpen = Number(item.o);
+      const executionPrice = Number.isFinite(rawOpen) && rawOpen > 0 ? rawOpen : close;
+      if (signalBar.buySignal && shares === 0 && cash > 0 && executionPrice > 0) {
+        entryCapital = cash;
+        entryPrice = executionPrice;
+        shares = cash / executionPrice;
+        cash = 0;
+        logs.push({ type: 'buy', msg: '[' + signalBar.date + '] STRONG BUY; next-bar open @ ' + executionPrice.toFixed(2) });
+      } else if (signalBar.sellSignal && shares > 0 && executionPrice > 0) {
+        cash = shares * executionPrice;
+        const profit = cash - entryCapital;
+        trades.push({ profit: entryCapital > 0 ? profit / entryCapital : 0 });
+        logs.push({ type: 'sell', msg: '[' + signalBar.date + '] CRITICAL SELL; next-bar open @ ' + executionPrice.toFixed(2) + ' | P/L ' + profit.toFixed(2) });
+        shares = 0;
+        entryCapital = 0;
+        entryPrice = 0;
+      }
+    }
+    const equity = cash + (shares > 0 && Number.isFinite(close) ? shares * close : 0);
+    if (equity > peakEquity) peakEquity = equity;
+    if (peakEquity > 0) maxDrawdown = Math.max(maxDrawdown, ((peakEquity - equity) / peakEquity) * 100);
+  }
+
+  if (shares > 0 && modelData.length > 0) {
+    const last = modelData[modelData.length - 1];
+    const exitPrice = Number(last.c);
+    if (Number.isFinite(exitPrice) && exitPrice > 0) {
+      cash = shares * exitPrice;
+      const profit = cash - entryCapital;
+      trades.push({ profit: entryCapital > 0 ? profit / entryCapital : 0 });
+      logs.push({ type: 'sell', msg: '[回測結束] 強制平倉 @ ' + exitPrice.toFixed(2) + ' | P/L ' + profit.toFixed(2) });
+    }
+  }
+
+  const totalReturn = initialFund > 0 ? ((cash - initialFund) / initialFund * 100) : 0;
+  const winningTrades = trades.filter(function(trade) { return trade.profit > 0; });
+  const losingTrades = trades.filter(function(trade) { return trade.profit <= 0; });
+  const totalWin = winningTrades.reduce(function(sum, trade) { return sum + trade.profit; }, 0);
+  const totalLoss = Math.abs(losingTrades.reduce(function(sum, trade) { return sum + trade.profit; }, 0));
+  const period = document.getElementById('period').value;
+  const barsPerYear = period === 'weekly' ? 52 : (period === '5min' ? 19656 : 252);
+  const annualReturn = modelData.length > 0 && totalReturn > -100 ? (Math.pow(1 + totalReturn / 100, barsPerYear / modelData.length) - 1) * 100 : (totalReturn <= -100 ? -100 : 0);
+  return {
+    stats: {
+      totalReturn: totalReturn.toFixed(2),
+      winRate: trades.length > 0 ? (winningTrades.length / trades.length * 100).toFixed(2) : '0.00',
+      profitLossRatio: totalLoss > 0 ? (totalWin / totalLoss).toFixed(2) : (totalWin > 0 ? '無虧損交易' : '0.00'),
+      maxDrawdown: maxDrawdown.toFixed(2),
+      finalFund: cash.toFixed(2),
+      tradeCount: trades.length,
+      annualReturn: annualReturn.toFixed(2)
+    },
+    logs: logs
+  };
 }
 
 function renderChart(modelData, isReplay = false) {
 if (!modelData || modelData.length === 0) return;
 const dataToRender = isReplay ? modelData.slice(0, replayIndex + 1) : modelData;
+const statusBar = dataToRender[dataToRender.length - 1];
+const statusEl = document.getElementById('cosmic-status');
+if (statusEl && statusBar) {
+  const statusSignal = statusBar.reversalSignal || 'HOLD';
+  statusEl.textContent = statusSignal === 'STRONG_BUY' ? '🟢 STRONG BUY · 時空共振' : (statusSignal === 'CRITICAL_SELL' ? '🔴 CRITICAL SELL · 時空共振' : '🟡 STATUS: HOLD · 實驗訊號');
+  statusEl.style.color = statusSignal === 'STRONG_BUY' ? '#34d399' : (statusSignal === 'CRITICAL_SELL' ? '#f87171' : '#fbbf24');
+}
 const ctx = document.getElementById('priceChart').getContext('2d');
 if (priceChart) priceChart.destroy();
 
@@ -1353,6 +1386,19 @@ if (rawData.length === 0) return;
 const newsList = await fetchSymbolNews(symbol, assetType);
 const sentiment = await analyzeNewsSentiment(newsList, symbol);
 currentModelData = calculateModel(rawData, coreNum, sentiment);
+const reversalSignals = window.calculateCosmicReversalSignal(rawData, cycle, symbol, assetType);
+currentModelData = currentModelData.map((bar, index) => {
+  const result = reversalSignals[index] || { signal: 'HOLD' };
+  return {
+    ...bar,
+    reversalSignal: result.signal || 'HOLD',
+    reversalSupport: result.support,
+    reversalResistance: result.resistance,
+    reversalAnchor: result.anchor,
+    buySignal: result.signal === 'STRONG_BUY',
+    sellSignal: result.signal === 'CRITICAL_SELL'
+  };
+});
 const { stats, logs } = runBacktestEngine(currentModelData);
 const lastBar = currentModelData[currentModelData.length - 1];
 currentSymbolInfo = {
@@ -1384,12 +1430,12 @@ const resonanceAnalysis = calculate369And142857(lastBar.c, userBuyPrice);
 displayResonanceAnalysis(resonanceAnalysis, lastBar.c, userBuyPrice);
 
 const signalEl = document.getElementById('signal');
-if (lastBar.buySignal) {
-signalEl.className = 'signal sig-buy'; signalEl.innerText = '📈 歸元買入信號';
-} else if (lastBar.sellSignal) {
-signalEl.className = 'signal sig-sell'; signalEl.innerText = '📉 歸元賣出信號';
+if (lastBar.reversalSignal === 'STRONG_BUY') {
+  signalEl.className = 'signal sig-buy'; signalEl.innerText = '🟢 STRONG BUY（實驗策略）';
+} else if (lastBar.reversalSignal === 'CRITICAL_SELL') {
+  signalEl.className = 'signal sig-sell'; signalEl.innerText = '🔴 CRITICAL SELL（實驗策略）';
 } else {
-signalEl.className = 'signal sig-neutral'; signalEl.innerText = '⚖️ 震盪區間';
+  signalEl.className = 'signal sig-neutral'; signalEl.innerText = '🟡 STATUS: HOLD';
 }
 document.getElementById('logContainer').innerHTML = logs.map(l => 
 `<div style="color:${l.type === 'buy' ? '#10b981' : '#ef4444'}; margin:2px 0">${l.msg}</div>`
@@ -1441,10 +1487,12 @@ async function runBatchScan() {
     
     const modelData = calculateModel(rawData, CONFIG.coreNumber);
     const lastBar = modelData[modelData.length - 1];
+    const signalRows = window.calculateCosmicReversalSignal(rawData, 'daily', symbol, 'stock');
+    const lastSignal = signalRows[signalRows.length - 1] || { signal: 'HOLD' };
     
-    let signal = "⚖️ 觀望";
-    if (lastBar.buySignal) signal = "📈 買入信號";
-    if (lastBar.sellSignal) signal = "📉 賣出信號";
+    let signal = '🟡 STATUS: HOLD';
+    if (lastSignal.signal === 'STRONG_BUY') signal = '🟢 STRONG BUY';
+    if (lastSignal.signal === 'CRITICAL_SELL') signal = '🔴 CRITICAL SELL';
     
     scanResults.push({
       symbol,
