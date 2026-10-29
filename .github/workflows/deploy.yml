@@ -3,7 +3,8 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches:
-      - master
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -27,7 +28,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 20
           cache: 'npm'
 
       - name: Install dependencies
@@ -35,6 +36,13 @@ jobs:
 
       - name: Build project
         run: npm run build
+
+      - name: Verify dist
+        run: |
+          if [ ! -f ./dist/index.html ]; then
+            echo "ERROR: dist/index.html not generated"
+            exit 1
+          fi
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
