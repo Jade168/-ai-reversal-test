@@ -2,6 +2,8 @@
 config.py
 .env
 *.key
+node_modules/
+dist/
 
 # Python緩存
 __pycache__/

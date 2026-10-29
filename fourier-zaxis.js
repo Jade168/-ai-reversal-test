@@ -1,7 +1,7 @@
 (function(){
 console.log('📐 Z轴模块 v32.2 | 加法版预测线 + 技术指标融合');
 
-var C = { fixedLen: 200, topN: 5, forecastDays: 20 };
+var C = { fixedLen: 3000, topN: 5, forecastDays: 20 };
 var prices = [], fullSpectrum = [], spectrum = [], prob = { up: 33, down: 33, flat: 34 };
 var ribbon = { color: 'gray', trend: 'flat', strength: 0 };
 var techInfo = { score: 0, detail: '' };
@@ -451,43 +451,67 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
 else init();
 })();
 
-// 142857 / 1836.15 reversal experiment. Historical anchors use prior bars only.
+// 142857 / 1836.15 时空双重共振锁（完全体重构版）
 (function attachCosmicReversalSignal() {
   const TIME_WINDOWS = Object.freeze([14, 28, 57, 142, 285, 571]);
   const TIME_TOLERANCE_BARS = 1;
   const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
   const INDEX_LEVELS = Object.freeze([1.836, 18.36, 36.72]);
-  const OTHER_LEVELS = Object.freeze([14.28, 28.57, 57.14]);
-  const SPACE_TOLERANCE_PERCENT = 1.5;
-  function matchesTimeWindow(distance) {
-    return TIME_WINDOWS.some(function(windowSize) { return Math.abs(distance - windowSize) <= TIME_TOLERANCE_BARS; });
+  const STOCK_LEVELS = Object.freeze([14.28, 18.36, 28.57, 36.72, 57.14]);
+  const SPACE_TOLERANCE_PERCENT = 1.5; // ±1.5% 引力容错窗口
+
+  const INDEX_SYMBOLS = new Set([
+    'DJI', '^DJI', 'GSPC', '^GSPC', 'SPX', '^SPX', 'NDX', '^NDX',
+    'IXIC', '^IXIC', 'HSI', '^HSI', 'N225', '^N225', '000001.SH', '399001.SZ'
+  ]);
+
+  function isPlaceholderValue(val) {
+    if (val === null || val === undefined || val === '') return true;
+    const num = Number(val);
+    if (!Number.isFinite(num) || num <= 0) return true;
+    // 彻底过滤输入框初始预设值 1836.15 或 0.08 的占位污染
+    if (Math.abs(num - 1836.15) < 0.0001 || Math.abs(num - 0.08) < 0.0001) return true;
+    return false;
   }
 
-  const INDEX_SYMBOLS = new Set(['DJI', '^DJI', 'GSPC', '^GSPC', 'SPX', '^SPX', 'NDX', '^NDX', 'IXIC', '^IXIC', 'HSI', '^HSI', 'N225', '^N225']);
+  function matchesTimeWindow(distance) {
+    return TIME_WINDOWS.some(function(windowSize) {
+      return Math.abs(distance - windowSize) <= TIME_TOLERANCE_BARS;
+    });
+  }
 
   function readBar(bar) {
     if (!bar || typeof bar !== 'object') return null;
-    const open = Number(bar.o);
-    const high = Number(bar.h);
-    const low = Number(bar.l);
-    const close = Number(bar.c);
-    if (![open, high, low, close].every(Number.isFinite) || open <= 0 || close <= 0 || high < low || high < Math.max(open, close) || low > Math.min(open, close)) return null;
+    const open = Number(bar.o !== undefined ? bar.o : bar.open);
+    const high = Number(bar.h !== undefined ? bar.h : bar.high);
+    const low = Number(bar.l !== undefined ? bar.l : bar.low);
+    const close = Number(bar.c !== undefined ? bar.c : bar.close);
+
+    // 严密检查数值合法性及占位异常
+    if (![open, high, low, close].every(Number.isFinite)) return null;
+    if (open <= 0 || close <= 0 || high <= 0 || low <= 0) return null;
+    if (isPlaceholderValue(close) || isPlaceholderValue(open)) return null;
+    if (high < low || high < Math.max(open, close) || low > Math.min(open, close)) return null;
+
     return { open: open, high: high, low: low, close: close };
   }
 
   function readTime(bar) {
     if (!bar) return null;
     const raw = bar.timestamp !== undefined && bar.timestamp !== null ? bar.timestamp : bar.date;
-    if (typeof raw === 'number' && Number.isFinite(raw)) return raw < 1000000000000 ? raw * 1000 : raw;
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+      return raw < 1000000000000 ? raw * 1000 : raw;
+    }
     if (raw === undefined || raw === null) return null;
     const parsed = Date.parse(String(raw));
     return Number.isFinite(parsed) ? parsed : null;
   }
 
   function yearWindowStart(data, index, period) {
+    const lookbackYears = period === 'monthly' ? 18 : (period === 'weekly' ? 8 : 3);
     const now = readTime(data[index]);
     if (now !== null) {
-      const cutoff = now - YEAR_MS;
+      const cutoff = now - (YEAR_MS * lookbackYears);
       let start = index;
       while (start > 0) {
         const priorTime = readTime(data[start - 1]);
@@ -496,8 +520,8 @@ else init();
       }
       return start;
     }
-    const barsPerYear = period === 'weekly' ? 52 : (period === '5min' ? 19656 : 252);
-    return Math.max(0, index - barsPerYear);
+    const barsPerYear = period === 'monthly' ? 12 : (period === 'weekly' ? 52 : (period === '5min' ? 19656 : 252));
+    return Math.max(0, index - (barsPerYear * lookbackYears));
   }
 
   function findAnchor(data, start, end, field, highest) {
@@ -507,7 +531,11 @@ else init();
       if (!values) continue;
       const value = values[field];
       if (!anchor || (highest ? value > anchor.price : value < anchor.price)) {
-        anchor = { index: i, price: value, date: data[i].date !== undefined ? data[i].date : data[i].timestamp };
+        anchor = {
+          index: i,
+          price: value,
+          date: data[i].date !== undefined ? data[i].date : data[i].timestamp
+        };
       }
     }
     return anchor;
@@ -519,31 +547,166 @@ else init();
     const preciousMetal = /^(XAU|XAG|GOLD|SILVER|GLD|SLV|GC=F|SI=F)/.test(symbol) || type === 'precious-metal';
     const isIndex = type === 'index' || INDEX_SYMBOLS.has(symbol);
     const profile = isIndex ? 'index' : (preciousMetal ? 'precious-metal' : 'stock-or-commodity');
-    return { profile: profile, levels: isIndex || preciousMetal ? INDEX_LEVELS : OTHER_LEVELS, longTermLow: isIndex };
+    return {
+      profile: profile,
+      levels: isIndex || preciousMetal ? INDEX_LEVELS : STOCK_LEVELS,
+      longTermLow: isIndex
+    };
+  }
+
+  /**
+   * 【檢測拆股跳空並自動前復權回溯調整函數】
+   * 
+   * 核心邏輯：
+   * 1. 檢測相鄰交易日之間因拆股（Stock Split）導致的超過 40% 的非自然價格暴跌（如 1:2, 1:3, 1:4, 1:5, 1:10 等），
+   *    或因合股（Reverse Split）導致的超過 66% 的非自然暴漲。
+   * 2. 計算精確拆股比率 (factor = curr.open / prev.close)，優先對齊標準金融拆股比例（容錯 ±6%）。
+   * 3. 確保價格連續性：將拆股發生日之前的所有歷史 K 線 (0 到 i-1) 的開高低收價格統一乘以該比例進行前復權 (Backward-Adjusted)，
+   *    並將成交量做等比反向調整，維持成交總市值守恆。
+   * 4. 徹底消除圖表垂直斷裂線，保證 1836.15 及 142857 重力容錯計算不受斷層偽信號干擾。
+   */
+  function adjustKlinesForSplits(klines) {
+    if (!Array.isArray(klines) || klines.length < 2) return klines;
+
+    var adjusted = klines.map(function(k) {
+      if (typeof k === 'object' && k !== null) {
+        return Object.assign({}, k);
+      }
+      return k;
+    });
+
+    for (var i = 1; i < adjusted.length; i++) {
+      var prev = readBar(adjusted[i - 1]);
+      var curr = readBar(adjusted[i]);
+
+      if (!prev || !curr || prev.close <= 0 || curr.open <= 0) continue;
+
+      var ratio = curr.open / prev.close;
+      var isSplitDrop = ratio < 0.60;
+      var isReverseSplit = ratio > 1.66;
+
+      if (isSplitDrop || isReverseSplit) {
+        var commonSplitRatios = [
+          1 / 2,   // 2-for-1 (0.50)
+          1 / 3,   // 3-for-1 (0.3333)
+          1 / 4,   // 4-for-1 (0.25)
+          1 / 5,   // 5-for-1 (0.20 如 TSLA 2020)
+          1 / 7,   // 7-for-1 (0.1428 如 AAPL 2014)
+          1 / 8,   // 8-for-1 (0.125)
+          1 / 10,  // 10-for-1 (0.10 如 NVDA 2024)
+          1 / 15,  // 15-for-1 (0.0667)
+          1 / 20,  // 20-for-1 (0.05 如 AMZN / GOOGL 2022)
+          2 / 1,   // 1-for-2 反向合股
+          3 / 1,   // 1-for-3 反向合股
+          4 / 1,   // 1-for-4 反向合股
+          5 / 1,   // 1-for-5 反向合股
+          10 / 1   // 1-for-10 反向合股
+        ];
+
+        var factor = ratio;
+        for (var k = 0; k < commonSplitRatios.length; k++) {
+          var std = commonSplitRatios[k];
+          if (Math.abs(ratio - std) / std <= 0.06) {
+            factor = std;
+            break;
+          }
+        }
+
+        for (var j = 0; j < i; j++) {
+          var barObj = adjusted[j];
+          if (barObj && typeof barObj === 'object') {
+            if (barObj.o !== undefined) barObj.o = Number((barObj.o * factor).toFixed(4));
+            if (barObj.open !== undefined) barObj.open = Number((barObj.open * factor).toFixed(4));
+            if (barObj.h !== undefined) barObj.h = Number((barObj.h * factor).toFixed(4));
+            if (barObj.high !== undefined) barObj.high = Number((barObj.high * factor).toFixed(4));
+            if (barObj.l !== undefined) barObj.l = Number((barObj.l * factor).toFixed(4));
+            if (barObj.low !== undefined) barObj.low = Number((barObj.low * factor).toFixed(4));
+            if (barObj.c !== undefined) barObj.c = Number((barObj.c * factor).toFixed(4));
+            if (barObj.close !== undefined) barObj.close = Number((barObj.close * factor).toFixed(4));
+
+            if (factor > 0) {
+              if (barObj.vol !== undefined) barObj.vol = Math.round(barObj.vol / factor);
+              if (barObj.volume !== undefined) barObj.volume = Math.round(barObj.volume / factor);
+            }
+          }
+        }
+      }
+    }
+
+    return adjusted;
   }
 
   function calculateCosmicReversalSignal(klineData, currentPeriod, ticker, assetType) {
     if (!Array.isArray(klineData) || klineData.length === 0) return [];
+
+    // ==========================================
+    // 1. 【彻底过滤垂直断裂线】
+    // 严格检查并剔除结尾与中间的无效占位棒线（0、空串、1836.15、0.08）
+    // ==========================================
+    const cleanKlines = [];
+    for (let idx = 0; idx < klineData.length; idx += 1) {
+      const bar = klineData[idx];
+      const parsed = readBar(bar);
+      if (parsed) {
+        cleanKlines.push(bar);
+      }
+    }
+
+    // 进一步防范末端伪造断裂棒
+    while (cleanKlines.length > 0) {
+      const lastBar = cleanKlines[cleanKlines.length - 1];
+      const parsed = readBar(lastBar);
+      if (!parsed || isPlaceholderValue(parsed.close) || isPlaceholderValue(parsed.open)) {
+        cleanKlines.pop();
+      } else {
+        break;
+      }
+    }
+
+    if (cleanKlines.length === 0) return [];
+
+    // ==========================================
+    // 2. 【前復權與拆股跳空自動修正】
+    // 檢測相鄰超過 40% 的非自然價格暴跌並向前復權調整，確保價格連續性
+    // ==========================================
+    const processedKlines = adjustKlinesForSplits(cleanKlines);
+
     const period = String(currentPeriod || 'daily').toLowerCase();
     const asset = assetProfile(ticker, assetType);
     const results = [];
 
-    for (let i = 0; i < klineData.length; i += 1) {
-      const bar = klineData[i];
+    // ==========================================
+    // 3. 【实现引力容错窗口，解锁买卖提示】
+    // ==========================================
+    for (let i = 0; i < processedKlines.length; i += 1) {
+      const bar = processedKlines[i];
       const current = readBar(bar);
-      const hold = { date: bar && (bar.date !== undefined ? bar.date : bar.timestamp), close: current ? current.close : null, signal: 'HOLD', support: null, resistance: null, timeResonance: false, spaceResonance: false, matchedThreshold: null, anchor: null, assetClass: asset.profile };
-      if (!current || i === 0) {
+      const hold = {
+        date: bar && (bar.date !== undefined ? bar.date : bar.timestamp),
+        close: current ? current.close : null,
+        signal: 'HOLD',
+        support: null,
+        resistance: null,
+        timeResonance: false,
+        spaceResonance: false,
+        matchedThreshold: null,
+        anchor: null,
+        assetClass: asset.profile
+      };
+
+      if (!current || i < 2) {
         results.push(hold);
         continue;
       }
 
-      const start = yearWindowStart(klineData, i, period);
-      const highAnchor = findAnchor(klineData, start, i, 'high', true);
+      const start = yearWindowStart(processedKlines, i, period);
+      const highAnchor = findAnchor(processedKlines, start, i, 'high', true);
       const lowStart = asset.longTermLow ? 0 : start;
-      const lowAnchor = findAnchor(klineData, lowStart, i, 'low', false);
-      const previous = readBar(klineData[i - 1]);
-      const prior = i > 1 ? readBar(klineData[i - 2]) : null;
-      if (!highAnchor || !lowAnchor || !previous || !prior) {
+      const lowAnchor = findAnchor(processedKlines, lowStart, i, 'low', false);
+      const previous = readBar(processedKlines[i - 1]);
+      const prior = i > 1 ? readBar(processedKlines[i - 2]) : null;
+
+      if (!highAnchor || !lowAnchor || highAnchor.price <= 0 || lowAnchor.price <= 0 || !previous || !prior) {
         results.push(hold);
         continue;
       }
@@ -552,41 +715,63 @@ else init();
       const barsFromLow = i - lowAnchor.index;
       const buyTimeMatch = matchesTimeWindow(barsFromHigh);
       const sellTimeMatch = matchesTimeWindow(barsFromLow);
+
+      // 形态确认
       const downtrend = previous.close < prior.close && previous.close < highAnchor.price;
       const uptrend = previous.close > prior.close && previous.close > lowAnchor.price;
       const bullishReversal = downtrend && current.close > current.open && current.close > previous.close;
       const bearishReversal = uptrend && current.close < current.open && current.close < previous.close;
+
       const support = highAnchor.price * (1 - asset.levels[0] / 100);
       const resistance = lowAnchor.price * (1 + asset.levels[0] / 100);
+
       let signal = 'HOLD';
       let matchedThreshold = null;
       let spaceResonance = false;
 
-      if (buyTimeMatch && bullishReversal) {
-        const drawdownPercent = ((highAnchor.price - current.low) / highAnchor.price) * 100;
-        const threshold = asset.levels.find(function(value) { return Math.abs(drawdownPercent - value) <= SPACE_TOLERANCE_PERCENT; });
-        if (threshold !== undefined) {
-          const level = highAnchor.price * (1 - threshold / 100);
-          if (current.close > level) {
+      // STRONG BUY：时间窗口共振 + 空间引力容错窗口(±1.5%) + 支撑位企稳收复
+      if (buyTimeMatch && (bullishReversal || current.close > current.open)) {
+        const drawdownLow = ((highAnchor.price - current.low) / highAnchor.price) * 100;
+        const drawdownClose = ((highAnchor.price - current.close) / highAnchor.price) * 100;
+
+        const matchedLevel = asset.levels.find(function(lvl) {
+          return (
+            Math.abs(drawdownLow - lvl) <= SPACE_TOLERANCE_PERCENT ||
+            Math.abs(drawdownClose - lvl) <= SPACE_TOLERANCE_PERCENT
+          );
+        });
+
+        if (matchedLevel !== undefined) {
+          const supportLevel = highAnchor.price * (1 - (matchedLevel + SPACE_TOLERANCE_PERCENT) / 100);
+          if (current.close >= supportLevel) {
             signal = 'STRONG_BUY';
-            matchedThreshold = threshold;
+            matchedThreshold = matchedLevel;
             spaceResonance = true;
           }
         }
       }
 
-      if (sellTimeMatch && bearishReversal) {
-        const reboundPercent = ((current.high - lowAnchor.price) / lowAnchor.price) * 100;
-        const threshold = asset.levels.find(function(value) { return Math.abs(reboundPercent - value) <= SPACE_TOLERANCE_PERCENT; });
-        if (threshold !== undefined) {
-          const level = lowAnchor.price * (1 + threshold / 100);
-          if (current.close < level) {
+      // CRITICAL SELL：时间窗口共振 + 空间引力容错窗口(±1.5%) + 阻力位受阻回落
+      if (sellTimeMatch && (bearishReversal || current.close < current.open)) {
+        const reboundHigh = ((current.high - lowAnchor.price) / lowAnchor.price) * 100;
+        const reboundClose = ((current.close - lowAnchor.price) / lowAnchor.price) * 100;
+
+        const matchedLevel = asset.levels.find(function(lvl) {
+          return (
+            Math.abs(reboundHigh - lvl) <= SPACE_TOLERANCE_PERCENT ||
+            Math.abs(reboundClose - lvl) <= SPACE_TOLERANCE_PERCENT
+          );
+        });
+
+        if (matchedLevel !== undefined) {
+          const resistanceLevel = lowAnchor.price * (1 + (matchedLevel - SPACE_TOLERANCE_PERCENT) / 100);
+          if (current.close <= resistanceLevel || current.high >= resistanceLevel) {
             if (signal === 'STRONG_BUY') {
               signal = 'HOLD';
               matchedThreshold = null;
             } else {
               signal = 'CRITICAL_SELL';
-              matchedThreshold = threshold;
+              matchedThreshold = matchedLevel;
             }
             spaceResonance = true;
           }
@@ -608,11 +793,113 @@ else init();
         assetClass: asset.profile
       });
     }
+
     return results;
+  }
+
+  function getAdaptiveWindowSize(timeframe) {
+    var tf = String(timeframe || '').toLowerCase();
+    switch (tf) {
+      case '5m':
+      case '5min':
+        return 12;
+      case '1d':
+      case 'daily':
+        return 5;
+      case '1w':
+      case 'weekly':
+        return 4;
+      case '1m':
+      case 'monthly':
+        return 3;
+      default:
+        return 8;
+    }
+  }
+
+  function calculateDynamicReversals(activeData, timeframe, supportLevels, resistanceLevels) {
+    if (!activeData || activeData.length === 0) return { highs: [], lows: [] };
+    timeframe = timeframe || '1d';
+    supportLevels = supportLevels || [];
+    resistanceLevels = resistanceLevels || [];
+
+    var windowSize = getAdaptiveWindowSize(timeframe);
+    var highs = [];
+    var lows = [];
+    var tolerance = 0.015;
+
+    for (var i = 0; i < activeData.length; i++) {
+      var start = Math.max(0, i - windowSize);
+      var end = Math.min(activeData.length - 1, i + windowSize);
+
+      var currentBar = activeData[i];
+      var currentHigh = Number.isFinite(currentBar.h) ? currentBar.h : Number(currentBar.high || currentBar.c || 0);
+      var currentLow = Number.isFinite(currentBar.l) ? currentBar.l : Number(currentBar.low || currentBar.c || 0);
+      var currentClose = Number.isFinite(currentBar.c) ? currentBar.c : Number(currentBar.close || 0);
+
+      var isLocalHigh = true;
+      var isLocalLow = true;
+
+      for (var j = start; j <= end; j++) {
+        var b = activeData[j];
+        var h = Number.isFinite(b.h) ? b.h : Number(b.high || b.c || 0);
+        var l = Number.isFinite(b.l) ? b.l : Number(b.low || b.c || 0);
+        if (h > currentHigh) isLocalHigh = false;
+        if (l < currentLow) isLocalLow = false;
+      }
+
+      var gyHigh = (Math.abs(Math.floor(currentHigh)) % 9) || 9;
+      var gyLow = (Math.abs(Math.floor(currentLow)) % 9) || 9;
+
+      var effectiveSupports = supportLevels.slice();
+      if (currentBar.supportLine1 && currentBar.supportLine1 > 0) effectiveSupports.push(currentBar.supportLine1);
+      if (currentBar.supportLine2 && currentBar.supportLine2 > 0) effectiveSupports.push(currentBar.supportLine2);
+      if (currentBar.reversalSupport && currentBar.reversalSupport > 0) effectiveSupports.push(currentBar.reversalSupport);
+
+      var effectiveResistances = resistanceLevels.slice();
+      if (currentBar.resistanceLine && currentBar.resistanceLine > 0) effectiveResistances.push(currentBar.resistanceLine);
+      if (currentBar.reversalResistance && currentBar.reversalResistance > 0) effectiveResistances.push(currentBar.reversalResistance);
+
+      var isAtSupport = effectiveSupports.some(function(level) {
+        return Math.abs(currentLow - level) / level <= tolerance ||
+               Math.abs(currentClose - level) / level <= tolerance ||
+               currentLow <= level;
+      });
+
+      var isAtResistance = effectiveResistances.some(function(level) {
+        return Math.abs(currentHigh - level) / level <= tolerance ||
+               Math.abs(currentClose - level) / level <= tolerance ||
+               currentHigh >= level;
+      });
+
+      if (isLocalHigh && (isAtResistance || gyHigh === 3 || gyHigh === 6 || gyHigh === 9 || currentBar.sellSignal || currentBar.reversalSignal === 'CRITICAL_SELL')) {
+        highs.push({
+          index: i,
+          price: currentHigh,
+          label: isAtResistance ? '強阻力高位' : '天花板',
+          isStrong: isAtResistance || Boolean(currentBar.sellSignal),
+          date: currentBar.date
+        });
+      }
+
+      if (isLocalLow && (isAtSupport || gyLow === 3 || gyLow === 6 || gyLow === 9 || currentBar.buySignal || currentBar.reversalSignal === 'STRONG_BUY')) {
+        lows.push({
+          index: i,
+          price: currentLow,
+          label: isAtSupport ? '強支撐地板' : '地板價',
+          isStrong: isAtSupport || Boolean(currentBar.buySignal),
+          date: currentBar.date
+        });
+      }
+    }
+
+    return { highs: highs, lows: lows };
   }
 
   if (typeof window !== 'undefined') {
     window.calculateCosmicReversalSignal = calculateCosmicReversalSignal;
     window.calculateCosmicSignal = calculateCosmicReversalSignal;
+    window.getAdaptiveWindowSize = getAdaptiveWindowSize;
+    window.calculateDynamicReversals = calculateDynamicReversals;
   }
 })();
