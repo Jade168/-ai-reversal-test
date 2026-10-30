@@ -603,10 +603,13 @@ function assetProfile(ticker: string, assetType: string) {
   return { profile, levels: isIndex || preciousMetal ? INDEX_LEVELS : STOCK_LEVELS, longTermLow: isIndex };
 }
 
-function yearWindowStart(data: RawKline[], index: number, period: string): number {
+function yearWindowStart(data: RawKline[], index: number, period: string, forLow = false): number {
   const now = data[index].timestamp;
-  // 月線追溯15-20年宏觀極值，週線追溯8-10年，日線追溯3-5年
-  const lookbackYears = period === 'monthly' ? 18 : (period === 'weekly' ? 8 : 3);
+  // 高點錨：月線18年、週線8年、日線3年（找大頂，用於量度回落）
+  // 低點錨：月線3年、週線1.5年、日線0.5年（找近期底，否則「反彈%」永遠超過 levels 上限，沽出信號歸零）
+  const lookbackYears = forLow
+    ? (period === 'monthly' ? 3 : (period === 'weekly' ? 1.5 : 0.5))
+    : (period === 'monthly' ? 18 : (period === 'weekly' ? 8 : 3));
   if (Number.isFinite(now)) {
     const cutoff = now - lookbackYears * YEAR_MS;
     let start = index;
@@ -618,7 +621,40 @@ function yearWindowStart(data: RawKline[], index: number, period: string): numbe
     return start;
   }
   const barsPerYear = period === 'monthly' ? 12 : (period === 'weekly' ? 52 : (period === '5min' ? 19656 : 252));
-  return Math.max(0, index - barsPerYear * lookbackYears);
+  return Math.max(0, index - Math.round(barsPerYear * lookbackYears));
+}
+
+
+// 序列版 RSI（供逐根 K 線多指標確認使用）
+function calcRSISeries(prices: number[], period: number = 14): (number | null)[] {
+  const out: (number | null)[] = new Array(prices.length).fill(null);
+  if (prices.length < period + 1) return out;
+  let gains = 0;
+  let losses = 0;
+  for (let i = 1; i <= period; i++) {
+    const d = prices[i] - prices[i - 1];
+    if (d >= 0) gains += d; else losses -= d;
+  }
+  let avgG = gains / period;
+  let avgL = losses / period;
+  out[period] = avgL === 0 ? 100 : 100 - 100 / (1 + avgG / avgL);
+  for (let i = period + 1; i < prices.length; i++) {
+    const d = prices[i] - prices[i - 1];
+    avgG = (avgG * (period - 1) + Math.max(d, 0)) / period;
+    avgL = (avgL * (period - 1) + Math.max(-d, 0)) / period;
+    out[i] = avgL === 0 ? 100 : 100 - 100 / (1 + avgG / avgL);
+  }
+  return out;
+}
+
+// 序列版 MACD 柱狀值（hist），供逐根 K 線多指標確認使用
+function calcMACDHistSeries(prices: number[]): number[] {
+  if (prices.length === 0) return [];
+  const e12 = EMA(prices, 12);
+  const e26 = EMA(prices, 26);
+  const dif = e12.map((v, i) => v - e26[i]);
+  const dea = EMA(dif, 9);
+  return dif.map((v, i) => (v - dea[i]) * 2);
 }
 
 function findAnchor(data: RawKline[], start: number, end: number, field: 'h' | 'l', highest: boolean) {
@@ -664,6 +700,11 @@ export function calculateCosmicReversalSignal(klineData: RawKline[], currentPeri
   const asset = assetProfile(ticker, assetType);
   const results = [];
 
+  // 多指標確認：RSI 與 MACD 序列（獨立於 3/6/9 歸元，提供交叉驗證）
+  const _closes = processedKlines.map(b => b.c);
+  const rsiSeries = calcRSISeries(_closes, 14);
+  const macdHistSeries = calcMACDHistSeries(_closes);
+
   for (let i = 0; i < processedKlines.length; i += 1) {
     const bar = processedKlines[i];
     const hold = {
@@ -686,7 +727,8 @@ export function calculateCosmicReversalSignal(klineData: RawKline[], currentPeri
 
     const start = yearWindowStart(processedKlines, i, period);
     const highAnchor = findAnchor(processedKlines, start, i, 'h', true);
-    const lowStart = asset.longTermLow ? 0 : start;
+    // 低點錨改用較短窗口：長窗口會令「反彈%」超出 levels 上限，沽出信號結構性歸零
+    const lowStart = asset.longTermLow ? 0 : yearWindowStart(processedKlines, i, period, true);
     const lowAnchor = findAnchor(processedKlines, lowStart, i, 'l', false);
     const previous = processedKlines[i - 1];
     const prior = i > 1 ? processedKlines[i - 2] : null;
@@ -713,6 +755,13 @@ export function calculateCosmicReversalSignal(klineData: RawKline[], currentPeri
     let matchedThreshold: number | null = null;
     let spaceResonance = false;
 
+    // 多指標確認（軟否決）：只有 RSI 與 MACD 同時強烈反對方向時才否決，避免過度過濾
+    const curRsi = rsiSeries[i];
+    const macdRising = i > 0 && macdHistSeries[i] > macdHistSeries[i - 1];
+    const macdFalling = i > 0 && macdHistSeries[i] < macdHistSeries[i - 1];
+    const buyIndicatorOk = !((curRsi !== null && curRsi > 65) && macdFalling);
+    const sellIndicatorOk = !((curRsi !== null && curRsi < 35) && macdRising);
+
     // STRONG BUY：时间共振 + 空间引力容错 (±1.5%)
     if (buyTimeMatch && (bullishReversal || bar.c > bar.o)) {
       const drawdownLow = ((highAnchor.price - bar.l) / highAnchor.price) * 100;
@@ -722,7 +771,7 @@ export function calculateCosmicReversalSignal(klineData: RawKline[], currentPeri
         return Math.abs(drawdownLow - lvl) <= SPACE_TOLERANCE_PERCENT || Math.abs(drawdownClose - lvl) <= SPACE_TOLERANCE_PERCENT;
       });
 
-      if (matchedLevel !== undefined) {
+      if (matchedLevel !== undefined && buyIndicatorOk) {
         const supportLevel = highAnchor.price * (1 - (matchedLevel + SPACE_TOLERANCE_PERCENT) / 100);
         if (bar.c >= supportLevel) {
           signal = 'STRONG_BUY';
@@ -741,7 +790,7 @@ export function calculateCosmicReversalSignal(klineData: RawKline[], currentPeri
         return Math.abs(reboundHigh - lvl) <= SPACE_TOLERANCE_PERCENT || Math.abs(reboundClose - lvl) <= SPACE_TOLERANCE_PERCENT;
       });
 
-      if (matchedLevel !== undefined) {
+      if (matchedLevel !== undefined && sellIndicatorOk) {
         const resistanceLevel = lowAnchor.price * (1 + (matchedLevel - SPACE_TOLERANCE_PERCENT) / 100);
         if (bar.c <= resistanceLevel || bar.h >= resistanceLevel) {
           if (signal === 'STRONG_BUY') {
