@@ -167,12 +167,31 @@ export function adjustKlinesForSplits(klines: RawKline[]): RawKline[] {
   return adjusted;
 }
 
+
+// ===================== 週期自適應參數 =====================
+// 日/週/月線的每根 K 線波動幅度差異極大（實測 TSLA：日 4.1%、週 10.6%、月 23.7%），
+// 用同一組窗口與容差會令高週期完全失效，故按週期分別設定。
+export function getTimeframeParams(period: string): { windowSize: number; tolerance: number } {
+  const p = String(period || 'daily').toLowerCase();
+  if (p === 'monthly' || p === 'month' || p === 'm' || p === '103') {
+    return { windowSize: 20, tolerance: 0.030 };
+  }
+  if (p === 'weekly' || p === 'week' || p === 'w' || p === '102') {
+    return { windowSize: 30, tolerance: 0.015 };
+  }
+  if (p === '5min' || p === '5m' || p === '1') {
+    return { windowSize: 60, tolerance: 0.002 };
+  }
+  return { windowSize: 50, tolerance: 0.005 };
+}
+
 // ===================== 1836.15 數律樞軸模型計算 (支持低位地板與高位天花板對稱對齊) =====================
-export function calculateModel(rawData: RawKline[], coreNum: number = QUANT_CONFIG.coreNumber, sentiment: string = '中性'): ModelBar[] {
+export function calculateModel(rawData: RawKline[], coreNum: number = QUANT_CONFIG.coreNumber, sentiment: string = '中性', period: string = 'daily'): ModelBar[] {
   const clean = sanitizeKlineData(rawData);
   if (clean.length === 0) return [];
 
-  const period = Math.min(50, clean.length);
+  const { windowSize, tolerance } = getTimeframeParams(period);
+  const period_bars = Math.min(windowSize, clean.length);
   const lastClose = clean[clean.length - 1].c;
   const exp = Math.floor(Math.log10(lastClose / coreNum));
   const coreGravityLine = coreNum * Math.pow(10, exp);
@@ -194,7 +213,7 @@ export function calculateModel(rawData: RawKline[], coreNum: number = QUANT_CONF
 
   return clean.map((item, idx) => {
     // 【根治信號過密】支撐/阻力改為每根 K 線自己的滾動樞紐，避免用未來資料的靜態線
-    const winStart = Math.max(0, idx - period + 1);
+    const winStart = Math.max(0, idx - period_bars + 1);
     const win = clean.slice(winStart, idx + 1);
     const winHigh = Math.max(...win.map(d => d.h));
     const winLow = Math.min(...win.map(d => d.l));
@@ -210,8 +229,7 @@ export function calculateModel(rawData: RawKline[], coreNum: number = QUANT_CONF
     const deviation = Math.abs(item.c - coreGravityLine) / coreGravityLine;
     const isResonance = deviation < 0.08;
 
-    // 【根治】容差由 ±1.5% 收窄至 ±0.5%，並改為對稱接近帶（移除 item.l <= support1 的無下限條件）
-    const tolerance = 0.005;
+    // 【週期自適應容差】由 getTimeframeParams 提供，並改為對稱接近帶（移除無下限條件）
     const isAtSupport = Math.abs(item.l - support1) / support1 <= tolerance || Math.abs(item.c - support1) / support1 <= tolerance;
     const isAtResistance = Math.abs(item.h - resistance) / resistance <= tolerance || Math.abs(item.c - resistance) / resistance <= tolerance;
 
@@ -481,7 +499,7 @@ export function calculateDynamicReversals(
   const windowSize = getAdaptiveWindowSize(timeframe);
   const highs: ReversalAnchor[] = [];
   const lows: ReversalAnchor[] = [];
-  const tolerance = 0.005; // 【根治】容差由 1.5% 收窄至 0.5%
+  const tolerance = getTimeframeParams(timeframe).tolerance; // 【週期自適應】容差隨日/週/月調整
 
   for (let i = 0; i < activeData.length; i++) {
     const start = Math.max(0, i - windowSize);

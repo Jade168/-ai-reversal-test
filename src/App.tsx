@@ -172,7 +172,7 @@ export const App: React.FC = () => {
       setSentiment(newsSent);
 
       setLoadingMessage(`🧮 計算 1836.15 數律中樞與時空共振...`);
-      let computedModel = calculateModel(klines, coreInt, newsSent);
+      let computedModel = calculateModel(klines, coreInt, newsSent, period);
 
       // Cosmic Reversal signals calculation
       const cosmicSignals = calculateCosmicReversalSignal(klines, period, sym, assetType);
@@ -295,7 +295,7 @@ export const App: React.FC = () => {
       try {
         const klines = await fetchMarketData(sym, 'stock', 'daily', dataSource);
         if (klines.length === 0) continue;
-        const computed = calculateModel(klines, coreInt);
+        const computed = calculateModel(klines, coreInt, '中性', 'daily');
         const last = computed[computed.length - 1];
         const cosmicSignals = calculateCosmicReversalSignal(klines, 'daily', sym, 'stock');
         const lastCosmic = cosmicSignals[cosmicSignals.length - 1] || { signal: 'HOLD' };
