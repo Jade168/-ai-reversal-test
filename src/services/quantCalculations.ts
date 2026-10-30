@@ -173,14 +173,9 @@ export function calculateModel(rawData: RawKline[], coreNum: number = QUANT_CONF
   if (clean.length === 0) return [];
 
   const period = Math.min(50, clean.length);
-  const recentData = clean.slice(-period);
-  const recentHigh = Math.max(...recentData.map(d => d.h));
-  const recentLow = Math.min(...recentData.map(d => d.l));
   const lastClose = clean[clean.length - 1].c;
-  const pivot = (recentHigh + recentLow + lastClose) / 3;
   const exp = Math.floor(Math.log10(lastClose / coreNum));
   const coreGravityLine = coreNum * Math.pow(10, exp);
-  const range = recentHigh - recentLow;
   const r = QUANT_CONFIG.ratio;
   const sentimentAdjust = sentiment === '利好' ? 0.98 : (sentiment === '利空' ? 1.02 : 1);
 
@@ -198,10 +193,16 @@ export function calculateModel(rawData: RawKline[], coreNum: number = QUANT_CONF
   }
 
   return clean.map((item, idx) => {
-    // 【修正強支撐位計算】：修正原代碼 item.l - range * r 的數學偏差，對齊經典樞紐支撐網
-    const support1 = (pivot - range * r) * (sentiment === '利好' ? 1.02 : sentimentAdjust);
-    const support2 = (pivot - range * r * 1.5) * sentimentAdjust;
-    const resistance = (pivot + range * r) * (sentiment === '利空' ? 0.98 : sentimentAdjust);
+    // 【根治信號過密】支撐/阻力改為每根 K 線自己的滾動樞紐，避免用未來資料的靜態線
+    const winStart = Math.max(0, idx - period + 1);
+    const win = clean.slice(winStart, idx + 1);
+    const winHigh = Math.max(...win.map(d => d.h));
+    const winLow = Math.min(...win.map(d => d.l));
+    const winRange = winHigh - winLow || 1e-9;
+    const pivot = (winHigh + winLow + item.c) / 3;
+    const support1 = (pivot - winRange * r) * sentimentAdjust;
+    const support2 = (pivot - winRange * r * 1.5) * sentimentAdjust;
+    const resistance = (pivot + winRange * r) * sentimentAdjust;
 
     const dateNum = parseInt((item.date || '').split(' ')[0].replace(/[^0-9]/g, ''), 10) || 0;
     const dateGuiYuan = getGuiYuan(dateNum);
@@ -209,13 +210,13 @@ export function calculateModel(rawData: RawKline[], coreNum: number = QUANT_CONF
     const deviation = Math.abs(item.c - coreGravityLine) / coreGravityLine;
     const isResonance = deviation < 0.08;
 
-    // 智能容差窗口 (±1.5%)：修復低位地板信號過小或未達建議位的痛點
-    const tolerance = 0.015;
-    const isAtSupport = Math.abs(item.l - support1) / support1 <= tolerance || item.l <= support1;
-    const isAtResistance = Math.abs(item.h - resistance) / resistance <= tolerance || item.h >= resistance;
+    // 【根治】容差由 ±1.5% 收窄至 ±0.5%，並改為對稱接近帶（移除 item.l <= support1 的無下限條件）
+    const tolerance = 0.005;
+    const isAtSupport = Math.abs(item.l - support1) / support1 <= tolerance || Math.abs(item.c - support1) / support1 <= tolerance;
+    const isAtResistance = Math.abs(item.h - resistance) / resistance <= tolerance || Math.abs(item.c - resistance) / resistance <= tolerance;
 
-    const buySignal = (isAtSupport || item.c <= support1 * 1.015) && ([3, 6, 9].includes(priceGuiYuan) || item.c > item.o) && sentiment !== '利空';
-    const sellSignal = (isAtResistance || item.c >= resistance * 0.985) && ([3, 6, 9].includes(priceGuiYuan) || item.c < item.o) && sentiment !== '利好';
+    const buySignal = isAtSupport && ([3, 6, 9].includes(priceGuiYuan) || item.c > item.o) && sentiment !== '利空';
+    const sellSignal = isAtResistance && ([3, 6, 9].includes(priceGuiYuan) || item.c < item.o) && sentiment !== '利好';
 
     const currentAtr = atrs[idx] || (item.c * 0.02);
 
@@ -248,7 +249,7 @@ export function calculateReversalSignals(
   data: RawKline[],
   supportLevels: number[],
   resistanceLevels: number[],
-  tolerance: number = 0.015
+  tolerance: number = 0.005
 ) {
   const signals: Array<{
     index: number;
@@ -276,13 +277,13 @@ export function calculateReversalSignals(
     const currentAtr = trSum / lookback || (currentClose * 0.02);
 
     // 【修正低位信號】：對齊強支撐位，引入 1.5% 容差，保證低位不漏報
-    const isAtSupport = supportLevels.some(level => 
-      Math.abs(currentLow - level) / level <= tolerance || currentLow <= level
+    const isAtSupport = supportLevels.some(level =>
+      Math.abs(currentLow - level) / level <= tolerance || Math.abs(currentClose - level) / level <= tolerance
     );
 
     // 【修正高位信號】：對齊阻力位
-    const isAtResistance = resistanceLevels.some(level => 
-      Math.abs(currentHigh - level) / level <= tolerance || currentHigh >= level
+    const isAtResistance = resistanceLevels.some(level =>
+      Math.abs(currentHigh - level) / level <= tolerance || Math.abs(currentClose - level) / level <= tolerance
     );
 
     const gy = getGuiYuan(Math.floor(currentClose));
@@ -480,7 +481,7 @@ export function calculateDynamicReversals(
   const windowSize = getAdaptiveWindowSize(timeframe);
   const highs: ReversalAnchor[] = [];
   const lows: ReversalAnchor[] = [];
-  const tolerance = 0.015; // 1.5% 智能支撐壓力對齊容差
+  const tolerance = 0.005; // 【根治】容差由 1.5% 收窄至 0.5%
 
   for (let i = 0; i < activeData.length; i++) {
     const start = Math.max(0, i - windowSize);
@@ -503,9 +504,6 @@ export function calculateDynamicReversals(
       if (l < currentLow) isLocalLow = false;
     }
 
-    const gyHigh = getGuiYuan(Math.floor(currentHigh));
-    const gyLow = getGuiYuan(Math.floor(currentLow));
-
     // 合併外部傳入支撐位與當前 Bar 自帶支撐
     const effectiveSupports: number[] = [...(supportLevels || [])];
     if (currentBar.supportLine1 && currentBar.supportLine1 > 0) effectiveSupports.push(currentBar.supportLine1);
@@ -519,19 +517,17 @@ export function calculateDynamicReversals(
     // 【修正低位信號】對齊強支撐位 (1.5% 智能容差或跌破支撐後企穩)
     const isAtSupport = effectiveSupports.some(level =>
       Math.abs(currentLow - level) / level <= tolerance ||
-      Math.abs(currentClose - level) / level <= tolerance ||
-      currentLow <= level
+      Math.abs(currentClose - level) / level <= tolerance
     );
 
     // 【修正高位信號】對齊阻力位
     const isAtResistance = effectiveResistances.some(level =>
       Math.abs(currentHigh - level) / level <= tolerance ||
-      Math.abs(currentClose - level) / level <= tolerance ||
-      currentHigh >= level
+      Math.abs(currentClose - level) / level <= tolerance
     );
 
-    // 天花板高位：局部波峰，且 (觸發阻力對齊 或 369歸元共振 或 賣出信號)
-    if (isLocalHigh && (isAtResistance || [3, 6, 9].includes(gyHigh) || currentBar.sellSignal || currentBar.reversalSignal === 'CRITICAL_SELL')) {
+    // 天花板高位：局部波峰，且 (觸發阻力對齊 或 賣出信號)
+    if (isLocalHigh && (isAtResistance || currentBar.sellSignal || currentBar.reversalSignal === 'CRITICAL_SELL')) {
       highs.push({
         index: i,
         price: currentHigh,
@@ -541,9 +537,8 @@ export function calculateDynamicReversals(
       });
     }
 
-    // 地板價低位：局部波谷，且 (觸發強支撐對齊 或 369歸元共振 或 買入信號)
-    // 徹底修復：條件對稱，不再苛刻過濾低位強支撐
-    if (isLocalLow && (isAtSupport || [3, 6, 9].includes(gyLow) || currentBar.buySignal || currentBar.reversalSignal === 'STRONG_BUY')) {
+    // 地板價低位：局部波谷，且 (觸發強支撐對齊 或 買入信號)
+    if (isLocalLow && (isAtSupport || currentBar.buySignal || currentBar.reversalSignal === 'STRONG_BUY')) {
       lows.push({
         index: i,
         price: currentLow,
