@@ -577,6 +577,57 @@ const INDEX_LEVELS = [1.836, 18.36, 36.72] as const;
 const STOCK_LEVELS = [14.28, 18.36, 28.57, 36.72, 57.14] as const;
 const SPACE_TOLERANCE_PERCENT = 1.5;
 
+// 日/週/月各自獨立參數：不同週期的擺動尺度、共振窗口、空間階梯與趨勢均線完全不同，
+// 用同一套數字（尤其把「月」當「日」用）會令高週期信號結構性失效。
+const TIMEFRAME_PROFILES: Record<string, {
+  anchorBars: number;
+  timeWindows: readonly number[];
+  spaceLevels: readonly number[];
+  spaceTolerance: number;
+  maPeriod: number;
+  mode: 'resonance' | 'hybrid';
+  useLegacy: boolean;
+}> = {
+  // 日線：短擺動 + 3/6/9 與 14/21/34 共振 + 斐波那契/142857 混合階梯
+  daily: {
+    anchorBars: 60,
+    timeWindows: [3, 6, 9, 14, 21, 34],
+    spaceLevels: [23.6, 38.2, 50, 61.8, 14.28, 28.57],
+    spaceTolerance: 2,
+    maPeriod: 20,
+    mode: 'resonance',
+    useLegacy: true
+  },
+  // 週線：中擺動
+  weekly: {
+    anchorBars: 52,
+    timeWindows: [3, 6, 9, 14, 21, 34],
+    spaceLevels: [23.6, 38.2, 50, 61.8, 14.28, 28.57],
+    spaceTolerance: 2,
+    maPeriod: 12,
+    mode: 'resonance',
+    useLegacy: true
+  },
+  // 月線：長擺動 + 趨勢確認（純均值回歸在月線會產生「只買不賣」的單邊偏誤）
+  monthly: {
+    anchorBars: 24,
+    timeWindows: [3, 6, 9, 12, 18, 24],
+    spaceLevels: [23.6, 38.2, 50, 61.8, 14.28, 28.57],
+    spaceTolerance: 2.5,
+    maPeriod: 6,
+    mode: 'hybrid',
+    useLegacy: false
+  }
+};
+
+function getTimeframeProfile(period: string) {
+  const p = String(period || 'daily').toLowerCase();
+  if (p === 'monthly' || p === 'month' || p === 'm' || p === '103') return TIMEFRAME_PROFILES.monthly;
+  if (p === 'weekly' || p === 'week' || p === 'w' || p === '102') return TIMEFRAME_PROFILES.weekly;
+  return TIMEFRAME_PROFILES.daily;
+}
+
+
 const INDEX_SYMBOLS = new Set([
   'DJI', '^DJI', 'GSPC', '^GSPC', 'SPX', '^SPX', 'NDX', '^NDX',
   'IXIC', '^IXIC', 'HSI', '^HSI', 'N225', '^N225', '000001.SH', '399001.SZ'
@@ -657,6 +708,75 @@ function calcMACDHistSeries(prices: number[]): number[] {
 }
 
 
+function avgPrice(bar: { o: number; h: number; l: number; c: number }): number {
+  return (bar.h + bar.l + bar.c) / 3;
+}
+
+const REGIME_DEEP_DRAWDOWN = 55;   // 距錨點高點 >55% 視為長期低位
+const REGIME_DOWN_LOW = 15;        // 下跌段下緣
+const REGIME_DOWN_HIGH = 55;       // 下跌段上緣
+const REGIME_DOWN_RATIO = 0.75;    // 平均價 / 錨點高點 低於此值才算「價格結構走弱」
+const REGIME_HIGH_DRAWDOWN = 15;   // 距高 <15% 視為高位
+
+interface MarketRegime {
+  drawdown: number;      // 距錨點高點的回落百分比
+  avgRatio: number;      // 本根平均價 / 錨點高點
+  avgRising: boolean;    // 平均價線是否上揚（本根 > 前一根）
+  isDeepZone: boolean;   // 長期低位
+  isDownZone: boolean;   // 下跌延續結構
+  isHighZone: boolean;   // 高位
+}
+
+function calcMarketRegime(
+  klines: { o: number; h: number; l: number; c: number }[],
+  i: number,
+  anchorBars: number
+): MarketRegime | null {
+  if (i < 1 || i >= klines.length) return null;
+  const start = Math.max(0, i - anchorBars);
+  if (start >= i) return null;
+  let anchorHigh = -Infinity;
+  for (let j = start; j < i; j += 1) {
+    if (klines[j].h > anchorHigh) anchorHigh = klines[j].h;
+  }
+  if (!Number.isFinite(anchorHigh) || anchorHigh <= 0) return null;
+
+  const bar = klines[i];
+  const avgNow = avgPrice(bar);
+  const avgPrev = avgPrice(klines[i - 1]);
+  const drawdown = ((anchorHigh - bar.c) / anchorHigh) * 100;
+  const avgRatio = avgNow / anchorHigh;
+  const avgRising = avgNow > avgPrev;
+  const isDeepZone = drawdown > REGIME_DEEP_DRAWDOWN;
+  const isDownZone =
+    drawdown >= REGIME_DOWN_LOW &&
+    drawdown <= REGIME_DOWN_HIGH &&
+    avgRatio <= REGIME_DOWN_RATIO;
+  const isHighZone = drawdown < REGIME_HIGH_DRAWDOWN;
+
+  return { drawdown, avgRatio, avgRising, isDeepZone, isDownZone, isHighZone };
+}
+
+function calcZigZagDirections(prices: number[], thresholdPct: number): number[] {
+  const n = prices.length;
+  const dirs: number[] = new Array(n).fill(1);
+  if (n === 0) return dirs;
+  let dir = 1;
+  let ext = prices[0];
+  for (let k = 1; k < n; k++) {
+    const c = prices[k];
+    if (dir === 1) {
+      if (c > ext) ext = c;
+      else if (c < ext * (1 - thresholdPct / 100)) { dir = -1; ext = c; }
+    } else {
+      if (c < ext) ext = c;
+      else if (c > ext * (1 + thresholdPct / 100)) { dir = 1; ext = c; }
+    }
+    dirs[k] = dir;
+  }
+  return dirs;
+}
+
 function findAnchor(data: RawKline[], start: number, end: number, field: 'h' | 'l', highest: boolean) {
   let anchor: { index: number; price: number; date: string } | null = null;
   for (let i = start; i < end; i += 1) {
@@ -705,6 +825,25 @@ export function calculateCosmicReversalSignal(klineData: RawKline[], currentPeri
   const rsiSeries = calcRSISeries(_closes, 14);
   const macdHistSeries = calcMACDHistSeries(_closes);
 
+  // 月線方向確認用的均線序列（依 profile.maPeriod 於迴圈內取值）
+  const maCache: Record<number, (number | null)[]> = {};
+  const maAt = (n: number) => {
+    if (!maCache[n]) {
+      const arr: (number | null)[] = new Array(_closes.length).fill(null);
+      let sum = 0;
+      for (let k = 0; k < _closes.length; k++) {
+        sum += _closes[k];
+        if (k >= n) sum -= _closes[k - n];
+        if (k >= n - 1) arr[k] = sum / n;
+      }
+      maCache[n] = arr;
+    }
+    return maCache[n];
+  };
+  // 月線擺動方向（ZigZag 15%）序列
+  const zigZagDirs = calcZigZagDirections(_closes, 15);
+
+
 
   for (let i = 0; i < processedKlines.length; i += 1) {
     const bar = processedKlines[i];
@@ -726,11 +865,21 @@ export function calculateCosmicReversalSignal(klineData: RawKline[], currentPeri
       continue;
     }
 
-    const start = yearWindowStart(processedKlines, i, period);
-    const highAnchor = findAnchor(processedKlines, start, i, 'h', true);
-    // 低點錨改用較短窗口：長窗口會令「反彈%」超出 levels 上限，沽出信號結構性歸零
-    const lowStart = asset.longTermLow ? 0 : yearWindowStart(processedKlines, i, period, true);
-    const lowAnchor = findAnchor(processedKlines, lowStart, i, 'l', false);
+    // 依週期選用獨立參數（擺動窗口 / 共振序列 / 空間階梯 / 趨勢均線）
+    const profile = getTimeframeProfile(period);
+    let highAnchor: any;
+    let lowAnchor: any;
+    if (profile.useLegacy) {
+      const start = yearWindowStart(processedKlines, i, period);
+      highAnchor = findAnchor(processedKlines, start, i, 'h', true);
+      const lowStart = asset.longTermLow ? 0 : yearWindowStart(processedKlines, i, period, true);
+      lowAnchor = findAnchor(processedKlines, lowStart, i, 'l', false);
+    } else {
+      const anchorWin = Math.min(profile.anchorBars, i);
+      const anchorStart = Math.max(0, i - anchorWin);
+      highAnchor = findAnchor(processedKlines, anchorStart, i, 'h', true);
+      lowAnchor = findAnchor(processedKlines, anchorStart, i, 'l', false);
+    }
     const previous = processedKlines[i - 1];
     const prior = i > 1 ? processedKlines[i - 2] : null;
 
@@ -741,13 +890,24 @@ export function calculateCosmicReversalSignal(klineData: RawKline[], currentPeri
 
     const barsFromHigh = i - highAnchor.index;
     const barsFromLow = i - lowAnchor.index;
-    const buyTimeMatch = matchesTimeWindow(barsFromHigh);
-    const sellTimeMatch = matchesTimeWindow(barsFromLow);
+    const buyTimeMatch = profile.useLegacy
+      ? matchesTimeWindow(barsFromHigh)
+      : profile.timeWindows.some(w => Math.abs(barsFromHigh - w) <= 1);
+    const sellTimeMatch = profile.useLegacy
+      ? matchesTimeWindow(barsFromLow)
+      : profile.timeWindows.some(w => Math.abs(barsFromLow - w) <= 1);
 
     const downtrend = previous.c < prior.c && previous.c < highAnchor.price;
     const uptrend = previous.c > prior.c && previous.c > lowAnchor.price;
-    const bullishReversal = downtrend && bar.c > bar.o && bar.c > previous.c;
-    const bearishReversal = uptrend && bar.c < bar.o && bar.c < previous.c;
+    // 陰陽燭判定改用「平均價」而非單看開／收：
+    // 陽燭 = 本根平均價高於前一根平均價（均價線上揚），陰燭 = 均價線下彎。
+    // 這樣可過濾開盤跳空／尾盤拉抬造成的假陽假陰，且天然對稱。
+    const avgNow = avgPrice(bar);
+    const avgPrev = avgPrice(previous);
+    const yangCandle = avgNow > avgPrev;
+    const yinCandle = avgNow < avgPrev;
+    const bullishReversal = downtrend && yangCandle && bar.c > previous.c;
+    const bearishReversal = uptrend && yinCandle && bar.c < previous.c;
 
     const support = highAnchor.price * (1 - asset.levels[0] / 100);
     const resistance = lowAnchor.price * (1 + asset.levels[0] / 100);
@@ -763,47 +923,70 @@ export function calculateCosmicReversalSignal(klineData: RawKline[], currentPeri
     const buyIndicatorOk = !((curRsi !== null && curRsi > 65) && macdFalling);
     const sellIndicatorOk = !((curRsi !== null && curRsi < 35) && macdRising);
 
-    // STRONG BUY：时间共振 + 空间引力容错 (±1.5%)
-    if (buyTimeMatch && (bullishReversal || bar.c > bar.o)) {
-      const drawdownLow = ((highAnchor.price - bar.l) / highAnchor.price) * 100;
-      const drawdownClose = ((highAnchor.price - bar.c) / highAnchor.price) * 100;
+    const maSeries = maAt(profile.maPeriod);
+    const maNow = maSeries[i];
+    const maPrev = i > 0 ? maSeries[i - 1] : maNow;
+    const crossUp = maNow !== null && maPrev !== null && bar.c > maNow && previous.c <= maPrev;
+    const crossDown = maNow !== null && maPrev !== null && bar.c < maNow && previous.c >= maPrev;
 
-      const matchedLevel = (asset.levels as readonly number[]).find((lvl: number) => {
-        return Math.abs(drawdownLow - lvl) <= SPACE_TOLERANCE_PERCENT || Math.abs(drawdownClose - lvl) <= SPACE_TOLERANCE_PERCENT;
-      });
+    const regime = calcMarketRegime(processedKlines, i, profile.anchorBars);
+    const buyRegimeOk = !regime || regime.isDeepZone || !regime.isDownZone;
+    const sellRegimeOk = !!regime && regime.isDownZone;
 
-      if (matchedLevel !== undefined && buyIndicatorOk) {
-        const supportLevel = highAnchor.price * (1 - (matchedLevel + SPACE_TOLERANCE_PERCENT) / 100);
-        if (bar.c >= supportLevel) {
-          signal = 'STRONG_BUY';
-          matchedThreshold = matchedLevel;
-          spaceResonance = true;
-        }
+    if (profile.mode === 'hybrid') {
+      const turnedUp = i > 0 && zigZagDirs[i] === 1 && zigZagDirs[i - 1] === -1 && yangCandle;
+      const turnedDown = i > 0 && zigZagDirs[i] === -1 && zigZagDirs[i - 1] === 1 && yinCandle;
+      if (turnedUp && buyIndicatorOk && buyRegimeOk) {
+        signal = 'STRONG_BUY';
+        spaceResonance = true;
+      } else if (turnedDown && sellIndicatorOk && sellRegimeOk) {
+        signal = 'CRITICAL_SELL';
+        spaceResonance = false;
       }
-    }
+    } else {
+      const lvls = profile.useLegacy ? (asset.levels as readonly number[]) : profile.spaceLevels;
+      const stol = profile.useLegacy ? SPACE_TOLERANCE_PERCENT : profile.spaceTolerance;
 
-    // CRITICAL SELL：时间共振 + 空间引力容错 (±1.5%)
-    if (sellTimeMatch && (bearishReversal || bar.c < bar.o)) {
-      const reboundHigh = ((bar.h - lowAnchor.price) / lowAnchor.price) * 100;
-      const reboundClose = ((bar.c - lowAnchor.price) / lowAnchor.price) * 100;
+      // STRONG BUY：时间共振 + 空间引力容错
+      if (buyTimeMatch && (bullishReversal || yangCandle)) {
+        const drawdownLow = ((highAnchor.price - bar.l) / highAnchor.price) * 100;
+        const drawdownClose = ((highAnchor.price - bar.c) / highAnchor.price) * 100;
 
-      const matchedLevel = (asset.levels as readonly number[]).find((lvl: number) => {
-        return Math.abs(reboundHigh - lvl) <= SPACE_TOLERANCE_PERCENT || Math.abs(reboundClose - lvl) <= SPACE_TOLERANCE_PERCENT;
-      });
+        const matchedLevel = (lvls as readonly number[]).find((lvl: number) => {
+          return Math.abs(drawdownLow - lvl) <= stol || Math.abs(drawdownClose - lvl) <= stol;
+        });
 
-      if (matchedLevel !== undefined && sellIndicatorOk) {
-        const resistanceLevel = lowAnchor.price * (1 + (matchedLevel - SPACE_TOLERANCE_PERCENT) / 100);
-        if (bar.c <= resistanceLevel || bar.h >= resistanceLevel) {
-          if (signal === 'STRONG_BUY') {
-            signal = 'HOLD';
-            matchedThreshold = null;
-          } else {
-            signal = 'CRITICAL_SELL';
+        if (matchedLevel !== undefined && buyIndicatorOk) {
+          const supportLevel = highAnchor.price * (1 - (matchedLevel + stol) / 100);
+          if (bar.c >= supportLevel) {
+            signal = 'STRONG_BUY';
             matchedThreshold = matchedLevel;
+            spaceResonance = true;
           }
-          spaceResonance = true;
         }
       }
+
+      // CRITICAL SELL：时间共振 + 空间引力容错
+      if (sellTimeMatch && (bearishReversal || yinCandle)) {
+        const reboundHigh = ((bar.h - lowAnchor.price) / lowAnchor.price) * 100;
+        const reboundClose = ((bar.c - lowAnchor.price) / lowAnchor.price) * 100;
+
+        const matchedLevel = (lvls as readonly number[]).find((lvl: number) => {
+          return Math.abs(reboundHigh - lvl) <= stol || Math.abs(reboundClose - lvl) <= stol;
+        });
+
+        if (matchedLevel !== undefined && sellIndicatorOk) {
+          const resistanceLevel = lowAnchor.price * (1 + (matchedLevel - stol) / 100);
+          if (bar.c <= resistanceLevel || bar.h >= resistanceLevel) {
+            if (signal === 'STRONG_BUY') {
+              signal = 'HOLD';
+              matchedThreshold = null;
+            } else {
+              signal = 'CRITICAL_SELL';
+              matchedThreshold = matchedLevel;
+            }
+            spaceResonance = true;
+          }
     }
 
     results.push({
@@ -820,6 +1003,9 @@ export function calculateCosmicReversalSignal(klineData: RawKline[], currentPeri
       barsFromLow,
       assetClass: asset.profile
     });
+  }
+
+    }
   }
 
   return results;
