@@ -624,7 +624,6 @@ function yearWindowStart(data: RawKline[], index: number, period: string, forLow
   return Math.max(0, index - Math.round(barsPerYear * lookbackYears));
 }
 
-
 // 序列版 RSI（供逐根 K 線多指標確認使用）
 function calcRSISeries(prices: number[], period: number = 14): (number | null)[] {
   const out: (number | null)[] = new Array(prices.length).fill(null);
@@ -656,6 +655,7 @@ function calcMACDHistSeries(prices: number[]): number[] {
   const dea = EMA(dif, 9);
   return dif.map((v, i) => (v - dea[i]) * 2);
 }
+
 
 function findAnchor(data: RawKline[], start: number, end: number, field: 'h' | 'l', highest: boolean) {
   let anchor: { index: number; price: number; date: string } | null = null;
@@ -704,6 +704,7 @@ export function calculateCosmicReversalSignal(klineData: RawKline[], currentPeri
   const _closes = processedKlines.map(b => b.c);
   const rsiSeries = calcRSISeries(_closes, 14);
   const macdHistSeries = calcMACDHistSeries(_closes);
+
 
   for (let i = 0; i < processedKlines.length; i += 1) {
     const bar = processedKlines[i];
