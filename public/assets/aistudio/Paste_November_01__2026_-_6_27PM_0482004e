@@ -1,0 +1,1711 @@
+你是我的程式碼助手。以下是一個完整的 3D 網頁遊戲專案（Three.js，純前端，無需 build）。
+請幫我將以下每個檔案「原封不動」建立到我的 GitHub repo `Jade168/my-Game-` 的 main 分支，
+路徑完全依照每個檔案的標題列所示（例如 `js/main.js` 就放在 repo 根目錄下的 js/ 資料夾）。
+同時請刪除舊的、已經不再使用的檔案：characters.js、ai-assistant.js、assistantData.js、
+engine.js、loader.js、auth.js、threeScene.js、world.js、ui.js、game.js、aen-game-logo.js。
+不要改寫、不要優化、不要重新命名任何程式碼，直接照抄即可。完成後請列出你建立/刪除的檔案清單。
+
+==============================================================================
+
+### FILE: .nojekyll
+```javascript
+
+```
+
+### FILE: README.md
+```javascript
+# AENO V3 · 量子星球文明模擬
+
+3D 動漫風星際文明遊戲（browser-based，無需 build）。
+
+## 玩法
+- 20 個語言星球，每個有專屬 AI 動物助手（卡通渲染 3D）
+- 學習外語 / 派機器人探索 / 建造 / DNA 變異 → 賺 AENO 幣
+- 文明升級 → 解鎖下一個星球
+- 進度存 localStorage，離線最多計 24 小時收益
+
+## 技術
+- **Three.js r158**（ESM + importmap，CDN 載入，免打包）
+- **卡通渲染**：`MeshToonMaterial` 3 段漸層 + 背面描邊 + 動漫大眼
+- 漸層天空 shader、星空、浮空島、OrbitControls 環繞視角
+- PWA：Service Worker 離線快取
+
+## 檔案結構
+```
+index.html          遊戲外殼（importmap + HUD）
+style.css           動漫風 UI（玻璃擬態 / 漸層 / 發光）
+manifest.json       PWA manifest
+sw.js               Service Worker
+planets.json        星球資料（備份）
+js/main.js          進入點：場景、相機、動畫迴圈
+js/data.js          20 星球 + 20 動物助手 + 對話池
+js/state.js         遊戲狀態 + 存檔 + 離線收益
+js/ui.js            HUD 綁定
+js/game.js          動作處理 + 經濟結算
+js/world3d.js       3D 世界（天空 / 星空 / 浮空島 / 星球主題）
+js/characters3d.js  卡通渲染動物角色產生器 + 動畫
+```
+
+## 本機執行
+```bash
+python3 -m http.server 8000
+# 開 http://localhost:8000
+```
+（必須用 http server，因為用了 ES module + importmap）
+
+## 部署
+GitHub Pages：repo → Settings → Pages → Source 揀 `main` / root。
+已加 `.nojekyll` 避免 Jekyll 處理。
+```
+
+### FILE: index.html
+```html
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>AENO V3 · 量子星球文明模擬</title>
+<meta name="theme-color" content="#0b1020" />
+<meta name="description" content="AENO 量子星球文明模擬 — 3D 動漫星際探索、語言學習、DNA 進化、20 星球。" />
+<link rel="manifest" href="./manifest.json" />
+<link rel="stylesheet" href="./style.css" />
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.158.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+
+<div id="loading">
+  <div class="loader-orb"></div>
+  <p>AENO 量子核心啟動中…</p>
+</div>
+
+<div id="loginScreen">
+  <div class="login-card">
+    <div class="login-logo">AENO<span>V3</span></div>
+    <h1>量子星球文明模擬</h1>
+    <p class="login-sub">探索 20 個語言星球 · 飼養 AI 動物助手 · 挖 AENO 幣</p>
+    <input id="playerName" type="text" maxlength="16" placeholder="輸入你的探險家代號" autocomplete="off" />
+    <button id="loginBtn">進入宇宙</button>
+    <p class="login-hint">進度只儲存在你部裝置（localStorage）</p>
+  </div>
+</div>
+
+<div id="hud" class="hidden">
+
+  <header id="topBar">
+    <div class="brand">AENO<span>V3</span></div>
+    <div class="stats">
+      <div class="stat" title="AENO 幣"><i class="ico-aeno">◈</i><span id="statAeno">0</span></div>
+      <div class="stat" title="文明等級"><i class="ico-civ">✦</i><span id="statCiv">Lv.1</span></div>
+      <div class="stat" title="已解鎖星球"><i class="ico-planet">🪐</i><span id="statPlanets">1/20</span></div>
+    </div>
+    <button id="btnMenu" class="icon-btn" aria-label="選單">☰</button>
+  </header>
+
+  <aside id="planetBar">
+    <button class="planet-nav" id="planetPrev" aria-label="上一個星球">‹</button>
+    <div id="planetList"></div>
+    <button class="planet-nav" id="planetNext" aria-label="下一個星球">›</button>
+  </aside>
+
+  <section id="assistantPanel">
+    <div class="assistant-head">
+      <span id="assistantName">Lupus</span>
+      <span id="assistantSpecies" class="tag">wolf</span>
+    </div>
+    <p id="assistantDialog">你好呀～我係 Lupus 🐺</p>
+    <div class="assistant-actions">
+      <button id="btnTalk">傾偈</button>
+      <button id="btnFeed">餵食</button>
+      <button id="btnScan">掃描星球</button>
+    </div>
+  </section>
+
+  <section id="actionBar">
+    <button class="action" data-action="build"><span>🏗️</span>建造</button>
+    <button class="action" data-action="robot"><span>🤖</span>派機器人</button>
+    <button class="action" data-action="study"><span>📖</span>學習語言</button>
+    <button class="action" data-action="mutate"><span>🧬</span>DNA 變異</button>
+  </section>
+
+  <div id="toast"></div>
+
+  <div id="menuPanel" class="hidden">
+    <h2>系統</h2>
+    <button id="btnSave">儲存進度</button>
+    <button id="btnReset">重置存檔</button>
+    <button id="btnClose">關閉</button>
+  </div>
+
+</div>
+
+<script type="module" src="./js/main.js"></script>
+</body>
+</html>
+```
+
+### FILE: js/characters3d.js
+```javascript
+// js/characters3d.js — 卡通渲染（toon）3D 動物助手
+// 用 5 種身體藍圖（quadruped / biped / bird / aquatic / reptile / dragon）
+// 加黑色描邊 + 大眼 + 腮紅，做出動漫風立體角色。
+
+import * as THREE from "three";
+
+// 3 段式漸層貼圖 → MeshToonMaterial 的分層卡通上色
+function makeGradientMap() {
+  const steps = new Uint8Array([70, 150, 235]);
+  const tex = new THREE.DataTexture(steps, steps.length, 1, THREE.RedFormat);
+  tex.minFilter = THREE.NearestFilter;
+  tex.magFilter = THREE.NearestFilter;
+  tex.generateMipmaps = false;
+  tex.needsUpdate = true;
+  return tex;
+}
+const GRADIENT = makeGradientMap();
+
+const OUTLINE_COLOR = 0x1b2130;
+
+function toon(color) {
+  return new THREE.MeshToonMaterial({ color: new THREE.Color(color), gradientMap: GRADIENT });
+}
+
+function outline(mesh, scale = 1.09) {
+  const o = new THREE.Mesh(
+    mesh.geometry,
+    new THREE.MeshBasicMaterial({ color: OUTLINE_COLOR, side: THREE.BackSide })
+  );
+  o.scale.multiplyScalar(scale);
+  mesh.add(o);
+  return mesh;
+}
+
+function ball(r, mat, seg = 20) {
+  const m = new THREE.Mesh(new THREE.SphereGeometry(r, seg, seg), mat);
+  m.castShadow = true;
+  return outline(m);
+}
+
+function capsule(r, len, mat) {
+  const m = new THREE.Mesh(new THREE.CapsuleGeometry(r, len, 6, 14), mat);
+  m.castShadow = true;
+  return outline(m, 1.14);
+}
+
+function cone(r, h, mat, seg = 12) {
+  const m = new THREE.Mesh(new THREE.ConeGeometry(r, h, seg), mat);
+  m.castShadow = true;
+  return outline(m);
+}
+
+// 動漫大眼：深色眼球 + 白色高光
+function makeEyes(spread, y, z, s) {
+  const g = new THREE.Group();
+  for (const sx of [-1, 1]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(s, 16, 16), new THREE.MeshBasicMaterial({ color: 0x1b2130 }));
+    eye.position.set(sx * spread, 0, 0);
+    eye.scale.z = 0.7;
+    const hi = new THREE.Mesh(new THREE.SphereGeometry(s * 0.34, 10, 10), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+    hi.position.set(sx * spread + s * 0.3, s * 0.3, s * 0.55);
+    g.add(eye, hi);
+  }
+  g.position.set(0, y, z);
+  return g;
+}
+
+function blush(spread, y, z, s, color = "#ff9ec4") {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshBasicMaterial({ color: new THREE.Color(color), transparent: true, opacity: 0.5 });
+  for (const sx of [-1, 1]) {
+    const b = new THREE.Mesh(new THREE.SphereGeometry(s, 10, 10), mat);
+    b.position.set(sx * spread, 0, 0);
+    b.scale.z = 0.35;
+    g.add(b);
+  }
+  g.position.set(0, y, z);
+  return g;
+}
+
+function ears(type, mat, mat2) {
+  const g = new THREE.Group();
+  if (type === "none") return g;
+  if (type === "long") {
+    for (const sx of [-1, 1]) {
+      const e = capsule(0.075, 0.4, mat);
+      e.position.set(sx * 0.16, 0.34, -0.02);
+      e.rotation.z = sx * 0.16;
+      g.add(e);
+    }
+  } else if (type === "round") {
+    for (const sx of [-1, 1]) {
+      const e = ball(0.15, mat, 14);
+      e.position.set(sx * 0.3, 0.3, 0);
+      g.add(e);
+    }
+  } else if (type === "small") {
+    for (const sx of [-1, 1]) {
+      const e = ball(0.1, mat, 12);
+      e.position.set(sx * 0.33, 0.22, 0);
+      g.add(e);
+    }
+  } else if (type === "horn") {
+    for (const sx of [-1, 1]) {
+      const e = cone(0.09, 0.34, mat2);
+      e.position.set(sx * 0.2, 0.36, 0);
+      e.rotation.z = sx * -0.24;
+      g.add(e);
+    }
+  } else if (type === "tufted") {
+    for (const sx of [-1, 1]) {
+      const e = cone(0.13, 0.26, mat);
+      e.position.set(sx * 0.26, 0.32, 0);
+      const tip = cone(0.04, 0.12, mat2, 8);
+      tip.position.set(sx * 0.26, 0.5, 0);
+      g.add(e, tip);
+    }
+  } else {
+    for (const sx of [-1, 1]) {
+      const e = cone(0.15, 0.3, mat);
+      e.position.set(sx * 0.24, 0.32, 0);
+      e.rotation.z = sx * 0.2;
+      g.add(e);
+    }
+  }
+  return g;
+}
+
+function tail(type, mat, mat2) {
+  const g = new THREE.Group();
+  if (type === "none") return g;
+  if (type === "bushy") {
+    const t = ball(0.2, mat2, 14);
+    t.scale.set(1.2, 1, 1);
+    t.position.set(0, 0.12, 0);
+    g.add(t);
+  } else if (type === "thin") {
+    const t = capsule(0.06, 0.5, mat);
+    t.rotation.x = Math.PI / 2;
+    t.position.set(0, 0.16, 0);
+    g.add(t);
+    const tip = ball(0.07, mat2, 10);
+    tip.position.set(0, 0.16, 0.32);
+    g.add(tip);
+  } else if (type === "puff") {
+    const t = ball(0.16, mat2, 14);
+    t.position.set(0, 0.14, 0);
+    g.add(t);
+  } else if (type === "tiny") {
+    const t = ball(0.08, mat2, 10);
+    t.position.set(0, 0.12, 0);
+    g.add(t);
+  } else if (type === "spiky") {
+    for (let i = 0; i < 4; i++) {
+      const s = cone(0.09, 0.22, mat2, 6);
+      s.position.set(0, 0.1, i * 0.16);
+      s.rotation.x = Math.PI / 2.4;
+      g.add(s);
+    }
+  } else if (type === "fin") {
+    const f = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.34, 3), mat2);
+    f.rotation.z = Math.PI / 2;
+    f.scale.set(1, 1, 0.35);
+    f.castShadow = true;
+    g.add(outline(f));
+  } else if (type === "fan") {
+    for (let i = -1; i <= 1; i++) {
+      const f = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.44, 4), i === 0 ? mat2 : mat);
+      f.rotation.x = Math.PI / 2;
+      f.rotation.z = i * 0.4;
+      f.scale.z = 0.35;
+      f.castShadow = true;
+      g.add(outline(f));
+    }
+  }
+  return g;
+}
+
+function legs(count, spread, mat, y, len = 0.4) {
+  const g = new THREE.Group();
+  const zs = count === 4 ? [spread, -spread] : [0];
+  for (const z of zs) {
+    for (const sx of [-1, 1]) {
+      const l = capsule(0.11, len, mat);
+      l.position.set(sx * spread * 0.85, y, z);
+      g.add(l);
+    }
+  }
+  return g;
+}
+
+// 主入口：依助手設定建立卡通動物
+export function createCharacter(assistant) {
+  const root = new THREE.Group();
+  const body = new THREE.Group();   // 動畫用內層，root 留俾世界定位
+  root.add(body);
+
+  const mat = toon(assistant.color);
+  const mat2 = toon(assistant.color2);
+  const parts = {};
+  const kind = assistant.kind;
+
+  if (kind === "bird") {
+    const torso = ball(0.42, mat, 22);
+    torso.scale.set(1, 1.2, 1);
+    torso.position.y = 0.95;
+    body.add(torso);
+
+    const head = ball(0.32, mat, 20);
+    head.position.set(0, 1.62, 0.04);
+    body.add(head);
+    parts.head = head;
+
+    const beak = cone(0.12, 0.26, mat2, 10);
+    beak.rotation.x = Math.PI / 2;
+    beak.position.set(0, 1.6, 0.34);
+    body.add(beak);
+
+    for (const sx of [-1, 1]) {
+      const wing = ball(0.22, mat2, 14);
+      wing.scale.set(0.4, 1, 1.3);
+      wing.position.set(sx * 0.44, 1.0, 0);
+      wing.rotation.z = sx * 0.3;
+      body.add(wing);
+      parts[sx < 0 ? "wingL" : "wingR"] = wing;
+    }
+    const t = tail(assistant.tail, mat, mat2);
+    t.position.set(0, 0.95, -0.42);
+    t.rotation.x = -0.4;
+    body.add(t);
+    parts.tail = t;
+
+    for (const sx of [-1, 1]) {
+      const leg = capsule(0.05, 0.28, mat2);
+      leg.position.set(sx * 0.14, 0.3, 0);
+      body.add(leg);
+    }
+    head.add(makeEyes(0.13, 0.06, 0.29, 0.075));
+    parts.eyes = head.children[head.children.length - 1];
+    head.add(blush(0.2, -0.06, 0.24, 0.05));
+
+  } else if (kind === "aquatic") {
+    const torso = capsule(0.4, 0.9, mat);
+    torso.rotation.z = Math.PI / 2;
+    torso.position.y = 0.9;
+    body.add(torso);
+    parts.torso = torso;
+
+    const head = ball(0.36, mat, 20);
+    head.position.set(0.72, 0.98, 0);
+    body.add(head);
+    parts.head = head;
+
+    const snout = capsule(0.11, 0.3, mat2);
+    snout.rotation.z = Math.PI / 2;
+    snout.position.set(1.06, 0.9, 0);
+    body.add(snout);
+
+    const dorsal = new THREE.Mesh(new THREE.ConeGeometry(0.24, 0.4, 3), mat2);
+    dorsal.scale.set(1, 1, 0.4);
+    dorsal.position.set(-0.05, 1.36, 0);
+    dorsal.castShadow = true;
+    body.add(outline(dorsal));
+
+    for (const sx of [-1, 1]) {
+      const fin = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.34, 3), mat);
+      fin.rotation.z = Math.PI / 2;
+      fin.rotation.y = sx * 0.5;
+      fin.scale.set(1, 1, 0.4);
+      fin.position.set(0.1, 0.72, sx * 0.34);
+      fin.castShadow = true;
+      body.add(outline(fin));
+    }
+    const t = tail("fin", mat, mat2);
+    t.position.set(-0.86, 0.9, 0);
+    t.rotation.y = Math.PI / 2;
+    body.add(t);
+    parts.tail = t;
+
+    head.add(makeEyes(0.16, 0.08, 0.31, 0.08));
+    parts.eyes = head.children[head.children.length - 1];
+    head.add(blush(0.24, -0.08, 0.24, 0.05));
+
+  } else if (kind === "reptile") {
+    const torso = capsule(0.32, 1.0, mat);
+    torso.rotation.z = Math.PI / 2;
+    torso.position.y = 0.55;
+    body.add(torso);
+
+    const head = ball(0.3, mat, 18);
+    head.scale.set(1.3, 0.85, 1);
+    head.position.set(0.78, 0.62, 0);
+    body.add(head);
+    parts.head = head;
+
+    const snout = capsule(0.12, 0.34, mat);
+    snout.rotation.z = Math.PI / 2;
+    snout.position.set(1.16, 0.56, 0);
+    body.add(snout);
+
+    const t = tail(assistant.tail, mat, mat2);
+    t.position.set(-0.72, 0.55, 0);
+    t.rotation.y = Math.PI / 2;
+    body.add(t);
+    parts.tail = t;
+
+    for (const sx of [-1, 1]) {
+      for (const z of [0.24, -0.24]) {
+        const l = capsule(0.09, 0.2, mat2);
+        l.position.set(sx * 0.5, 0.24, z);
+        body.add(l);
+      }
+    }
+    head.add(makeEyes(0.14, 0.12, 0.26, 0.07));
+    parts.eyes = head.children[head.children.length - 1];
+
+  } else if (kind === "biped") {
+    const torso = capsule(0.36, 0.5, mat);
+    torso.position.y = 0.98;
+    body.add(torso);
+    parts.torso = torso;
+
+    const head = ball(0.42, mat, 22);
+    head.position.y = 1.66;
+    body.add(head);
+    parts.head = head;
+
+    const muzzle = ball(0.2, mat2, 14);
+    muzzle.position.set(0, 1.56, 0.34);
+    body.add(muzzle);
+
+    const ear = ears(assistant.ears, mat, mat2);
+    ear.position.copy(head.position);
+    body.add(ear);
+    parts.earL = ear.children[0];
+
+    for (const sx of [-1, 1]) {
+      const arm = capsule(0.1, 0.5, mat);
+      arm.position.set(sx * 0.44, 1.0, 0);
+      arm.rotation.z = sx * 0.35;
+      body.add(arm);
+      parts[sx < 0 ? "armL" : "armR"] = arm;
+    }
+    for (const sx of [-1, 1]) {
+      const leg = capsule(0.12, 0.36, mat2);
+      leg.position.set(sx * 0.18, 0.36, 0);
+      body.add(leg);
+    }
+    const t = tail(assistant.tail, mat, mat2);
+    t.position.set(0, 0.86, -0.36);
+    t.rotation.x = -0.9;
+    body.add(t);
+    parts.tail = t;
+
+    head.add(makeEyes(0.16, 0.02, 0.38, 0.09));
+    parts.eyes = head.children[head.children.length - 1];
+    head.add(blush(0.26, -0.12, 0.3, 0.06));
+
+  } else {
+    // quadruped / dragon 共用四足藍圖
+    const torso = capsule(0.42, 0.62, mat);
+    torso.rotation.z = Math.PI / 2;
+    torso.position.y = 0.82;
+    body.add(torso);
+    parts.torso = torso;
+
+    const head = ball(0.4, mat, 22);
+    head.position.set(0.68, 1.06, 0);
+    body.add(head);
+    parts.head = head;
+
+    const snout = ball(0.2, mat2, 14);
+    snout.scale.set(1.25, 0.85, 0.9);
+    snout.position.set(1.0, 0.94, 0);
+    body.add(snout);
+
+    const nose = ball(0.07, mat, 10);
+    nose.position.set(1.2, 0.98, 0);
+    body.add(nose);
+
+    const ear = ears(assistant.ears, mat, mat2);
+    ear.position.copy(head.position);
+    body.add(ear);
+    parts.earL = ear.children[0];
+
+    for (const z of [0.24, -0.24]) {
+      for (const sx of [-1, 1]) {
+        const leg = capsule(0.13, 0.34, mat);
+        leg.position.set(sx * 0.34, 0.4, z);
+        body.add(leg);
+        parts[sx < 0 ? (z > 0 ? "legFL" : "legBL") : (z > 0 ? "legFR" : "legBR")] = leg;
+      }
+    }
+    const t = tail(assistant.tail, mat, mat2);
+    t.position.set(-0.62, 0.94, 0);
+    t.rotation.x = -0.5;
+    body.add(t);
+    parts.tail = t;
+
+    head.add(makeEyes(0.17, 0.12, 0.34, 0.085));
+    parts.eyes = head.children[head.children.length - 1];
+    head.add(blush(0.24, -0.1, 0.3, 0.055));
+
+    if (kind === "dragon") {
+      for (const sx of [-1, 1]) {
+        const wing = new THREE.Mesh(new THREE.ConeGeometry(0.3, 0.72, 3), mat2);
+        wing.rotation.z = Math.PI / 2;
+        wing.rotation.x = sx * 0.5;
+        wing.scale.set(1, 1, 0.18);
+        wing.position.set(-0.1, 1.35, sx * 0.3);
+        wing.castShadow = true;
+        body.add(outline(wing));
+        parts[sx < 0 ? "wingL" : "wingR"] = wing;
+      }
+    }
+  }
+
+  root.userData.parts = parts;
+  root.userData.phase = Math.random() * Math.PI * 2;
+  root.userData.baseY = 0;
+  root.userData.character = assistant;
+  return root;
+}
+
+// 每幀動畫：呼吸浮動 + 頭擺 + 尾巴搖 + 耳朵抖 + 定時眨眼
+export function updateCharacter(root, t, dt) {
+  const p = root.userData.parts;
+  const ph = root.userData.phase;
+  const body = root.children[0];
+
+  body.position.y = root.userData.baseY + Math.sin(t * 2 + ph) * 0.055;
+
+  if (p.head) {
+    p.head.rotation.z = Math.sin(t * 1.4 + ph) * 0.055;
+    p.head.rotation.y = Math.sin(t * 0.8 + ph) * 0.14;
+  }
+  if (p.tail) p.tail.rotation.y = Math.sin(t * 3.2 + ph) * 0.5;
+  if (p.earL) p.earL.rotation.z = Math.sin(t * 4.1 + ph) * 0.12;
+  if (p.wingL) { p.wingL.rotation.x = Math.sin(t * 2.6 + ph) * 0.3; p.wingR.rotation.x = -Math.sin(t * 2.6 + ph) * 0.3; }
+  if (p.armL) { p.armL.rotation.x = Math.sin(t * 1.8 + ph) * 0.28; p.armR.rotation.x = -Math.sin(t * 1.8 + ph) * 0.28; }
+
+  if (p.eyes) {
+    const cycle = (t + ph) % 4.2;
+    p.eyes.scale.y = cycle > 4.05 ? 0.12 : 1;
+  }
+}
+```
+
+### FILE: js/data.js
+```javascript
+// js/data.js — 星球、語言、AI 動物助手資料（由舊 characters.js 修復整理）
+// 只放資料，不含遊戲邏輯。
+
+export const LANGUAGES = {
+  zh_HK: "繁體中文（粵語）",
+  zh_CN: "簡體中文",
+  en: "English",
+  ja: "日本語",
+  fr: "Français",
+  es: "Español"
+};
+
+// 星球主題色 + 地表色，用於 3D 世界生成
+export const PLANETS = [
+  { id: "earth",      name: "英國星球",   language: "English",        locale: "en-GB", flag: "🇬🇧", sky: "#7fb8e6", ground: "#4c8a3f", accent: "#3b82f6", assistant: "lupus" },
+  { id: "mars",       name: "日本星球",   language: "Japanese",       locale: "ja-JP", flag: "🇯🇵", sky: "#f6b6a8", ground: "#c56b52", accent: "#ef4444", assistant: "felis" },
+  { id: "ocean",      name: "法國星球",   language: "French",         locale: "fr-FR", flag: "🇫🇷", sky: "#8fd0f0", ground: "#2f7fa8", accent: "#0ea5e9", assistant: "delphinus" },
+  { id: "jungle",     name: "西班牙星球", language: "Spanish",        locale: "es-ES", flag: "🇪🇸", sky: "#a8d98a", ground: "#2f6b33", accent: "#16a34a", assistant: "simia" },
+  { id: "planet05",   name: "德國星球",   language: "German",         locale: "de-DE", flag: "🇩🇪", sky: "#c7cbd1", ground: "#5b6470", accent: "#64748b", assistant: "ursus" },
+  { id: "planet06",   name: "意大利星球", language: "Italian",        locale: "it-IT", flag: "🇮🇹", sky: "#ffd9a0", ground: "#b57b3a", accent: "#f59e0b", assistant: "vulpes" },
+  { id: "planet07",   name: "俄羅斯星球", language: "Russian",        locale: "ru-RU", flag: "🇷🇺", sky: "#bcd3e8", ground: "#7d8fa6", accent: "#3b82f6", assistant: "maritimus" },
+  { id: "planet08",   name: "韓國星球",   language: "Korean",         locale: "ko-KR", flag: "🇰🇷", sky: "#d8c2f0", ground: "#5f4b8b", accent: "#a855f7", assistant: "draco" },
+  { id: "planet09",   name: "泰國星球",   language: "Thai",           locale: "th-TH", flag: "🇹🇭", sky: "#ffe0a8", ground: "#a8863a", accent: "#eab308", assistant: "camelus" },
+  { id: "planet10",   name: "越南星球",   language: "Vietnamese",     locale: "vi-VN", flag: "🇻🇳", sky: "#a8e0c8", ground: "#2f7a55", accent: "#10b981", assistant: "crocodylus" },
+  { id: "planet11",   name: "印度星球",   language: "Hindi",          locale: "hi-IN", flag: "🇮🇳", sky: "#ffd2a8", ground: "#b06a2f", accent: "#f97316", assistant: "aquila" },
+  { id: "planet12",   name: "阿拉伯星球", language: "Arabic",         locale: "ar-SA", flag: "🇸🇦", sky: "#f0dfa8", ground: "#b39a4a", accent: "#d97706", assistant: "equus" },
+  { id: "planet13",   name: "巴西星球",   language: "Portuguese",     locale: "pt-BR", flag: "🇧🇷", sky: "#a8e0b8", ground: "#2f8a45", accent: "#22c55e", assistant: "lepus" },
+  { id: "planet14",   name: "墨西哥星球", language: "Spanish (MX)",   locale: "es-MX", flag: "🇲🇽", sky: "#ffc9a8", ground: "#a86a3a", accent: "#ea580c", assistant: "bison" },
+  { id: "planet15",   name: "希臘星球",   language: "Greek",          locale: "el-GR", flag: "🇬🇷", sky: "#a8d8f0", ground: "#4a7fa8", accent: "#0ea5e9", assistant: "lynx" },
+  { id: "planet16",   name: "土耳其星球", language: "Turkish",        locale: "tr-TR", flag: "🇹🇷", sky: "#e0b8c8", ground: "#8b4a5f", accent: "#e11d48", assistant: "ovis" },
+  { id: "planet17",   name: "北歐星球",   language: "Swedish",        locale: "sv-SE", flag: "🇸🇪", sky: "#cfe4f5", ground: "#6b8fa8", accent: "#38bdf8", assistant: "alcedo" },
+  { id: "planet18",   name: "澳洲星球",   language: "English (AU)",   locale: "en-AU", flag: "🇦🇺", sky: "#f0c8a8", ground: "#b06a3a", accent: "#f59e0b", assistant: "giraffa" },
+  { id: "planet19",   name: "非洲星球",   language: "Swahili",        locale: "sw-KE", flag: "🇰🇪", sky: "#f5d9a8", ground: "#a8853a", accent: "#eab308", assistant: "phoenix" },
+  { id: "planet20",   name: "中原星球",   language: "Cantonese",      locale: "zh-HK", flag: "🇭🇰", sky: "#f0a8b8", ground: "#8b3a4a", accent: "#ec4899", assistant: "orca" }
+];
+
+// 助手：外形參數餵入 characters3d.js 產生卡通 3D 動物
+export const ASSISTANTS = {
+  lupus:         { name: "Lupus",      species: "wolf",       kind: "quadruped", color: "#9aa7b8", color2: "#e6edf5", ears: "pointed", tail: "bushy",  emoji: "🐺", trait: "勇敢" },
+  felis:         { name: "Felis",      species: "cat",        kind: "quadruped", color: "#f4a261", color2: "#fff3e0", ears: "pointed", tail: "thin",   emoji: "🐱", trait: "好奇" },
+  delphinus:     { name: "Delphinus",  species: "dolphin",    kind: "aquatic",   color: "#5aa9e6", color2: "#e8f4ff", ears: "none",    tail: "fin",    emoji: "🐬", trait: "友善" },
+  simia:         { name: "Simia",      species: "monkey",     kind: "biped",     color: "#a97c50", color2: "#f0dcc0", ears: "round",   tail: "thin",   emoji: "🐵", trait: "調皮" },
+  ursus:         { name: "Ursus",      species: "bear",       kind: "quadruped", color: "#8b5a3c", color2: "#e0c4a8", ears: "round",   tail: "tiny",   emoji: "🐻", trait: "穩重" },
+  vulpes:        { name: "Vulpes",     species: "fox",        kind: "quadruped", color: "#e07a3f", color2: "#ffe6d0", ears: "pointed", tail: "bushy",  emoji: "🦊", trait: "機智" },
+  camelus:       { name: "Camelus",    species: "camel",      kind: "quadruped", color: "#d9a05b", color2: "#f5e6cc", ears: "small",   tail: "thin",   emoji: "🐪", trait: "堅毅" },
+  aquila:        { name: "Aquila",     species: "eagle",      kind: "bird",      color: "#8d7b68", color2: "#f0e6d8", ears: "none",    tail: "fan",    emoji: "🦅", trait: "銳利" },
+  lepus:         { name: "Lepus",      species: "rabbit",     kind: "quadruped", color: "#e8e0d0", color2: "#ffffff", ears: "long",    tail: "puff",   emoji: "🐰", trait: "敏捷" },
+  equus:         { name: "Equus",      species: "horse",      kind: "quadruped", color: "#b08968", color2: "#f0dcc0", ears: "pointed", tail: "bushy",  emoji: "🐴", trait: "自由" },
+  draco:         { name: "Draco",      species: "lizard",     kind: "dragon",    color: "#c0392b", color2: "#ffd76a", ears: "horn",    tail: "spiky",  emoji: "🐉", trait: "威嚴" },
+  maritimus:     { name: "Maritimus",  species: "polar bear", kind: "quadruped", color: "#eaf2fa", color2: "#c9dcef", ears: "round",   tail: "tiny",   emoji: "🐻‍❄️", trait: "冷靜" },
+  crocodylus:    { name: "Crocodylus", species: "crocodile",  kind: "reptile",   color: "#4e8b3c", color2: "#c8e0b0", ears: "none",    tail: "spiky",  emoji: "🐊", trait: "耐心" },
+  giraffa:       { name: "Giraffa",    species: "giraffe",    kind: "quadruped", color: "#e0b060", color2: "#8b5a2b", ears: "small",   tail: "thin",   emoji: "🦒", trait: "高瞻" },
+  phoenix:       { name: "Phoenix",    species: "peacock",    kind: "bird",      color: "#1f8a8a", color2: "#ffd76a", ears: "none",    tail: "fan",    emoji: "🦚", trait: "華麗" },
+  orca:          { name: "Orca",       species: "orca",       kind: "aquatic",   color: "#1b2a4a", color2: "#ffffff", ears: "none",    tail: "fin",    emoji: "🐋", trait: "睿智" },
+  ovis:          { name: "Ovis",       species: "sheep",      kind: "quadruped", color: "#f2ece0", color2: "#d8ccb8", ears: "small",   tail: "puff",   emoji: "🐑", trait: "溫馴" },
+  lynx:          { name: "Lynx",       species: "lynx",       kind: "quadruped", color: "#c99a5b", color2: "#f0dcc0", ears: "tufted",  tail: "tiny",   emoji: "🐈", trait: "獨立" },
+  bison:         { name: "Bison",      species: "bison",      kind: "quadruped", color: "#6b4a2b", color2: "#c8a878", ears: "small",   tail: "thin",   emoji: "🦬", trait: "力量" },
+  alcedo:        { name: "Alcedo",     species: "kingfisher", kind: "bird",      color: "#1a7fa8", color2: "#f59e0b", ears: "none",    tail: "fan",    emoji: "🐦", trait: "精準" }
+};
+
+// 對話池（粵語為主，配少量多語示範）
+export const DIALOGUES = {
+  greet: [
+    "你好呀～我係 {name} {emoji}",
+    "歡迎嚟到 {planet}！",
+    "準備好用學習外語嚟挖 AENO 未？"
+  ],
+  idle: [
+    "你可以喺領土空地起建築。",
+    "資源唔夠？可以派機器人去探索星球。",
+    "記住：離線最多只計 24 小時收益。",
+    "呢度講 {language}，學多幾句有著數。",
+    "文明等級越高，解鎖嘅星球越多。"
+  ],
+  study: [
+    "{language} 嘅發音練習：試跟住讀一次！",
+    "學識新詞，AENO 掉落率會上升～",
+    "語言掌握度 +1，繼續加油！"
+  ],
+  mutate: [
+    "DNA 變異啟動… 有嘢進化咗！",
+    "突變成功，特徵已經改寫。",
+    "基因重組中，留意你嘅文明變化。"
+  ],
+  warning: [
+    "⚠️ 黑洞唔開放俾普通玩家。",
+    "⚠️ 母鑰權限只有你擁有（隱藏）。"
+  ]
+};
+
+export function assistantFor(planetId) {
+  const planet = PLANETS.find(p => p.id === planetId) || PLANETS[0];
+  return { planet, assistant: ASSISTANTS[planet.assistant] || ASSISTANTS.lupus };
+}
+
+export function pickDialog(key, planet, assistant) {
+  const pool = DIALOGUES[key] || DIALOGUES.idle;
+  const line = pool[Math.floor(Math.random() * pool.length)];
+  return line
+    .replace(/{name}/g, assistant.name)
+    .replace(/{emoji}/g, assistant.emoji)
+    .replace(/{planet}/g, planet.name)
+    .replace(/{language}/g, planet.language);
+}
+```
+
+### FILE: js/game.js
+```javascript
+// js/game.js — 遊戲邏輯：動作處理、經濟結算
+import { assistantFor, pickDialog } from "./data.js";
+import { state, addAeno, saveState, currentPlanet, unlockNext, tryLevelUp, civThreshold } from "./state.js";
+import { refreshStats, setDialog, toast, showUnlock, renderPlanets } from "./ui.js";
+
+export const handlers = {
+  onAction,
+  onLogin,
+  onPlanetChange: null   // 由 main.js 注入（切換 3D 世界）
+};
+
+function onLogin(name) {
+  if (!name) { toast("請輸入代號", "warn"); return; }
+  state.player = name;
+  saveState();
+  import("./ui.js").then(ui => { ui.showGame(); });
+  refreshStats();
+  refreshAssistantDialog();
+  toast(`歡迎，${name}！`, "ok");
+  window.dispatchEvent(new CustomEvent("aeno:login"));
+}
+
+export function refreshAssistantDialog() {
+  const { planet, assistant } = assistantFor(state.planetId);
+  setDialog(pickDialog("greet", planet, assistant));
+}
+
+function onAction(action) {
+  const { planet, assistant } = assistantFor(state.planetId);
+  switch (action) {
+    case "talk":
+      setDialog(pickDialog("idle", planet, assistant));
+      break;
+    case "feed": {
+      addAeno(12 * state.civ);
+      setDialog(`${assistant.name} 食飽飽，開心咁叫咗一聲 ${assistant.emoji}（+${12 * state.civ} AENO）`);
+      toast(`+${12 * state.civ} AENO`, "ok");
+      break;
+    }
+    case "scan": {
+      const gain = 20 + Math.floor(Math.random() * 40);
+      addAeno(gain * state.civ);
+      setDialog(`掃描 ${planet.name} 完成，搵到 ${gain} 單位 AENO！`);
+      toast(`掃描 +${gain * state.civ} AENO`, "ok");
+      break;
+    }
+    case "build":
+      if (state.aeno < 100) { toast("AENO 不足（需要 100）", "warn"); break; }
+      addAeno(-100);
+      setDialog(`${planet.name} 起咗新建築，文明成長中 🏗️`);
+      toast("建造完成 −100 AENO", "ok");
+      break;
+    case "robot": {
+      const gain = 30 * state.civ;
+      addAeno(gain);
+      setDialog("🤖 機器人完成探索任務，帶咗資源返嚟！");
+      toast(`探索 +${gain} AENO`, "ok");
+      break;
+    }
+    case "study":
+      addAeno(8 * state.civ);
+      setDialog(pickDialog("study", planet, assistant));
+      toast(`語言學習 +${8 * state.civ} AENO`, "ok");
+      break;
+    case "mutate":
+      setDialog(pickDialog("mutate", planet, assistant));
+      break;
+  }
+  afterAction();
+}
+
+function afterAction() {
+  if (tryLevelUp()) {
+    toast(`✨ 文明升級！Lv.${state.civ}`, "ok");
+    const next = unlockNext();
+    if (next) { renderPlanets(); showUnlock(next); }
+    setDialog(`文明升到 Lv.${state.civ}！${next ? "新星球已解鎖！" : ""}`);
+  }
+  refreshStats();
+  saveState();
+}
+
+// 每 3 秒自動結算（在線收益）
+let tickTimer = null;
+export function startTicking() {
+  clearInterval(tickTimer);
+  tickTimer = setInterval(() => {
+    addAeno(0.05 * state.civ * 3);
+    afterAction();
+  }, 3000);
+}
+
+export { civThreshold };
+```
+
+### FILE: js/main.js
+```javascript
+// js/main.js — 進入點：Three.js 場景、相機、角色、動畫迴圈，串接 UI 與遊戲邏輯
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { buildWorld, rebuildIsland } from "./world3d.js";
+import { createCharacter, updateCharacter } from "./characters3d.js";
+import { assistantFor } from "./data.js";
+import { loadState, saveState, state, currentPlanet } from "./state.js";
+import { initUI, showGame, hideLoading, refreshStats, refreshAssistant, renderPlanets } from "./ui.js";
+import { handlers, startTicking } from "./game.js";
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x0a0f22, 90, 260);
+
+const camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.1, 1200);
+camera.position.set(9, 7, 12);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 6;
+controls.maxDistance = 30;
+controls.maxPolarAngle = Math.PI * 0.49;
+controls.target.set(0, 1.4, 0);
+
+// 光源
+scene.add(new THREE.HemisphereLight(0xffffff, 0x2a3550, 0.9));
+const key = new THREE.DirectionalLight(0xffffff, 2.0);
+key.position.set(12, 20, 10);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.camera.left = -30;
+key.shadow.camera.right = 30;
+key.shadow.camera.top = 30;
+key.shadow.camera.bottom = -30;
+key.shadow.camera.far = 90;
+key.shadow.bias = -0.0006;
+scene.add(key);
+const rim = new THREE.DirectionalLight(0x9fd4ff, 0.7);
+rim.position.set(-14, 8, -10);
+scene.add(rim);
+
+let world = null;
+let character = null;
+let characterTarget = null;
+let clock = new THREE.Clock();
+
+function placeCharacter() {
+  const { assistant } = assistantFor(state.planetId);
+  if (character) { scene.remove(character); disposeTree(character); }
+  character = createCharacter(assistant);
+  character.position.set(0, 0, 2.5);
+  character.userData.baseY = 0;
+  scene.add(character);
+  controls.target.set(0, 1.4, 0);
+  controls.update();
+}
+
+function disposeTree(obj) {
+  obj.traverse(o => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) {
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      mats.forEach(m => m.dispose());
+    }
+  });
+}
+
+function switchPlanet(planet) {
+  rebuildIsland(world, planet);
+  placeCharacter();
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+  const t = clock.getElapsedTime();
+  if (character) updateCharacter(character, t, dt);
+  if (world && world.stars) world.stars.rotation.y = t * 0.012;
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+function onResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+window.addEventListener("resize", onResize);
+
+// 啟動
+const offlineGain = loadState();
+world = buildWorld(currentPlanet());
+scene.add(world.group);
+placeCharacter();
+animate();
+
+initUI({
+  onLogin: handlers.onLogin,
+  onAction: handlers.onAction,
+  onPlanetChange: switchPlanet
+});
+handlers.onPlanetChange = switchPlanet;
+
+if (state.player) {
+  showGame();
+  refreshStats();
+  refreshAssistant();
+  renderPlanets();
+  startTicking();
+  toast(offlineGain > 0 ? `離線收益 +${offlineGain} AENO` : `歡迎返嚟，${state.player}`, offlineGain > 0 ? "ok" : "");
+}
+
+window.addEventListener("aeno:login", () => {
+  refreshStats();
+  refreshAssistant();
+  renderPlanets();
+  startTicking();
+});
+
+function toast(msg, type) {
+  import("./ui.js").then(ui => ui.toast(msg, type));
+}
+
+// 首次載入即隱藏 loading（3D 已就緒）
+hideLoading();
+saveState();
+
+// PWA
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch(() => {});
+  });
+}
+```
+
+### FILE: js/state.js
+```javascript
+// js/state.js — 遊戲狀態與存檔
+import { PLANETS } from "./data.js";
+
+const KEY = "aeno_v3_save";
+
+export const state = {
+  player: "",
+  aeno: 0,
+  civ: 1,
+  planetId: PLANETS[0].id,
+  unlocked: [PLANETS[0].id],
+  lastTick: Date.now()
+};
+
+export function loadState() {
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (raw) Object.assign(state, JSON.parse(raw));
+  } catch { /* 存檔壞咗就當新遊戲 */ }
+  // 離線收益：最多累計 24 小時
+  const elapsed = Math.min(Date.now() - (state.lastTick || Date.now()), 24 * 3600 * 1000);
+  const gained = Math.floor((elapsed / 1000) * 0.02 * state.civ);
+  state.aeno += gained;
+  state.lastTick = Date.now();
+  return gained;
+}
+
+export function saveState() {
+  state.lastTick = Date.now();
+  try { localStorage.setItem(KEY, JSON.stringify(state)); } catch { /* 私密模式可能失敗 */ }
+}
+
+export function resetState() {
+  localStorage.removeItem(KEY);
+  location.reload();
+}
+
+export function addAeno(n) {
+  state.aeno = Math.max(0, state.aeno + n);
+}
+
+export function currentPlanet() {
+  return PLANETS.find(p => p.id === state.planetId) || PLANETS[0];
+}
+
+export function planetIndex() {
+  return PLANETS.findIndex(p => p.id === state.planetId);
+}
+
+export function unlockNext() {
+  const i = planetIndex();
+  const next = PLANETS[i + 1];
+  if (next && !state.unlocked.includes(next.id)) {
+    state.unlocked.push(next.id);
+    return next;
+  }
+  return null;
+}
+
+// 文明升級門檻（每級需要 aeno * 遞增）
+export function civThreshold(level) {
+  return Math.floor(500 * Math.pow(1.7, level - 1));
+}
+
+export function tryLevelUp() {
+  if (state.aeno >= civThreshold(state.civ)) {
+    state.civ += 1;
+    return true;
+  }
+  return false;
+}
+```
+
+### FILE: js/ui.js
+```javascript
+// js/ui.js — HUD 綁定：數值、星球列、助手對話、toast、選單
+import { PLANETS, assistantFor, pickDialog } from "./data.js";
+import { state, saveState, resetState, currentPlanet, planetIndex, unlockNext, tryLevelUp } from "./state.js";
+
+let onPlanetChange = null;
+
+const $ = id => document.getElementById(id);
+
+export function initUI(handlers) {
+  onPlanetChange = handlers.onPlanetChange;
+
+  $("loginBtn").addEventListener("click", () => handlers.onLogin($("playerName").value.trim()));
+  $("playerName").addEventListener("keydown", e => { if (e.key === "Enter") handlers.onLogin($("playerName").value.trim()); });
+
+  $("planetPrev").addEventListener("click", () => stepPlanet(-1));
+  $("planetNext").addEventListener("click", () => stepPlanet(1));
+
+  $("btnTalk").addEventListener("click", () => handlers.onAction("talk"));
+  $("btnFeed").addEventListener("click", () => handlers.onAction("feed"));
+  $("btnScan").addEventListener("click", () => handlers.onAction("scan"));
+
+  document.querySelectorAll(".action").forEach(btn => {
+    btn.addEventListener("click", () => handlers.onAction(btn.dataset.action));
+  });
+
+  $("btnMenu").addEventListener("click", () => $("menuPanel").classList.toggle("hidden"));
+  $("btnClose").addEventListener("click", () => $("menuPanel").classList.add("hidden"));
+  $("btnSave").addEventListener("click", () => { saveState(); toast("進度已儲存", "ok"); });
+  $("btnReset").addEventListener("click", () => { if (confirm("確定重置所有進度？")) resetState(); });
+
+  window.addEventListener("beforeunload", saveState);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) saveState(); });
+}
+
+export function showGame() {
+  $("loginScreen").classList.add("hidden");
+  $("hud").classList.remove("hidden");
+  renderPlanets();
+}
+
+export function hideLoading() {
+  const el = $("loading");
+  el.style.opacity = "0";
+  setTimeout(() => el.remove(), 650);
+}
+
+export function renderPlanets() {
+  const list = $("planetList");
+  list.innerHTML = "";
+  PLANETS.forEach(p => {
+    const locked = !state.unlocked.includes(p.id);
+    const chip = document.createElement("button");
+    chip.className = "planet-chip" + (p.id === state.planetId ? " active" : "") + (locked ? " locked" : "");
+    chip.innerHTML = `<span>${p.flag}</span>${locked ? "？？？" : p.name}`;
+    chip.title = locked ? "尚未解鎖" : `${p.name} · ${p.language}`;
+    chip.addEventListener("click", () => {
+      if (locked) { toast("文明等級不足，未解鎖呢個星球", "warn"); return; }
+      if (p.id === state.planetId) return;
+      state.planetId = p.id;
+      saveState();
+      renderPlanets();
+      onPlanetChange && onPlanetChange(p);
+      refreshAssistant();
+    });
+    list.appendChild(chip);
+  });
+  const active = list.querySelector(".active");
+  if (active) active.scrollIntoView({ inline: "center", block: "nearest" });
+}
+
+function stepPlanet(dir) {
+  const unlocked = PLANETS.filter(p => state.unlocked.includes(p.id));
+  const i = unlocked.findIndex(p => p.id === state.planetId);
+  const next = unlocked[(i + dir + unlocked.length) % unlocked.length];
+  if (next && next.id !== state.planetId) {
+    state.planetId = next.id;
+    saveState();
+    renderPlanets();
+    onPlanetChange && onPlanetChange(next);
+    refreshAssistant();
+  }
+}
+
+export function refreshAssistant() {
+  const { planet, assistant } = assistantFor(state.planetId);
+  $("assistantName").textContent = assistant.name;
+  $("assistantSpecies").textContent = assistant.species;
+  setDialog(pickDialog("greet", planet, assistant));
+  return { planet, assistant };
+}
+
+export function setDialog(text) {
+  const el = $("assistantDialog");
+  el.style.opacity = "0";
+  setTimeout(() => { el.textContent = text; el.style.opacity = "1"; }, 140);
+}
+
+export function refreshStats() {
+  $("statAeno").textContent = Math.floor(state.aeno).toLocaleString();
+  $("statCiv").textContent = "Lv." + state.civ;
+  $("statPlanets").textContent = `${state.unlocked.length}/${PLANETS.length}`;
+}
+
+let toastTimer = null;
+export function toast(msg, type = "") {
+  const el = $("toast");
+  el.textContent = msg;
+  el.className = "show " + type;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = ""; }, 2200);
+}
+
+export function showUnlock(planet) {
+  toast(`🎉 解鎖新星球：${planet.name}（${planet.language}）`, "ok");
+}
+```
+
+### FILE: js/world3d.js
+```javascript
+// js/world3d.js — 3D 世界：漸層天空、星空、浮空島、星球主題地表與裝飾
+import * as THREE from "three";
+
+const SKY_VERT = `
+varying vec3 vPos;
+void main() {
+  vPos = position;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`;
+
+const SKY_FRAG = `
+uniform vec3 topColor;
+uniform vec3 bottomColor;
+uniform float offset;
+varying vec3 vPos;
+void main() {
+  float h = normalize(vPos + vec3(0.0, offset, 0.0)).y;
+  gl_FragColor = vec4(mix(bottomColor, topColor, max(pow(max(h, 0.0), 0.6), 0.0)), 1.0);
+}`;
+
+function hex(c) { return new THREE.Color(c); }
+
+function makeSky(top, bottom) {
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      topColor: { value: hex(top) },
+      bottomColor: { value: hex(bottom) },
+      offset: { value: 60 }
+    },
+    vertexShader: SKY_VERT,
+    fragmentShader: SKY_FRAG,
+    side: THREE.BackSide,
+    depthWrite: false
+  });
+  return new THREE.Mesh(new THREE.SphereGeometry(600, 32, 20), mat);
+}
+
+function makeStars(count = 900) {
+  const pos = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    const r = 320 + Math.random() * 160;
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(Math.random() * 0.9);
+    pos[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+    pos[i * 3 + 1] = r * Math.cos(phi) + 40;
+    pos[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  return new THREE.Points(geo, new THREE.PointsMaterial({ color: 0xffffff, size: 2.2, sizeAttenuation: true, transparent: true, opacity: 0.85 }));
+}
+
+function decorateIsland(group, planet) {
+  const groundMat = new THREE.MeshStandardMaterial({ color: hex(planet.ground), roughness: 0.85, metalness: 0.05 });
+  const accentMat = new THREE.MeshStandardMaterial({ color: hex(planet.accent), roughness: 0.5, metalness: 0.25 });
+  const rockMat = new THREE.MeshStandardMaterial({ color: 0x6b7280, roughness: 0.9 });
+
+  const island = new THREE.Mesh(new THREE.CylinderGeometry(26, 22, 3, 48), groundMat);
+  island.position.y = -1.5;
+  island.receiveShadow = true;
+  group.add(island);
+
+  // 島底錐體，做出浮空島感
+  const under = new THREE.Mesh(new THREE.ConeGeometry(22, 20, 48, 1, true), rockMat);
+  under.position.y = -13;
+  under.rotation.x = Math.PI;
+  group.add(under);
+
+  const decor = new THREE.Group();
+  group.add(decor);
+
+  const rng = (a, b) => a + Math.random() * (b - a);
+
+  // 建築：主塔 + 小屋
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * Math.PI * 2 + rng(-0.3, 0.3);
+    const r = rng(9, 16);
+    const h = rng(3, 8);
+    const tower = new THREE.Mesh(new THREE.BoxGeometry(rng(2, 3.4), h, rng(2, 3.4)), i % 2 ? accentMat : groundMat);
+    tower.position.set(Math.cos(a) * r, h / 2, Math.sin(a) * r);
+    tower.castShadow = true;
+    tower.receiveShadow = true;
+    decor.add(tower);
+
+    const roof = new THREE.Mesh(new THREE.ConeGeometry(rng(1.6, 2.6), rng(1.6, 2.6), 4), accentMat);
+    roof.position.set(tower.position.x, h + 1, tower.position.z);
+    roof.rotation.y = Math.PI / 4;
+    roof.castShadow = true;
+    decor.add(roof);
+  }
+
+  // 樹 / 晶體
+  const treeMat = new THREE.MeshStandardMaterial({ color: 0x2f8a45, roughness: 0.8 });
+  const trunkMat = new THREE.MeshStandardMaterial({ color: 0x6b4a2b, roughness: 0.9 });
+  const crystalMat = new THREE.MeshStandardMaterial({ color: hex(planet.accent), roughness: 0.15, metalness: 0.5, emissive: hex(planet.accent), emissiveIntensity: 0.35 });
+  for (let i = 0; i < 14; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = rng(4, 21);
+    const x = Math.cos(a) * r, z = Math.sin(a) * r;
+    if (Math.hypot(x, z) < 4) continue;
+    if (i % 3 === 0) {
+      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.2, 1.4, 8), trunkMat);
+      trunk.position.set(x, 0.7, z);
+      const leaf = new THREE.Mesh(new THREE.SphereGeometry(rng(0.7, 1.1), 12, 12), treeMat);
+      leaf.position.set(x, 1.7, z);
+      leaf.castShadow = true;
+      decor.add(trunk, leaf);
+    } else {
+      const c = new THREE.Mesh(new THREE.ConeGeometry(rng(0.3, 0.5), rng(1, 2), 6), crystalMat);
+      c.position.set(x, rng(0.5, 1), z);
+      c.castShadow = true;
+      decor.add(c);
+    }
+  }
+  return decor;
+}
+
+// 建立整個場景世界；回傳 { group, sky, stars, decor, update }
+export function buildWorld(planet) {
+  const group = new THREE.Group();
+  const sky = makeSky(planet.sky, "#0a0f22");
+  const stars = makeStars();
+  group.add(sky, stars);
+  const decor = decorateIsland(group, planet);
+  return { group, sky, stars, decor };
+}
+
+// 換星球時重建地表裝飾
+export function rebuildIsland(world, planet) {
+  if (world.decor) world.decor.parent.remove(world.decor);
+  world.group.children
+    .filter(c => c !== world.sky && c !== world.stars && c.userData.keep !== true)
+    .forEach(c => world.group.remove(c));
+  world.decor = decorateIsland(world.group, planet);
+  world.sky.material.uniforms.topColor.value = hex(planet.sky);
+  return world.decor;
+}
+```
+
+### FILE: style.css
+```css
+:root {
+  --bg: #0b1020;
+  --bg-2: #131a35;
+  --glass: rgba(20, 28, 56, 0.62);
+  --glass-brd: rgba(120, 190, 255, 0.28);
+  --txt: #eaf2ff;
+  --txt-dim: #9fb2d6;
+  --accent: #38bdf8;
+  --accent-2: #a855f7;
+  --gold: #ffd76a;
+  --danger: #ff5f7e;
+  --ok: #46e6a0;
+  --radius: 16px;
+  --shadow: 0 10px 34px rgba(0, 0, 0, 0.45);
+  --font: "PingFang HK", "Noto Sans HK", "Microsoft JhengHei", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: radial-gradient(circle at 50% 0%, var(--bg-2), var(--bg) 60%);
+  color: var(--txt);
+  font-family: var(--font);
+  user-select: none;
+}
+
+canvas { display: block; }
+
+.hidden { display: none !important; }
+
+/* ============ 啟動畫面 ============ */
+#loading {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  background: radial-gradient(circle at 50% 40%, #1b2550, #05070f 70%);
+  transition: opacity 0.6s ease;
+}
+#loading p { color: var(--txt-dim); letter-spacing: 0.16em; font-size: 13px; }
+.loader-orb {
+  width: 84px;
+  height: 84px;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg, var(--accent), var(--accent-2), var(--gold), var(--accent));
+  filter: blur(0.4px) drop-shadow(0 0 26px rgba(56, 189, 248, 0.75));
+  animation: spin 1.4s linear infinite;
+}
+.loader-orb::after {
+  content: "";
+  position: absolute;
+  inset: 9px;
+  border-radius: 50%;
+  background: #05070f;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ============ 登入 ============ */
+#loginScreen {
+  position: fixed;
+  inset: 0;
+  z-index: 150;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+  background:
+    radial-gradient(circle at 22% 18%, rgba(168, 85, 247, 0.34), transparent 46%),
+    radial-gradient(circle at 78% 82%, rgba(56, 189, 248, 0.34), transparent 46%),
+    linear-gradient(160deg, #0a0f22, #131a35 60%, #0a0f22);
+}
+.login-card {
+  width: min(420px, 100%);
+  padding: 34px 28px 28px;
+  border-radius: 24px;
+  background: var(--glass);
+  border: 1px solid var(--glass-brd);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+  text-align: center;
+  animation: rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes rise { from { opacity: 0; transform: translateY(26px) scale(0.97); } }
+.login-logo {
+  font-size: 40px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  background: linear-gradient(92deg, var(--accent), var(--accent-2) 55%, var(--gold));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 0 18px rgba(56, 189, 248, 0.5));
+}
+.login-logo span { font-size: 17px; margin-left: 6px; vertical-align: super; opacity: 0.85; }
+.login-card h1 { margin: 10px 0 4px; font-size: 21px; letter-spacing: 0.06em; }
+.login-sub { margin: 0 0 22px; color: var(--txt-dim); font-size: 13px; line-height: 1.7; }
+.login-card input {
+  width: 100%;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--glass-brd);
+  background: rgba(6, 10, 22, 0.72);
+  color: var(--txt);
+  font-size: 15px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.login-card input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.22);
+}
+.login-card button {
+  width: 100%;
+  margin-top: 14px;
+  padding: 14px;
+  border: none;
+  border-radius: 12px;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  font-family: inherit;
+  color: #041018;
+  cursor: pointer;
+  background: linear-gradient(92deg, var(--accent), var(--accent-2));
+  box-shadow: 0 8px 24px rgba(56, 189, 248, 0.4);
+  transition: transform 0.15s, filter 0.2s;
+}
+.login-card button:hover { filter: brightness(1.1); }
+.login-card button:active { transform: scale(0.97); }
+.login-hint { margin: 14px 0 0; font-size: 11px; color: var(--txt-dim); opacity: 0.7; }
+
+/* ============ HUD ============ */
+#hud { position: fixed; inset: 0; z-index: 40; pointer-events: none; }
+#hud > * { pointer-events: auto; }
+
+#topBar {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px calc(12px + env(safe-area-inset-top, 0px));
+  background: linear-gradient(180deg, rgba(6, 10, 22, 0.85), transparent);
+}
+.brand {
+  font-weight: 800;
+  font-size: 19px;
+  letter-spacing: 0.06em;
+  background: linear-gradient(92deg, var(--accent), var(--accent-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.brand span { font-size: 11px; margin-left: 3px; vertical-align: super; opacity: 0.8; }
+.stats { display: flex; gap: 8px; margin-left: auto; }
+.stat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--glass);
+  border: 1px solid var(--glass-brd);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  backdrop-filter: blur(12px);
+}
+.ico-aeno { color: var(--accent); font-style: normal; }
+.ico-civ { color: var(--gold); font-style: normal; }
+.ico-planet { font-style: normal; font-size: 12px; }
+.icon-btn {
+  width: 38px; height: 38px;
+  border-radius: 12px;
+  border: 1px solid var(--glass-brd);
+  background: var(--glass);
+  color: var(--txt);
+  font-size: 17px;
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+}
+
+/* 星球列 */
+#planetBar {
+  position: absolute;
+  left: 0; right: 0;
+  bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+}
+.planet-nav {
+  flex: 0 0 auto;
+  width: 34px; height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--glass-brd);
+  background: var(--glass);
+  color: var(--txt);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+}
+#planetList {
+  flex: 1;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding: 4px 2px;
+}
+#planetList::-webkit-scrollbar { display: none; }
+.planet-chip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 13px;
+  border-radius: 999px;
+  background: var(--glass);
+  border: 1px solid var(--glass-brd);
+  color: var(--txt-dim);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+  transition: transform 0.16s, color 0.2s, border-color 0.2s;
+}
+.planet-chip:active { transform: scale(0.95); }
+.planet-chip.active {
+  color: #041018;
+  font-weight: 700;
+  border-color: transparent;
+  background: linear-gradient(92deg, var(--accent), var(--accent-2));
+  box-shadow: 0 6px 18px rgba(56, 189, 248, 0.4);
+}
+.planet-chip.locked { opacity: 0.42; }
+
+/* 助手面板 */
+#assistantPanel {
+  position: absolute;
+  left: 14px;
+  bottom: calc(150px + env(safe-area-inset-bottom, 0px));
+  width: min(300px, 62vw);
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  background: var(--glass);
+  border: 1px solid var(--glass-brd);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px);
+}
+.assistant-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+#assistantName { font-weight: 700; font-size: 15px; }
+.tag {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.16);
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+#assistantDialog {
+  margin: 0 0 12px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--txt);
+  min-height: 42px;
+}
+.assistant-actions { display: flex; gap: 7px; }
+.assistant-actions button {
+  flex: 1;
+  padding: 9px 0;
+  border-radius: 10px;
+  border: 1px solid var(--glass-brd);
+  background: rgba(56, 189, 248, 0.12);
+  color: var(--txt);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.14s;
+}
+.assistant-actions button:hover { background: rgba(56, 189, 248, 0.26); }
+.assistant-actions button:active { transform: scale(0.95); }
+
+/* 動作列 */
+#actionBar {
+  position: absolute;
+  left: 0; right: 0;
+  bottom: 0;
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+  background: linear-gradient(0deg, rgba(6, 10, 22, 0.9), transparent);
+}
+.action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-width: 66px;
+  padding: 8px 10px;
+  border-radius: 13px;
+  border: 1px solid var(--glass-brd);
+  background: var(--glass);
+  color: var(--txt-dim);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+  transition: transform 0.15s, color 0.2s, border-color 0.2s;
+}
+.action span { font-size: 19px; }
+.action:hover { color: var(--txt); border-color: var(--accent); }
+.action:active { transform: scale(0.93); }
+
+/* Toast */
+#toast {
+  position: absolute;
+  left: 50%;
+  top: calc(72px + env(safe-area-inset-top, 0px));
+  transform: translateX(-50%) translateY(-12px);
+  max-width: 82vw;
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: rgba(8, 14, 30, 0.94);
+  border: 1px solid var(--glass-brd);
+  font-size: 13px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s, transform 0.3s;
+  box-shadow: var(--shadow);
+}
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+#toast.ok { border-color: rgba(70, 230, 160, 0.6); color: var(--ok); }
+#toast.warn { border-color: rgba(255, 95, 126, 0.6); color: var(--danger); }
+
+/* 選單 */
+#menuPanel {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(320px, 84vw);
+  padding: 22px;
+  border-radius: 20px;
+  background: rgba(12, 18, 38, 0.96);
+  border: 1px solid var(--glass-brd);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(20px);
+  text-align: center;
+}
+#menuPanel h2 { margin: 0 0 16px; font-size: 16px; letter-spacing: 0.1em; }
+#menuPanel button {
+  display: block;
+  width: 100%;
+  margin-bottom: 9px;
+  padding: 12px;
+  border-radius: 11px;
+  border: 1px solid var(--glass-brd);
+  background: rgba(56, 189, 248, 0.1);
+  color: var(--txt);
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+}
+#menuPanel button:hover { background: rgba(56, 189, 248, 0.24); }
+
+/* 適應細屏 */
+@media (max-width: 560px) {
+  #assistantPanel { left: 10px; right: 10px; width: auto; bottom: calc(158px + env(safe-area-inset-bottom, 0px)); }
+  .stat { padding: 5px 9px; font-size: 12px; }
+  .action { min-width: 58px; font-size: 10px; }
+  .action span { font-size: 17px; }
+}
+```
+
+### FILE: sw.js
+```javascript
+// sw.js — AENO V3 離線快取
+const CACHE = "aeno-v3-1";
+const ASSETS = [
+  "./", "./index.html", "./style.css",
+  "./manifest.json", "./planets.json",
+  "./js/main.js", "./js/data.js", "./js/state.js",
+  "./js/ui.js", "./js/game.js", "./js/world3d.js", "./js/characters3d.js"
+];
+
+self.addEventListener("install", e => {
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).catch(() => {}));
+  self.skipWaiting();
+});
+
+self.addEventListener("activate", e => {
+  e.waitUntil(caches.keys().then(ks => Promise.all(ks.map(k => k !== CACHE ? caches.delete(k) : null))));
+  self.clients.claim();
+});
+
+self.addEventListener("fetch", e => {
+  if (e.request.method !== "GET") return;
+  e.respondWith(
+    caches.match(e.request).then(r => r || fetch(e.request).then(resp => {
+      const copy = resp.clone();
+      caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
+      return resp;
+    }).catch(() => caches.match("./index.html")))
+  );
+});
+```

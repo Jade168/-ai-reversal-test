@@ -1,6 +1,7 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import { ModelBar } from '../types/quant';
 import { getGuiYuan, calculateDynamicReversals } from '../services/quantCalculations';
+import { calculateTFDRSeries } from '../services/tfdrIndicator';
 import { ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
 
 interface HeaderChartProps {
@@ -68,6 +69,16 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     return calculateDynamicReversals(activeData, timeframe, supportLevels, resistanceLevels);
   }, [activeData, timeframe, supportLevels, resistanceLevels]);
 
+  // 計算 TFDR 時空頻率減速共振序列（僅在極值 >80 或 <30 時於主圖局部繪製）
+  const tfdrSeries = useMemo(() => {
+    if (activeData.length === 0) return [];
+    return calculateTFDRSeries(
+      activeData.map(b => b.c),
+      activeData.map(b => b.h),
+      activeData.map(b => b.l)
+    );
+  }, [activeData]);
+
   // Redraw canvas
   const drawChart = useCallback(() => {
     const canvas = canvasRef.current;
@@ -119,6 +130,19 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
         maxPrice = Math.max(maxPrice, b.coreGravityLine * 1.01);
       }
     });
+
+    // TFDR 臨界單線：僅當最新 score > 80 或 < 30 且可視區包含最新 K 線時才納入極值視窗
+    const lastTfdr = tfdrSeries.length > 0 ? tfdrSeries[tfdrSeries.length - 1] : null;
+    const isLatestInView = endIdx === activeData.length - 1;
+    const showTfdrTop = Boolean(isLatestInView && lastTfdr && lastTfdr.score > 80);
+    const showTfdrBottom = Boolean(isLatestInView && lastTfdr && lastTfdr.score < 30);
+
+    if (showTfdrTop && lastTfdr && lastTfdr.band90 > 0) {
+      maxPrice = Math.max(maxPrice, lastTfdr.band90);
+    }
+    if (showTfdrBottom && lastTfdr && lastTfdr.band15 > 0) {
+      minPrice = Math.min(minPrice, lastTfdr.band15);
+    }
 
     // Add padding to price range
     const priceRange = maxPrice - minPrice || 1;
@@ -393,6 +417,76 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       ctx.setLineDash([]);
     }
 
+    // 8.5 TFDR 臨界單線極簡提示（30 <= score <= 80 完全隱藏防眼花）
+    if (lastTfdr && (showTfdrTop || showTfdrBottom)) {
+      const localStartX = margin.left + plotW * 0.7;
+      const localEndX = margin.left + plotW;
+
+      ctx.save();
+      if (showTfdrTop) {
+        const yTop = getY(lastTfdr.band90);
+        ctx.beginPath();
+        ctx.setLineDash([6, 4]);
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.72)';
+        ctx.lineWidth = 1.8;
+        ctx.moveTo(localStartX, yTop);
+        ctx.lineTo(localEndX, yTop);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        const labelText = `TFDR 90 危險頂 (${lastTfdr.band90})`;
+        ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
+        const textW = ctx.measureText(labelText).width;
+        const boxW = textW + 10;
+        const boxH = 16;
+        const boxX = localEndX - boxW - 4;
+        const boxY = Math.max(margin.top + 2, Math.min(margin.top + plotH - boxH - 2, yTop - boxH - 3));
+
+        ctx.fillStyle = 'rgba(127, 29, 29, 0.78)';
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.75)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(boxX, boxY, boxW, boxH, 3);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#fecaca';
+        ctx.textAlign = 'center';
+        ctx.fillText(labelText, boxX + boxW / 2, boxY + 11.5);
+      } else if (showTfdrBottom) {
+        const yBot = getY(lastTfdr.band15);
+        ctx.beginPath();
+        ctx.setLineDash([6, 4]);
+        ctx.strokeStyle = 'rgba(16, 185, 129, 0.72)';
+        ctx.lineWidth = 1.8;
+        ctx.moveTo(localStartX, yBot);
+        ctx.lineTo(localEndX, yBot);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        const labelText = `TFDR 15 黃金底 (${lastTfdr.band15})`;
+        ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
+        const textW = ctx.measureText(labelText).width;
+        const boxW = textW + 10;
+        const boxH = 16;
+        const boxX = localEndX - boxW - 4;
+        const boxY = Math.max(margin.top + 2, Math.min(margin.top + plotH - boxH - 2, yBot + 3));
+
+        ctx.fillStyle = 'rgba(6, 78, 59, 0.78)';
+        ctx.strokeStyle = 'rgba(16, 185, 129, 0.75)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(boxX, boxY, boxW, boxH, 3);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#a7f3d0';
+        ctx.textAlign = 'center';
+        ctx.fillText(labelText, boxX + boxW / 2, boxY + 11.5);
+      }
+      ctx.restore();
+    }
+
     // 9. Interactive Crosshair & Tooltip
     if (mousePos && mousePos.x >= margin.left && mousePos.x <= margin.left + plotW) {
       const relX = mousePos.x - margin.left;
@@ -449,7 +543,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     }
 
     ctx.restore();
-  }, [activeData, viewRange, boxMarkers, hologramLine, mousePos]);
+  }, [activeData, viewRange, boxMarkers, hologramLine, mousePos, tfdrSeries]);
 
   // Handle Resize
   useEffect(() => {

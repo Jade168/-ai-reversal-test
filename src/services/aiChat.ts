@@ -1,5 +1,6 @@
 import { ModelBar, SymbolInfo, BacktestStats, BatchScanResult, ApiConfig, NewsItem } from '../types/quant';
 import { QUANT_CONFIG } from './quantCalculations';
+import { MultiTimeframeTFDR } from './tfdrIndicator';
 
 export interface QuantContext {
   symbolInfo: SymbolInfo | null;
@@ -9,12 +10,44 @@ export interface QuantContext {
   newsList: NewsItem[];
   sentiment: string;
   globalHotNews: NewsItem[];
+  tfdr?: MultiTimeframeTFDR | null;
+}
+
+function formatTfdrSystemBlock(tfdr?: MultiTimeframeTFDR | null): string {
+  if (!tfdr) return '';
+  return `【TFDR 時空頻率減速共振指標（日/週/月三維奇點矩陣）】
+- 日線分數：${tfdr.dailyScore}（>80 危險頂，<30 黃金底）
+- 週線分數：${tfdr.weeklyScore}
+- 月線分數：${tfdr.monthlyScore}
+- 當前狀態：${tfdr.regimeTitle}（風險級別：${tfdr.riskLevel}）
+- 系統策略建議：${tfdr.actionAdvice}
+請在分析同回答時務必結合以上日／週／月 TFDR 分數與奇點狀態，給出明確嘅倉位控制與操作建議。`;
 }
 
 // ===================== 本地 AI 大腦 (秒級響應，純正粵語) =====================
 export function generateLocalAiResponse(input: string, context: QuantContext): string {
   const lowerInput = input.toLowerCase();
-  const { symbolInfo, modelData, stats, batchScanResults, sentiment } = context;
+  const { symbolInfo, modelData, stats, batchScanResults, sentiment, tfdr } = context;
+
+  if (
+    lowerInput.includes('tfdr') ||
+    lowerInput.includes('奇點') ||
+    lowerInput.includes('減速') ||
+    lowerInput.includes('共振矩陣') ||
+    lowerInput.includes('分數')
+  ) {
+    if (!symbolInfo || !tfdr) {
+      return '你仲未分析股票或者未計算出 TFDR 三維數據㗎！請先喺上方輸入股票代碼並點擊「啟動分析」。';
+    }
+    return `【${symbolInfo.symbol} TFDR 時空奇點共振矩陣（粵語解讀）】
+📊 三維週期分數（>80 危險頂 / <30 黃金底）：
+• 日線 TFDR：${tfdr.dailyScore} 分
+• 週線 TFDR：${tfdr.weeklyScore} 分
+• 月線 TFDR：${tfdr.monthlyScore} 分
+
+🧭 當前奇點判定：${tfdr.regimeTitle}
+💡 實戰操作建議：${tfdr.actionAdvice}`;
+  }
 
   if (
     lowerInput.includes('批量') ||
@@ -103,6 +136,10 @@ export function generateLocalAiResponse(input: string, context: QuantContext): s
       reply += `✅ 操作策略：區間高拋低吸，嚴格控制總倉位唔好超過5成`;
     }
 
+    if (tfdr) {
+      reply += `\n\n⚡ 【TFDR 三維奇點參考】日線 ${tfdr.dailyScore} / 週線 ${tfdr.weeklyScore} / 月線 ${tfdr.monthlyScore}\n狀態：${tfdr.regimeTitle}\n建議：${tfdr.actionAdvice}`;
+    }
+
     reply += `\n\n⚠️ 風險提示：以上建議基於1836.15數律量化模型計算，市場有風險，入市需謹慎。`;
     return reply;
   }
@@ -138,6 +175,10 @@ export function generateLocalAiResponse(input: string, context: QuantContext): s
     reply += `🟢 強支撐位：$${symbolInfo.supportLine1.toFixed(2)} ${currency}（關鍵防守底線）\n`;
     reply += `🟡 弱支撐位：$${symbolInfo.supportLine2.toFixed(2)} ${currency}\n`;
     reply += `🔴 動態阻力位：$${symbolInfo.resistanceLine.toFixed(2)} ${currency}（升破先有新一輪爆發空間）\n\n`;
+    if (tfdr) {
+      reply += `⚡ TFDR 三維奇點矩陣：日 ${tfdr.dailyScore} | 週 ${tfdr.weeklyScore} | 月 ${tfdr.monthlyScore}（${tfdr.regimeTitle}）\n`;
+      reply += `📌 TFDR 策略：${tfdr.actionAdvice}\n\n`;
+    }
     reply += `💡 操作心法：貼近強支撐分批低吸，逼近阻力位分批落袋，順勢而行。`;
 
     return reply;
@@ -188,8 +229,13 @@ export function generateLocalAiResponse(input: string, context: QuantContext): s
     reply += `強支撐：$${symbolInfo.supportLine1.toFixed(2)}\n`;
     reply += `阻力位：$${symbolInfo.resistanceLine.toFixed(2)}\n`;
     reply += `新聞情緒：${sentiment}\n`;
-    reply += `當前信號：${lastBar.buySignal ? '🟢 買入' : lastBar.sellSignal ? '🔴 賣出' : '⚪ 觀望'}\n\n`;
-    reply += `你可以隨時問我：\n`;
+    reply += `當前信號：${lastBar.buySignal ? '🟢 買入' : lastBar.sellSignal ? '🔴 賣出' : '⚪ 觀望'}\n`;
+    if (tfdr) {
+      reply += `\n⚡ TFDR 時空奇點（日/週/月）：${tfdr.dailyScore} / ${tfdr.weeklyScore} / ${tfdr.monthlyScore}\n`;
+      reply += `判定：${tfdr.regimeTitle}\n`;
+      reply += `建議：${tfdr.actionAdvice}\n`;
+    }
+    reply += `\n你可以隨時問我：\n`;
     reply += `👉 「呢隻股入場位同止損位設喺邊？」\n`;
     reply += `👉 「批量掃描嘅股票邊隻值得買？」\n`;
     reply += `👉 「策略歷史勝率同回撤點樣？」\n`;
@@ -202,7 +248,11 @@ export function generateLocalAiResponse(input: string, context: QuantContext): s
 
 // ===================== 專家深度分析 (Claude / Gemini / 自定義 AI) =====================
 export async function callExpertAi(input: string, context: QuantContext, apiConfig: ApiConfig): Promise<string> {
-  const { symbolInfo, modelData, stats, batchScanResults, newsList, sentiment, globalHotNews } = context;
+  const { symbolInfo, modelData, stats, batchScanResults, newsList, sentiment, globalHotNews, tfdr } = context;
+  const tfdrSystemBlock = formatTfdrSystemBlock(tfdr);
+  const effectiveSystemPrompt = tfdrSystemBlock
+    ? `${QUANT_CONFIG.systemPrompt}\n\n${tfdrSystemBlock}`
+    : QUANT_CONFIG.systemPrompt;
 
   // 建立 15 維度數據上下文
   let marketContext = '暫無股票數據，請先執行分析獲取真實市場數據';
@@ -268,6 +318,8 @@ ${batchScanResults.length > 0 ? batchScanResults.map(r => `${r.symbol}: ${r.sign
 
 【全球市場熱點】
 ${globalHotNews.length > 0 ? globalHotNews.slice(0, 3).map((n, i) => `${i + 1}. ${n.title}`).join('\n') : '未抓取全球熱點'}
+
+${tfdr ? tfdrSystemBlock : ''}
     `.trim();
   }
 
@@ -284,7 +336,7 @@ ${globalHotNews.length > 0 ? globalHotNews.slice(0, 3).map((n, i) => `${i + 1}. 
         body: {
           model: 'claude-3-5-sonnet-20241022',
           max_tokens: 4096,
-          system: QUANT_CONFIG.systemPrompt,
+          system: effectiveSystemPrompt,
           messages: [{ role: 'user', content: `${input}\n\n【真實市場數據上下文】：\n${marketContext}` }],
           temperature: 0.3
         }
@@ -311,7 +363,7 @@ ${globalHotNews.length > 0 ? globalHotNews.slice(0, 3).map((n, i) => `${i + 1}. 
         body: {
           model: apiConfig.provider === 'gemini' ? 'gemini-2.0-flash-exp' : 'gpt-4o',
           messages: [
-            { role: 'system', content: QUANT_CONFIG.systemPrompt },
+            { role: 'system', content: effectiveSystemPrompt },
             { role: 'user', content: `${input}\n\n【真實市場數據上下文】：\n${marketContext}` }
           ],
           temperature: 0.3,
@@ -333,14 +385,15 @@ ${globalHotNews.length > 0 ? globalHotNews.slice(0, 3).map((n, i) => `${i + 1}. 
   }
 
   // 若未配置外部 API，提供內建高階專家分析
-  return generateBuiltinExpertAnalysis(symbolInfo, modelData, stats, sentiment);
+  return generateBuiltinExpertAnalysis(symbolInfo, modelData, stats, sentiment, tfdr);
 }
 
 function generateBuiltinExpertAnalysis(
   symbolInfo: SymbolInfo | null,
   modelData: ModelBar[],
   stats: BacktestStats | null,
-  sentiment: string
+  sentiment: string,
+  tfdr?: MultiTimeframeTFDR | null
 ): string {
   if (!symbolInfo || modelData.length === 0 || !stats) {
     return '【專家分析提點】：請先輸入股票代碼並點擊「啟動分析」，或於上方配置專屬 Claude / Gemini API 密鑰以開啟雲端超大模型即時推理。';
@@ -355,6 +408,10 @@ function generateBuiltinExpertAnalysis(
     : (lastBar.c * 0.857143).toFixed(2);
   const stopLoss = (symbolInfo.supportLine1 * 0.98).toFixed(2);
 
+  const tfdrSection = tfdr
+    ? `\n\n3. TFDR 時空奇點三維共振評估：\n   - 日線分數：${tfdr.dailyScore} | 週線分數：${tfdr.weeklyScore} | 月線分數：${tfdr.monthlyScore}\n   - 狀態判定：${tfdr.regimeTitle}\n   - 奇點建議：${tfdr.actionAdvice}`
+    : '';
+
   return `📊 【1836.15 數律專家深度解讀】
 
 1. 核心結論：
@@ -364,21 +421,21 @@ function generateBuiltinExpertAnalysis(
 2. 技術面深度剖析：
    - 現價 $${symbolInfo.latestPrice}，1836.15數律中樞核心線位於 $${lastBar.coreGravityLine.toFixed(2)}。
    - 動態強支撐位築於 $${symbolInfo.supportLine1.toFixed(2)}，阻力位在 $${symbolInfo.resistanceLine.toFixed(2)}。
-   - 價格歸元數為【${lastBar.priceGuiYuan}】，${[3, 6, 9].includes(lastBar.priceGuiYuan) ? '正處於時空共振窗，信號動能顯著增強' : '未達極值共振點，屬於常規震盪整理'}。
+   - 價格歸元數為【${lastBar.priceGuiYuan}】，${[3, 6, 9].includes(lastBar.priceGuiYuan) ? '正處於時空共振窗，信號動能顯著增強' : '未達極值共振點，屬於常規震盪整理'}。${tfdrSection}
 
-3. 基本面與情緒評估：
+4. 基本面與情緒評估：
    - 當前市場整體情緒評定為【${sentiment}】，資金在關鍵技術防守位表現出較強韌性。
 
-4. 歷史回測參考：
+5. 歷史回測參考：
    - 歷史勝率 ${stats.winRate}%，盈虧比 ${stats.profitLossRatio}，最大回撤 ${stats.maxDrawdown}%。
    - 策略評級：${parseFloat(stats.winRate) >= 50 ? '合格可信，具備正期望值收益' : '勝率偏低，切勿追漲殺跌'}。
 
-5. 具體操作建議（嚴格量化）：
+6. 具體操作建議（嚴格量化）：
    - 入場位：可在 $${symbolInfo.supportLine1.toFixed(2)} 至 $${symbolInfo.latestPrice} 分批逢低低吸。
    - 止盈位：第一目標 $${symbolInfo.resistanceLine.toFixed(2)} 減持一半，第二目標 $${targetPrice} 全部落袋。
    - 硬止損位：嚴格設在 $${stopLoss}（跌穿強支撐2%堅決離場，切忌心存僥倖）。
    - 倉位指引：建議維持3成倉位試水，總倉位切勿超過5成。
 
-6. 風險警示：
+7. 風險警示：
    - 留意宏觀利率及突發消息衝擊，風險等級評估為【中等】。如需進一步自定義參數，可隨時於頂部輸入配置。`;
 }

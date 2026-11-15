@@ -1,5 +1,6 @@
 import React from 'react';
 import { ModelBar, SymbolInfo, BacktestStats, ResonanceAnalysis } from '../types/quant';
+import { MultiTimeframeTFDR } from '../services/tfdrIndicator';
 
 interface SignalAndStatsAreaProps {
   lastBar: ModelBar | null;
@@ -8,7 +9,44 @@ interface SignalAndStatsAreaProps {
   resonance: ResonanceAnalysis | null;
   sentiment: string;
   userBuyPrice: string;
+  tfdr?: MultiTimeframeTFDR | null;
 }
+
+const getScoreTone = (score: number) => {
+  if (score > 80) return 'text-red-400';
+  if (score < 30) return 'text-emerald-400';
+  if (score >= 70) return 'text-amber-300';
+  return 'text-slate-100';
+};
+
+const getRiskCardStyle = (riskLevel: MultiTimeframeTFDR['riskLevel']) => {
+  switch (riskLevel) {
+    case 'EXTREME_TOP':
+      return {
+        wrapper: 'bg-red-950/35 border-red-500/70',
+        title: 'text-red-300',
+        badge: 'bg-red-500/20 text-red-300 border-red-500/50'
+      };
+    case 'SHORT_OVERHEAT':
+      return {
+        wrapper: 'bg-amber-950/30 border-amber-500/70',
+        title: 'text-amber-300',
+        badge: 'bg-amber-500/20 text-amber-300 border-amber-500/50'
+      };
+    case 'EXTREME_BOTTOM':
+      return {
+        wrapper: 'bg-emerald-950/35 border-emerald-500/70',
+        title: 'text-emerald-300',
+        badge: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50'
+      };
+    default:
+      return {
+        wrapper: 'bg-[#0f172a]/90 border-slate-700',
+        title: 'text-sky-300',
+        badge: 'bg-slate-800 text-slate-300 border-slate-600'
+      };
+  }
+};
 
 export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
   lastBar,
@@ -16,7 +54,8 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
   stats,
   resonance,
   sentiment,
-  userBuyPrice
+  userBuyPrice,
+  tfdr
 }) => {
   if (!lastBar || !symbolInfo || !stats) return null;
 
@@ -36,9 +75,52 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
 
   const numericBuyPrice = userBuyPrice ? parseFloat(userBuyPrice) : null;
   const isTotalReturnProfit = parseFloat(stats.totalReturn) >= 0;
+  const tfdrTheme = tfdr ? getRiskCardStyle(tfdr.riskLevel) : null;
 
   return (
     <div className="mb-1 space-y-1">
+      {/* TFDR 時空奇點共振矩陣 */}
+      {tfdr && tfdrTheme && (
+        <div className={`p-2 rounded-md border text-xs ${tfdrTheme.wrapper}`}>
+          <div className="flex items-center justify-between mb-1.5">
+            <span className={`font-bold text-[11px] ${tfdrTheme.title}`}>
+              ⚡ TFDR 時空奇點共振矩陣
+            </span>
+            <span className={`px-1.5 py-0.5 rounded-xs border text-[9px] font-semibold ${tfdrTheme.badge}`}>
+              {tfdr.riskLevel}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-3 gap-1 mb-1.5">
+            <div className="bg-black/50 p-1.5 rounded-sm text-center border border-white/10">
+              <div className="text-[9px] text-gray-400">日線分數</div>
+              <div className={`text-sm font-extrabold font-mono ${getScoreTone(tfdr.dailyScore)}`}>
+                {tfdr.dailyScore}
+              </div>
+            </div>
+            <div className="bg-black/50 p-1.5 rounded-sm text-center border border-white/10">
+              <div className="text-[9px] text-gray-400">週線分數</div>
+              <div className={`text-sm font-extrabold font-mono ${getScoreTone(tfdr.weeklyScore)}`}>
+                {tfdr.weeklyScore}
+              </div>
+            </div>
+            <div className="bg-black/50 p-1.5 rounded-sm text-center border border-white/10">
+              <div className="text-[9px] text-gray-400">月線分數</div>
+              <div className={`text-sm font-extrabold font-mono ${getScoreTone(tfdr.monthlyScore)}`}>
+                {tfdr.monthlyScore}
+              </div>
+            </div>
+          </div>
+
+          <div className={`font-bold text-[11px] mb-0.5 ${tfdrTheme.title}`}>
+            {tfdr.regimeTitle}
+          </div>
+          <div className="text-[10.5px] leading-relaxed text-gray-200">
+            {tfdr.actionAdvice}
+          </div>
+        </div>
+      )}
+
       {/* Date & Live Price Header */}
       <div className="flex items-center justify-between text-xs mb-1">
         <span className="px-1.5 py-0.5 rounded-xs bg-[#1f2937] text-gray-400 text-[10px]">

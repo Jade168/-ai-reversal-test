@@ -28,6 +28,7 @@ import {
   analyzeNewsImpact
 } from './services/marketData';
 import { generateLocalAiResponse, callExpertAi, QuantContext } from './services/aiChat';
+import { MultiTimeframeTFDR, computeMultiTimeframeTFDRFromDaily } from './services/tfdrIndicator';
 
 import { HeaderChart } from './components/HeaderChart';
 import { ApiConfigCard } from './components/ApiConfigCard';
@@ -64,6 +65,7 @@ export const App: React.FC = () => {
     techInfo: { score: 0, detail: '' },
     forecastLine: []
   });
+  const [tfdr, setTfdr] = useState<MultiTimeframeTFDR | null>(null);
 
   // UI Status
   const [isLoading, setIsLoading] = useState(false);
@@ -218,9 +220,24 @@ export const App: React.FC = () => {
       const zAxisResult = calculateFourierZAxis(closePrices);
       setFourier(zAxisResult);
 
+      // TFDR 3-Timeframe Singularity Resonance Matrix (from daily data aggregated to 5-bar weekly & 21-bar monthly)
+      let dailyKlinesForTfdr = klines;
+      if (period !== 'daily') {
+        try {
+          const fetchedDaily = await fetchMarketData(sym, assetType, 'daily', dataSource);
+          if (fetchedDaily.length > 0) {
+            dailyKlinesForTfdr = fetchedDaily;
+          }
+        } catch {
+          dailyKlinesForTfdr = klines;
+        }
+      }
+      const tfdrMatrix = computeMultiTimeframeTFDRFromDaily(dailyKlinesForTfdr);
+      setTfdr(tfdrMatrix);
+
       addChatMessage(
         'ai',
-        `📊 【${sym} 369+142857 複合共振分析速覽】\n\n【現價位置】現價: $${lastBar.c.toFixed(2)} | 歸元數: ${resAnalysis.guiYuan.current}\n\n【142857 循環位】\n🟢 溝貨區: $${resAnalysis.suggestions.strongBuy} - $${resAnalysis.suggestions.buyZone}\n🔴 賣出區: $${resAnalysis.suggestions.sellZone} - $${resAnalysis.suggestions.target2}\n\n【信號判斷】${resAnalysis.signal} - ${resAnalysis.action}\n\n【回測數據】總收益率: ${bStats.totalReturn}% | 勝率: ${bStats.winRate}%`
+        `📊 【${sym} 369+142857 複合共振分析速覽】\n\n【現價位置】現價: $${lastBar.c.toFixed(2)} | 歸元數: ${resAnalysis.guiYuan.current}\n\n【142857 循環位】\n🟢 溝貨區: $${resAnalysis.suggestions.strongBuy} - $${resAnalysis.suggestions.buyZone}\n🔴 賣出區: $${resAnalysis.suggestions.sellZone} - $${resAnalysis.suggestions.target2}\n\n【TFDR 三維奇點】日線 ${tfdrMatrix.dailyScore} | 週線 ${tfdrMatrix.weeklyScore} | 月線 ${tfdrMatrix.monthlyScore}\n${tfdrMatrix.regimeTitle}\n\n【信號判斷】${resAnalysis.signal} - ${resAnalysis.action}\n\n【回測數據】總收益率: ${bStats.totalReturn}% | 勝率: ${bStats.winRate}%`
       );
     } catch (err: any) {
       console.error(err);
@@ -375,7 +392,8 @@ export const App: React.FC = () => {
       batchScanResults,
       newsList,
       sentiment,
-      globalHotNews
+      globalHotNews,
+      tfdr
     };
 
     setTimeout(() => {
@@ -400,7 +418,8 @@ export const App: React.FC = () => {
       batchScanResults,
       newsList,
       sentiment,
-      globalHotNews
+      globalHotNews,
+      tfdr
     };
 
     try {
@@ -515,6 +534,7 @@ export const App: React.FC = () => {
             resonance={resonance}
             sentiment={sentiment}
             userBuyPrice={buyPrice}
+            tfdr={tfdr}
           />
 
           {/* Fourier Z-Axis Component */}
