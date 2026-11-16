@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { NewsItem, TradeLog } from '../types/quant';
+import { NewsItem } from '../types/quant';
 import { RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
 
 interface HotNewsAndTickersProps {
@@ -8,7 +8,6 @@ interface HotNewsAndTickersProps {
   onRefreshNews: () => void;
   onAnalyzeNews: (news: NewsItem) => void;
   onQuickLook: (symbol: string) => void;
-  tradeLogs: TradeLog[];
 }
 
 export const HotNewsAndTickers: React.FC<HotNewsAndTickersProps> = ({
@@ -16,8 +15,7 @@ export const HotNewsAndTickers: React.FC<HotNewsAndTickersProps> = ({
   isFetchingNews,
   onRefreshNews,
   onAnalyzeNews,
-  onQuickLook,
-  tradeLogs
+  onQuickLook
 }) => {
   const [newsExpanded, setNewsExpanded] = useState(false);
 
@@ -119,62 +117,6 @@ export const HotNewsAndTickers: React.FC<HotNewsAndTickersProps> = ({
           ) : (
             <div className="text-[#666] text-center py-2 text-[11px]">
               點擊「刷新」抓取最新財經資訊...
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* 雙核回測交易紀錄（融入 TFDR 奇點訊號 + 獨立上下滑動視窗） */}
-      <div className="bg-slate-900/90 border border-slate-700/80 rounded-lg p-2.5 mt-1">
-        <div className="flex items-center justify-between mb-1.5 pb-1 border-b border-slate-800">
-          <span className="text-xs font-bold text-amber-400">
-            📜 雙核回測交易紀錄（上下滑動檢視全部）
-          </span>
-          <span className="text-[11px] text-slate-400">
-            共 {tradeLogs.length} 筆歷史訊號
-          </span>
-        </div>
-        <div className="max-h-64 overflow-y-auto pr-1 space-y-1.5 overscroll-contain">
-          {tradeLogs.length > 0 ? (
-            tradeLogs.map((log, idx) => (
-              <div
-                key={idx}
-                className="text-xs p-1.5 rounded bg-slate-800/70 border border-slate-700/50 flex items-center justify-between gap-2"
-              >
-                <div className="min-w-0 flex items-center flex-wrap gap-1">
-                  <span className="text-slate-400 font-mono text-[11px]">
-                    [{log.date || '--'}]
-                  </span>
-                  <span
-                    className={`font-bold ${
-                      log.type.toUpperCase().includes('BUY')
-                        ? 'text-emerald-400'
-                        : 'text-red-400'
-                    }`}
-                  >
-                    {log.type}
-                  </span>
-                  <span className="px-1 py-0.2 text-[10px] rounded bg-indigo-950 text-indigo-300 border border-indigo-700/50">
-                    {log.source || '數律+TFDR共振'}
-                  </span>
-                </div>
-                <div className="text-right font-mono text-[11px] shrink-0">
-                  <span className="text-slate-200">${log.price || '--'}</span>
-                  {log.profit !== undefined && (
-                    <span
-                      className={`ml-1.5 font-bold ${
-                        log.profit >= 0 ? 'text-emerald-400' : 'text-red-400'
-                      }`}
-                    >
-                      {log.profit >= 0 ? `+${log.profit}%` : `${log.profit}%`}
-                    </span>
-                  )}
-                </div>
-              </div>
-            ))
-          ) : (
-            <div className="text-slate-500 text-center py-4 text-xs">
-              點擊「啟動分析」生成數律＋TFDR 雙核回測紀錄...
             </div>
           )}
         </div>

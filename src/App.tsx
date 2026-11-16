@@ -199,8 +199,21 @@ export const App: React.FC = () => {
 
       setModelData(computedModel);
 
-      // Backtest Engine
-      const { stats: bStats, logs } = runBacktestEngine(computedModel, fund, period);
+      // Fetch daily series first when viewing weekly/monthly/5min so backtest & TFDR matrix both align across daily/weekly/monthly
+      let dailyKlinesForTfdr = klines;
+      if (period !== 'daily') {
+        try {
+          const fetchedDaily = await fetchMarketData(sym, assetType, 'daily', dataSource);
+          if (fetchedDaily.length > 0) {
+            dailyKlinesForTfdr = fetchedDaily;
+          }
+        } catch {
+          dailyKlinesForTfdr = klines;
+        }
+      }
+
+      // Backtest Engine (1836.15 數律 + TFDR 日週月三維共振融合版)
+      const { stats: bStats, logs } = runBacktestEngine(computedModel, fund, period, dailyKlinesForTfdr);
       setStats(bStats);
       setTradeLogs(logs);
 
@@ -227,17 +240,6 @@ export const App: React.FC = () => {
       setFourier(zAxisResult);
 
       // TFDR 3-Timeframe Singularity Resonance Matrix (from daily data aggregated to 5-bar weekly & 21-bar monthly)
-      let dailyKlinesForTfdr = klines;
-      if (period !== 'daily') {
-        try {
-          const fetchedDaily = await fetchMarketData(sym, assetType, 'daily', dataSource);
-          if (fetchedDaily.length > 0) {
-            dailyKlinesForTfdr = fetchedDaily;
-          }
-        } catch {
-          dailyKlinesForTfdr = klines;
-        }
-      }
       const tfdrMatrix = computeMultiTimeframeTFDRFromDaily(dailyKlinesForTfdr);
       setTfdr(tfdrMatrix);
 
@@ -539,7 +541,7 @@ export const App: React.FC = () => {
             isScanningBatch={isScanningBatch}
           />
 
-          {/* Signals and Statistics */}
+          {/* Signals, Statistics & Integrated Trade Logs */}
           <SignalAndStatsArea
             lastBar={modelData.length > 0 ? modelData[modelData.length - 1] : null}
             symbolInfo={symbolInfo}
@@ -549,6 +551,7 @@ export const App: React.FC = () => {
             userBuyPrice={buyPrice}
             tfdr={tfdr}
             latestTfdrPoint={latestTfdrPoint}
+            tradeLogs={tradeLogs}
           />
 
           {/* Fourier Z-Axis Component */}
@@ -563,14 +566,13 @@ export const App: React.FC = () => {
             />
           )}
 
-          {/* Hot News, Watchlists & Trade Logs */}
+          {/* Hot News & Watchlists */}
           <HotNewsAndTickers
             newsList={globalHotNews}
             isFetchingNews={isFetchingNews}
             onRefreshNews={handleFetchGlobalNews}
             onAnalyzeNews={handleAnalyzeNews}
             onQuickLook={handleQuickLook}
-            tradeLogs={tradeLogs}
           />
         </div>
       </div>
