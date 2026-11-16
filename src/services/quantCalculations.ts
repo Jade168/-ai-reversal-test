@@ -1012,7 +1012,50 @@ export function calculateCosmicReversalSignal(klineData: RawKline[], currentPeri
   return results;
 }
 
-// ===================== 回測引擎（AI 信心度分批加減倉模型・金字塔操盤法） =====================
+interface HeikinAshiBar {
+  date: string;
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  rawClose: number;
+  isBullish: boolean; // 平均陽燭
+  isBearish: boolean; // 平均陰燭
+}
+
+function computeHeikinAshi(data: ModelBar[]): HeikinAshiBar[] {
+  const ha: HeikinAshiBar[] = [];
+  for (let i = 0; i < data.length; i += 1) {
+    const d = data[i];
+    const dOpen = Number(d.o);
+    const dHigh = Number(d.h);
+    const dLow = Number(d.l);
+    const dClose = Number(d.c);
+
+    const haClose = (dOpen + dHigh + dLow + dClose) / 4;
+    const haOpen = i === 0 ? (dOpen + dClose) / 2 : (ha[i - 1].open + ha[i - 1].close) / 2;
+    const haHigh = Math.max(dHigh, haOpen, haClose);
+    const haLow = Math.min(dLow, haOpen, haClose);
+
+    ha.push({
+      date: (d.date || '').split(' ')[0],
+      timestamp: Number.isFinite(Number(d.timestamp))
+        ? Number(d.timestamp)
+        : Date.parse(String(d.date || '')),
+      open: haOpen,
+      high: haHigh,
+      low: haLow,
+      close: haClose,
+      rawClose: dClose,
+      isBullish: haClose > haOpen,
+      isBearish: haClose < haOpen
+    });
+  }
+  return ha;
+}
+
+// ===================== 回測引擎（TFDR 奇點能量 ＋ 平均K線 Heikin-Ashi 破梯確認） =====================
 export function runBacktestEngine(
   modelData: ModelBar[],
   configuredFund: number = 1000000,
@@ -1033,26 +1076,24 @@ export function runBacktestEngine(
   const trades: { profit: number }[] = [];
   const logs: TradeLog[] = [];
 
+  const haData = computeHeikinAshi(modelData);
   const sourceDaily = dailyBars && dailyBars.length > 0 ? dailyBars : modelData;
   const alignedTfdr = computeAlignedMultiTimeframeTFDRSeries(sourceDaily);
   let tfdrCursor = 0;
-  const levelTol = Math.max(0.02, getTimeframeParams(period).tolerance);
-  const startIdx = modelData.length > 40 ? 30 : Math.min(10, Math.floor(modelData.length * 0.2));
+  const startIdx = haData.length > 40 ? 30 : Math.max(2, Math.min(10, Math.floor(haData.length * 0.2)));
 
-  for (let i = 0; i < modelData.length; i += 1) {
-    const bar = modelData[i];
-    const execPrice = Number(bar.c);
-    if (!Number.isFinite(execPrice) || execPrice <= 0) continue;
+  for (let i = 0; i < haData.length; i += 1) {
+    const curr = haData[i];
+    if (!Number.isFinite(curr.rawClose) || curr.rawClose <= 0) continue;
 
-    if (i >= startIdx) {
-      const barTs = Number.isFinite(Number(bar.timestamp))
-        ? Number(bar.timestamp)
-        : Date.parse(String(bar.date || ''));
+    if (i >= startIdx && i >= 2) {
+      const prev = haData[i - 1];
+      const prev2 = haData[i - 2];
 
       while (
         tfdrCursor + 1 < alignedTfdr.length &&
-        Number.isFinite(barTs) &&
-        alignedTfdr[tfdrCursor + 1].timestamp <= barTs
+        Number.isFinite(curr.timestamp) &&
+        alignedTfdr[tfdrCursor + 1].timestamp <= curr.timestamp
       ) {
         tfdrCursor += 1;
       }
@@ -1066,88 +1107,73 @@ export function runBacktestEngine(
       const wScore = tfdrSnapshot.weeklyScore;
       const mScore = tfdrSnapshot.monthlyScore;
 
-      // 1836.15 數律 / 142857 支撐阻力檢測
-      const winStart = Math.max(0, i - 21);
-      let recentMax = bar.h;
-      let recentMin = bar.l;
-      for (let k = winStart; k <= i; k++) {
-        if (modelData[k].h > recentMax) recentMax = modelData[k].h;
-        if (modelData[k].l < recentMin) recentMin = modelData[k].l;
-      }
-      const r142857SupportA = recentMax * 0.857143;
-      const r142857SupportB = recentMax * 0.714285;
+      // 【核心形態 1：下跌梯級終結（破頂轉陽）】
+      // 條件：前兩根還在走下跌梯級(prev.high < prev2.high)，今日正式「升穿昨日平均高點(curr.high > prev.high)」且「轉為平均陽燭(curr.isBullish)」
+      const isBreakDownStaircase =
+        prev.high < prev2.high && curr.high > prev.high && curr.isBullish;
 
-      const nearLevel = (priceVal: number, levelVal?: number | null) =>
-        Boolean(levelVal && levelVal > 0 && Math.abs(priceVal - levelVal) / levelVal <= levelTol);
+      // 【核心形態 2：上漲梯級斷裂（破底轉陰）】
+      // 條件：前兩根還在走上漲梯級(prev.low > prev2.low)，今日正式「跌穿昨日平均低點(curr.low < prev.low)」且「轉為平均陰燭(curr.isBearish)」
+      const isBreakUpStaircase =
+        prev.low > prev2.low && curr.low < prev.low && curr.isBearish;
 
-      const isQuantSupport =
-        Boolean(bar.buySignal || bar.reversalSignal === 'STRONG_BUY') ||
-        nearLevel(bar.l, bar.supportLine1) ||
-        nearLevel(bar.l, bar.supportLine2) ||
-        nearLevel(bar.l, bar.reversalSupport) ||
-        nearLevel(bar.l, r142857SupportA) ||
-        nearLevel(bar.l, r142857SupportB) ||
-        bar.l <= bar.supportLine1 * (1 + levelTol);
+      // 【一、買入決策：必須等到「平均K線破梯轉陽」才准扣扳機，絕不在下跌梯級中接飛刀】
+      if (isBreakDownStaircase && totalShares * curr.rawClose < unitCapital * 6 && cash > 0) {
+        // 1. 95% 信心大手買入 (3份)：週線與日線同時進入底部奇點(日<=28, 週<=35) + 平均K線破梯轉陽
+        const isMegaBuy = dScore <= 28 && wScore <= 35;
+        // 2. 75% 信心分批買入 (1份)：日線進入低位(<=32) 且 月線健康(<75) + 平均K線破梯轉陽
+        const isNormalBuy = !isMegaBuy && dScore <= 32 && mScore < 75;
 
-      const dateStr = (bar.date || '').split(' ')[0];
+        if (isMegaBuy || isNormalBuy) {
+          const units = isMegaBuy ? 3 : 1;
+          const deployCapital = Math.min(cash, unitCapital * units);
+          const buyShares = Math.floor(deployCapital / curr.rawClose);
 
-      // 【一、買入邏輯：根據共振強度決定「信心度」與「大手買入份數」】
-      // 1. 極強買入訊號（信心度 95% - 大手重倉 3 份）：日線<=18 + 週線<=30 + 觸及142857強支撐
-      const isMegaBuy = dScore <= 18 && wScore <= 30 && isQuantSupport;
-      // 2. 中等買入訊號（信心度 75% - 標準加倉 1 份）：日線<=25 且 月線處於健康區(<75)
-      const isNormalBuy = !isMegaBuy && dScore <= 25 && mScore < 75;
+          if (buyShares > 0) {
+            const actualCost = buyShares * curr.rawClose;
+            cash -= actualCost;
+            avgCost = ((totalShares * avgCost) + actualCost) / (totalShares + buyShares);
+            totalShares += buyShares;
 
-      // 限制最多累計持有 6 份倉位，防止無止境買入
-      if ((isMegaBuy || isNormalBuy) && totalShares * execPrice < unitCapital * 6 && cash > 0) {
-        const units = isMegaBuy ? 3 : 1; // 大手買 3 份 ($300,000) 或 小注買 1 份 ($100,000)
-        const confidence = isMegaBuy ? '95% 極高信心(大手重倉)' : '75% 中等信心(分批吸納)';
-        const deployCapital = Math.min(cash, unitCapital * units);
-        const buyShares = Math.floor(deployCapital / execPrice);
+            const action = isMegaBuy ? '🔥 大手買入' : '🟢 分批買入';
+            const confidence = isMegaBuy
+              ? '95% 極高信心(破梯+週日雙底)'
+              : '75% 穩健信心(破梯確認買)';
+            const source = `平均K線破梯轉陽 + TFDR(日${dScore}/週${wScore}/月${mScore})`;
 
-        if (buyShares > 0) {
-          const actualCost = buyShares * execPrice;
-          cash -= actualCost;
-          avgCost = ((totalShares * avgCost) + actualCost) / (totalShares + buyShares);
-          totalShares += buyShares;
-
-          const action = isMegaBuy ? '🔥 大手買入' : '🟢 分批買入';
-          const source = isMegaBuy
-            ? `日週雙底+1836強支(日${dScore}/週${wScore})`
-            : `日線奇點低吸(日${dScore}/月${mScore})`;
-
-          logs.unshift({
-            date: dateStr,
-            type: isMegaBuy ? 'STRONG BUY' : 'BUY',
-            action,
-            shares: buyShares,
-            units: `${units}份倉位`,
-            confidence,
-            price: execPrice.toFixed(2),
-            totalHolding: totalShares,
-            source,
-            profitPct: null,
-            msg: `[${dateStr}] ${action} ${buyShares.toLocaleString()}股 (${confidence}) @ $${execPrice.toFixed(2)} | 依據: ${source}`
-          });
+            logs.unshift({
+              date: curr.date,
+              type: isMegaBuy ? 'STRONG BUY' : 'BUY',
+              action,
+              shares: buyShares,
+              units: `${units}份倉位`,
+              confidence,
+              price: curr.rawClose.toFixed(2),
+              totalHolding: totalShares,
+              source,
+              profitPct: null,
+              msg: `[${curr.date}] ${action} ${buyShares.toLocaleString()}股 (${confidence}) @ $${curr.rawClose.toFixed(2)} | 依據: ${source}`
+            });
+          }
         }
       }
 
-      // 【二、賣出邏輯：必須在有持倉 (totalShares > 0) 時，根據高位危險度決定「清倉」或「減半」】
-      if (totalShares > 0 && avgCost > 0) {
-        const currentProfitPct = ((execPrice - avgCost) / avgCost) * 100;
+      // 【二、賣出決策：只要上漲梯級沒斷(curr.low > prev.low)就死拿利潤，直到「破底轉陰」才賣出】
+      if (totalShares > 0 && avgCost > 0 && isBreakUpStaircase) {
+        const currentProfitPct = ((curr.rawClose - avgCost) / avgCost) * 100;
 
-        // 1. 極強逃頂訊號（信心度 95% - 大手清倉 100% 持倉）：日線>=88 + 週線>=78
-        const isMegaSell = dScore >= 88 && wScore >= 78;
-        // 2. 階段過熱訊號（信心度 75% - 減倉鎖利 50% 持倉）：日線>=85 但仍有盈利(>10%)，賣出一半留底倉
-        const isPartialSell = !isMegaSell && dScore >= 85 && currentProfitPct > 10;
+        // 1. 95% 信心大手清倉 (清空100%)：日線與週線進入高位奇點(日>=80, 週>=75) + 平均K線破梯轉陰
+        const isMegaSell = dScore >= 80 && wScore >= 75;
+        // 2. 75% 信心分批鎖利 (減持50%)：日線過熱(>=78) 且 利潤大於12% + 平均K線破梯轉陰
+        const isPartialSell = !isMegaSell && dScore >= 78 && currentProfitPct >= 12;
 
         if (isMegaSell || isPartialSell) {
           const sellRatio = isMegaSell ? 1.0 : 0.5;
           const sellShares = Math.max(1, Math.floor(totalShares * sellRatio));
-          const confidence = isMegaSell ? '95% 極高信心(全數清倉)' : '75% 階段過熱(減半鎖利)';
 
-          const proceeds = sellShares * execPrice;
-          const profitRatio = (execPrice - avgCost) / avgCost;
-          realizedProfit += (execPrice - avgCost) * sellShares;
+          const proceeds = sellShares * curr.rawClose;
+          const profitRatio = (curr.rawClose - avgCost) / avgCost;
+          realizedProfit += (curr.rawClose - avgCost) * sellShares;
           cash += proceeds;
           totalShares -= sellShares;
           if (totalShares <= 0) {
@@ -1159,40 +1185,41 @@ export function runBacktestEngine(
           trades.push({ profit: profitRatio });
 
           const action = isMegaSell ? '🚨 大手清倉' : '🟠 分批減倉';
-          const source = isMegaSell
-            ? `雙核共振大頂(日${dScore}/週${wScore})`
-            : `日線過熱高拋(日${dScore}/月${mScore})`;
+          const confidence = isMegaSell
+            ? '95% 極高信心(破梯+雙頂逃頂)'
+            : '75% 波段過熱(破梯鎖利)';
+          const source = `平均K線破梯轉陰 + TFDR(日${dScore}/週${wScore}/月${mScore})`;
 
           logs.unshift({
-            date: dateStr,
+            date: curr.date,
             type: isMegaSell ? 'CRITICAL SELL' : 'SELL',
             action,
             shares: sellShares,
             units: isMegaSell ? '清空100%' : '減持50%',
             confidence,
-            price: execPrice.toFixed(2),
+            price: curr.rawClose.toFixed(2),
             totalHolding: totalShares,
             source,
             profitPct,
             profit: profitPct,
-            msg: `[${dateStr}] ${action} ${sellShares.toLocaleString()}股 (${confidence}) @ $${execPrice.toFixed(2)} | 盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+            msg: `[${curr.date}] ${action} ${sellShares.toLocaleString()}股 (${confidence}) @ $${curr.rawClose.toFixed(2)} | 盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
           });
         }
       }
     }
 
-    const equity = cash + totalShares * execPrice;
+    const equity = cash + totalShares * curr.rawClose;
     if (equity > peakEquity) peakEquity = equity;
     if (peakEquity > 0) {
       maxDrawdown = Math.max(maxDrawdown, ((peakEquity - equity) / peakEquity) * 100);
     }
   }
 
-  const lastClose = modelData.length > 0 ? Number(modelData[modelData.length - 1].c) : 0;
+  const lastClose = haData.length > 0 ? haData[haData.length - 1].rawClose : 0;
   const finalEquity =
     cash + (totalShares > 0 && Number.isFinite(lastClose) && lastClose > 0 ? totalShares * lastClose : 0);
 
-  // 若全期皆為持倉未平倉，以期末市值計算統計勝率供參考（不在交易紀錄強加平倉列，保留真實剩餘持倉）
+  // 若全期皆為持倉未平倉，以期末市值計算統計勝率供參考（保留真實剩餘持倉）
   const statTrades = [...trades];
   if (statTrades.length === 0 && totalShares > 0 && avgCost > 0 && Number.isFinite(lastClose) && lastClose > 0) {
     statTrades.push({ profit: (lastClose - avgCost) / avgCost });
@@ -1205,8 +1232,8 @@ export function runBacktestEngine(
   const totalLoss = Math.abs(losingTrades.reduce((sum, t) => sum + t.profit, 0));
   const barsPerYear = period === 'monthly' ? 12 : (period === 'weekly' ? 52 : (period === '5min' ? 19656 : 252));
   const annualReturn =
-    modelData.length > 0 && totalReturn > -100
-      ? (Math.pow(1 + totalReturn / 100, barsPerYear / modelData.length) - 1) * 100
+    haData.length > 0 && totalReturn > -100
+      ? (Math.pow(1 + totalReturn / 100, barsPerYear / haData.length) - 1) * 100
       : totalReturn <= -100
       ? -100
       : 0;

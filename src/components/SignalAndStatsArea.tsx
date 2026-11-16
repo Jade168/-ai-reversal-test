@@ -141,7 +141,7 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
         </div>
 
         <div className="text-[10px] text-center text-gray-500 mt-1.5">
-          以 10 份倉位金字塔模型模擬成交（依 AI 信心度分批重倉 / 減半鎖利）；未計手續費及滑點
+          以 10 份倉位金字塔模型＋平均K線破梯確認模擬成交（TFDR 奇點能量驅動）；未計手續費及滑點
         </div>
 
         {/* 整合於決策中樞底部的雙核回測交易紀錄 */}
