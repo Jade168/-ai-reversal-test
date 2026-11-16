@@ -1106,13 +1106,14 @@ function executeStaircaseBacktest(
     return sum / (idx - start + 1);
   };
 
+  // 【真實複利資金池】：初始本金 $1,000,000，每次高位沽出賺到的利潤全部滾入現金池，低位補回時買入更多股數！
+  let cashPool = initialFund;
   let longShares = 0;
   let avgLongCost = 0;
   let shortShares = 0;
   let avgShortPrice = 0;
-  let lastActionBarIndex = -999; // 防同一波段重複觸發鎖
+  let lastActionBarIndex = -999;
 
-  let realizedProfit = 0;
   let peakEquity = initialFund;
   let maxDrawdown = 0;
 
@@ -1146,56 +1147,177 @@ function executeStaircaseBacktest(
       const wIdx = Math.min(haWeekly.length - 1, Math.floor(i / 5));
       const mIdx = Math.min(haMonthly.length - 1, Math.floor(i / 21));
 
-      // 計算週、月兩級「中間線（生命線）」
+      const currMonth = haMonthly[mIdx];
+      const prevMonth = mIdx > 0 ? haMonthly[mIdx - 1] : currMonth;
+
       const weeklyMidline = getMidline(haWeekly, wIdx, 20);
       const monthlyMidline = getMidline(haMonthly, mIdx, 12);
 
-      // 判斷價格與「週線中線」、「月線中線」的結構位置
-      const isAboveWeeklyMid = currDay.rawClose >= weeklyMidline * 0.98;   // 穩站週線中線之上（含回踩容差2%）
-      const isBelowWeeklyMid = currDay.rawClose < weeklyMidline * 0.98;    // 正式跌穿週線中線
-      const isAboveMonthlyMid = currDay.rawClose >= monthlyMidline * 0.97; // 穩站月線中線之上（大牛市骨架仍在）
-      const isBelowMonthlyMid = currDay.rawClose < monthlyMidline * 0.97;  // 正式跌穿月線中線（大熊市格局）
+      // 【核心大勢判定：月線平均K線是否處於「大升通道」】
+      // 月線平均K線正式跌穿上月低點，且跌破月線中線 -> 轉入大跌通道
+      const isMonthlyDowntrendChannel =
+        currMonth.low < prevMonth.low * 0.98 && currDay.rawClose < monthlyMidline * 0.97;
+
+      // 判斷價格是否回調踩到「週線中間線」附近支撐位（容差 ±5%）
+      const isAtWeeklyMidSupport =
+        currDay.rawClose >= weeklyMidline * 0.95 && currDay.rawClose <= weeklyMidline * 1.05;
 
       const dScore = dailyTFDR[i]?.score ?? 50;
       const prevDScore = dailyTFDR[i - 1]?.score ?? 50;
       const wScore = weeklyTFDR[wIdx]?.score ?? 50;
       const mScore = monthlyTFDR[mIdx]?.score ?? 50;
 
-      // 圖表「奇點買」與「奇點沽」信號
+      // 對齊圖表的「奇點買」與「奇點沽」信號
       const isChartSingularityBuy =
         (dScore <= 22 || (prevDScore <= 20 && dScore <= 26)) &&
         currDay.rawClose >= prevDay.rawClose * 0.98;
       const isChartSingularitySell = dScore >= 84 || (prevDScore >= 86 && dScore >= 80);
 
-      // 防同一波段重複觸發鎖（至少相隔 5 個交易日）
       const canTrigger = i - lastActionBarIndex >= 5;
-      const dustThreshold = unitCapital * 0.25; // 預設 1,000,000 時為 $25,000
 
       // =========================================================================
-      // 【A 區：空單風控與平倉（一旦觸及下方奇點或站穩中線，立刻平空鎖利）】
+      // 【模式一：月線大升通道（未跌穿上月 -> 高拋低吸複利滾存，把十倍滾成五十倍）】
       // =========================================================================
-      if (shortShares > 0 && avgShortPrice > 0) {
-        const shortProfitPct = ((avgShortPrice - currDay.rawClose) / avgShortPrice) * 100;
-        const shortProfitRatio = (avgShortPrice - currDay.rawClose) / avgShortPrice;
-
-        if (shortProfitPct <= -10.0) {
-          const coverShares = shortShares;
-          realizedProfit += (avgShortPrice - currDay.rawClose) * coverShares;
+      if (!isMonthlyDowntrendChannel) {
+        // 1. 若之前持有空單，大升通道啟動時立刻全數平空轉多
+        if (shortShares > 0 && avgShortPrice > 0) {
+          const shortProfitPct = ((avgShortPrice - currDay.rawClose) / avgShortPrice) * 100;
+          const shortProfitRatio = (avgShortPrice - currDay.rawClose) / avgShortPrice;
+          const pnl = (avgShortPrice - currDay.rawClose) * shortShares;
+          cashPool += shortShares * avgShortPrice + pnl;
           trades.push({ profit: shortProfitRatio });
 
+          const covered = shortShares;
           shortShares = 0;
           avgShortPrice = 0;
           lastActionBarIndex = i;
           const profitPct = Number(shortProfitPct.toFixed(2));
-          const confidence = '風控觸發 (-10% 防軋空)';
-          const source = '觸及 -10% 空單止損線';
+          const confidence = '100% 月線未破上月(轉入大升通道)';
+          const source = '月K守穩上月低點之上，空單全面平倉轉多';
 
           tradeLogs.unshift({
             date: currDay.date,
             type: 'BUY TO COVER',
-            action: '🛡️ 空單止損平倉',
-            shares: coverShares,
-            units: '強制平空100%',
+            action: '💎 升浪啟動全數平空',
+            shares: covered,
+            units: '全數平空100%',
+            confidence,
+            price: currDay.rawClose.toFixed(2),
+            totalHolding: longShares,
+            holdingType: longShares > 0 ? 'LONG' : 'EMPTY',
+            source,
+            profitPct,
+            profit: profitPct,
+            msg: `[${currDay.date}] 💎 升浪啟動全數平空 ${covered.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | 盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+          });
+        }
+
+        // 2. 【低位補回 + 複利加倉】：當日線出現「下方奇點買」時
+        if (isChartSingularityBuy && canTrigger && cashPool > currDay.rawClose * 10) {
+          // 黃金絕佳補回點：價格剛好回調踩在「週線中間線」附近 + 日線下方奇點買 -> 動用 85% 現金池重倉補回！
+          const isGoldenWeeklyMidRebuy = isAtWeeklyMidSupport || wScore <= 42;
+          const investRatio = isGoldenWeeklyMidRebuy ? 0.85 : 0.45;
+          const investAmount = cashPool * investRatio;
+          const buyShares = Math.floor(investAmount / currDay.rawClose);
+
+          if (buyShares > 0) {
+            const cost = buyShares * currDay.rawClose;
+            cashPool -= cost;
+            avgLongCost = (longShares * avgLongCost + cost) / (longShares + buyShares);
+            longShares += buyShares;
+            lastActionBarIndex = i;
+
+            const action = isGoldenWeeklyMidRebuy ? '🔥 踩週中線・奇點重倉補回' : '🟢 升浪奇點・分批低吸';
+            const confidence = isGoldenWeeklyMidRebuy
+              ? '98% 頂級複利點(回踩週線中線+日線下方奇點補回)'
+              : '75% 月線大升通道(日線下方奇點低吸)';
+            const source = isGoldenWeeklyMidRebuy
+              ? `回踩週線中線($${weeklyMidline.toFixed(1)}) + 日線下方奇點(日${dScore}/週${wScore})`
+              : `月K未跌穿上月 + 日線下方奇點買(日${dScore}/月${mScore})`;
+
+            tradeLogs.unshift({
+              date: currDay.date,
+              type: isGoldenWeeklyMidRebuy ? 'STRONG BUY' : 'BUY',
+              action,
+              shares: buyShares,
+              units: isGoldenWeeklyMidRebuy ? '現金池85%' : '現金池45%',
+              confidence,
+              price: currDay.rawClose.toFixed(2),
+              totalHolding: longShares,
+              holdingType: 'LONG',
+              source,
+              profitPct: null,
+              msg: `[${currDay.date}] ${action} ${buyShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | ${source}`
+            });
+          }
+        }
+
+        // 3. 【高位奇點鎖利】：大升通道內日/週線衝到「上方奇點沽」-> 賣出 65% 浮動籌碼鎖定高位利潤（保留 35% 核心底倉），等回踩週線中線再全數補回！
+        if (longShares > 0 && avgLongCost > 0 && isChartSingularitySell && canTrigger) {
+          const currentProfitPct = ((currDay.rawClose - avgLongCost) / avgLongCost) * 100;
+          const profitRatio = (currDay.rawClose - avgLongCost) / avgLongCost;
+          if (currentProfitPct >= 8) {
+            // 保留 35% 核心底倉，賣出 65% 高拋套現（若剩餘太少則全賣）
+            const sellShares =
+              longShares * currDay.rawClose < 30000
+                ? longShares
+                : Math.max(1, Math.floor(longShares * 0.65));
+            const revenue = sellShares * currDay.rawClose;
+            cashPool += revenue;
+            trades.push({ profit: profitRatio });
+
+            longShares -= sellShares;
+            if (longShares === 0) avgLongCost = 0;
+            lastActionBarIndex = i;
+            const profitPct = Number(currentProfitPct.toFixed(2));
+            const confidence = '85% 複利高拋(留35%底倉・等回踩週中線補回)';
+            const source = `大升通道高位奇點沽出鎖利，現金池擴增至 $${Math.round(cashPool).toLocaleString()}`;
+
+            tradeLogs.unshift({
+              date: currDay.date,
+              type: 'SELL',
+              action: '🟠 高位奇點鎖利65%',
+              shares: sellShares,
+              units: longShares === 0 ? '清零' : '高拋65%',
+              confidence,
+              price: currDay.rawClose.toFixed(2),
+              totalHolding: longShares,
+              holdingType: longShares > 0 ? 'LONG' : 'EMPTY',
+              source,
+              profitPct,
+              profit: profitPct,
+              msg: `[${currDay.date}] 🟠 高位奇點鎖利65% ${sellShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | 盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+            });
+          }
+        }
+      }
+
+      // =========================================================================
+      // 【模式二：月線正式跌穿上月低點（大升通道破壞 -> 清倉轉入熊市高空低平滾存）】
+      // =========================================================================
+      else if (isMonthlyDowntrendChannel) {
+        // 1. 月線平均K線正式跌穿上月低點 -> 100% 清空所有多單底倉，鎖定整輪大牛市全部利潤！
+        if (longShares > 0 && avgLongCost > 0) {
+          const currentProfitPct = ((currDay.rawClose - avgLongCost) / avgLongCost) * 100;
+          const profitRatio = (currDay.rawClose - avgLongCost) / avgLongCost;
+          const revenue = longShares * currDay.rawClose;
+          cashPool += revenue;
+          trades.push({ profit: profitRatio });
+
+          const soldShares = longShares;
+          longShares = 0;
+          avgLongCost = 0;
+          lastActionBarIndex = i;
+          const profitPct = Number(currentProfitPct.toFixed(2));
+          const confidence = '100% 滿格信心(本月平均K跌穿上月低點)';
+          const source = `月K正式跌穿上月低點，清倉落袋總現金 $${Math.round(cashPool).toLocaleString()}`;
+
+          tradeLogs.unshift({
+            date: currDay.date,
+            type: 'CRITICAL SELL',
+            action: '🚨 月線破位・全數清倉',
+            shares: soldShares,
+            units: '清空100%',
             confidence,
             price: currDay.rawClose.toFixed(2),
             totalHolding: 0,
@@ -1203,27 +1325,72 @@ function executeStaircaseBacktest(
             source,
             profitPct,
             profit: profitPct,
-            msg: `[${currDay.date}] 🛡️ 空單止損平倉 ${coverShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | 盈虧: ${profitPct}%`
+            msg: `[${currDay.date}] 🚨 月線破位・全數清倉 ${soldShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | 盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
           });
-        } else if (isChartSingularityBuy && canTrigger) {
-          // 若價格還在月線中線之上，或週線已到下方奇點 -> 95% 信心全數平空準備反手做多
-          if (isAboveMonthlyMid || wScore <= 30) {
-            const coverShares = shortShares;
-            realizedProfit += (avgShortPrice - currDay.rawClose) * coverShares;
+        }
+
+        // 2. 熊市滾存沽空：在月線大跌通道內，反彈到「上方奇點沽」或觸及「週線中線」阻力時順勢沽空
+        if (
+          longShares === 0 &&
+          isChartSingularitySell &&
+          canTrigger &&
+          shortShares === 0 &&
+          cashPool > currDay.rawClose * 10
+        ) {
+          const investAmount = cashPool * 0.75;
+          const openShortShares = Math.floor(investAmount / currDay.rawClose);
+          if (openShortShares > 0) {
+            cashPool -= openShortShares * currDay.rawClose;
+            avgShortPrice = currDay.rawClose;
+            shortShares = openShortShares;
+            lastActionBarIndex = i;
+
+            const confidence = '95% 滿格信心(月線破位+反彈上方奇點沽)';
+            const source = `月K處於下跌通道 + 反彈觸及日線上方奇點(日${dScore}/週${wScore})`;
+
+            tradeLogs.unshift({
+              date: currDay.date,
+              type: 'STRONG SHORT',
+              action: '🟣 月線大跌通道・重倉沽空',
+              shares: openShortShares,
+              units: '現金池75%沽空',
+              confidence,
+              price: currDay.rawClose.toFixed(2),
+              totalHolding: shortShares,
+              holdingType: 'SHORT',
+              source,
+              profitPct: null,
+              msg: `[${currDay.date}] 🟣 月線大跌通道・重倉沽空 ${openShortShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | ${source}`
+            });
+          }
+        }
+
+        // 3. 熊市低位平空鎖利：跌到日線「下方奇點買」時全數平空把利潤滾入現金池，等下次反彈再沽空！
+        if (shortShares > 0 && avgShortPrice > 0 && isChartSingularityBuy && canTrigger) {
+          const shortProfitPct = ((avgShortPrice - currDay.rawClose) / avgShortPrice) * 100;
+          const shortProfitRatio = (avgShortPrice - currDay.rawClose) / avgShortPrice;
+          if (shortProfitPct >= 8 || shortProfitPct <= -10) {
+            const pnl = (avgShortPrice - currDay.rawClose) * shortShares;
+            cashPool += shortShares * avgShortPrice + pnl;
             trades.push({ profit: shortProfitRatio });
 
+            const covered = shortShares;
             shortShares = 0;
             avgShortPrice = 0;
             lastActionBarIndex = i;
             const profitPct = Number(shortProfitPct.toFixed(2));
-            const confidence = '95% 滿格信心(下方奇點+中線支撐平空)';
-            const source = `奇點買觸發 + 月線中線之上平空(日${dScore}/週${wScore})`;
+            const action = shortProfitPct >= 0 ? '💎 熊市下方奇點・全數平空' : '🛡️ 空單風控止損';
+            const confidence =
+              shortProfitPct >= 0
+                ? '90% 熊市波段平空鎖利(等反彈再空)'
+                : '風控止損 (-10%)';
+            const source = `熊市跌至日線下方奇點平空，總現金滾存至 $${Math.round(cashPool).toLocaleString()}`;
 
             tradeLogs.unshift({
               date: currDay.date,
               type: 'BUY TO COVER',
-              action: '💎 大手全數平空',
-              shares: coverShares,
+              action,
+              shares: covered,
               units: '全數平空100%',
               confidence,
               price: currDay.rawClose.toFixed(2),
@@ -1232,210 +1399,19 @@ function executeStaircaseBacktest(
               source,
               profitPct,
               profit: profitPct,
-              msg: `[${currDay.date}] 💎 大手全數平空 ${coverShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | 盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
-            });
-          } else if (shortProfitPct >= 8) {
-            const isDust = shortShares * currDay.rawClose < dustThreshold;
-            const coverShares = isDust ? shortShares : Math.max(1, Math.floor(shortShares * 0.4));
-            realizedProfit += (avgShortPrice - currDay.rawClose) * coverShares;
-            trades.push({ profit: shortProfitRatio });
-
-            shortShares -= coverShares;
-            if (shortShares === 0) avgShortPrice = 0;
-            lastActionBarIndex = i;
-            const profitPct = Number(shortProfitPct.toFixed(2));
-            const confidence = '60% 月線中線之下(保留60%空單底倉)';
-            const source = `月線中線之下僅日線反彈(日${dScore}/週${wScore})`;
-
-            tradeLogs.unshift({
-              date: currDay.date,
-              type: 'BUY TO COVER',
-              action: '🔷 分批平空40%',
-              shares: coverShares,
-              units: isDust ? '清零平空' : '分批平空40%',
-              confidence,
-              price: currDay.rawClose.toFixed(2),
-              totalHolding: shortShares,
-              holdingType: shortShares > 0 ? 'SHORT' : 'EMPTY',
-              source,
-              profitPct,
-              profit: profitPct,
-              msg: `[${currDay.date}] 🔷 分批平空40% ${coverShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | 盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
-            });
-          }
-        }
-      }
-
-      // =========================================================================
-      // 【B 區：多單買入接力（核心：踩週線中線接回 + 月線中線之上深蹲重倉）】
-      // =========================================================================
-      if (
-        shortShares === 0 &&
-        isChartSingularityBuy &&
-        canTrigger &&
-        longShares * currDay.rawClose < unitCapital * 6
-      ) {
-        // 劇本 1（98% 頂級信心・4份）：週線跌入下方奇點(<=30)，但價格依然穩站「月線中間線」之上（大牛市深蹲黃金坑！）
-        const isMonthlyMidGoldenPit = wScore <= 30 && isAboveMonthlyMid;
-        // 劇本 2（95% 滿格信心・3份）：價格從高位回調踩到「週線中間線」獲得支撐，且日線出現下方奇點買
-        const isWeeklyMidPullbackBuy = !isMonthlyMidGoldenPit && isAboveWeeklyMid && dScore <= 22;
-
-        const units = isMonthlyMidGoldenPit ? 4 : isWeeklyMidPullbackBuy ? 3 : 1;
-        const buyShares = Math.floor((unitCapital * units) / currDay.rawClose);
-
-        if (buyShares > 0) {
-          avgLongCost =
-            ((longShares * avgLongCost) + (buyShares * currDay.rawClose)) /
-            (longShares + buyShares);
-          longShares += buyShares;
-          lastActionBarIndex = i;
-
-          const action = units >= 3 ? '🔥 大手重倉買入' : '🟢 小注試探買入';
-          const confidence = isMonthlyMidGoldenPit
-            ? '98% 頂級信心(週線下方奇點+穩站月線中線・4份)'
-            : isWeeklyMidPullbackBuy
-            ? '95% 滿格信心(回踩週線中線+日線奇點接回・3份)'
-            : '40% 信心不足(跌穿中線・僅買1份試探)';
-          const source = isMonthlyMidGoldenPit
-            ? `週線奇點底 + 月線中線($${monthlyMidline.toFixed(1)})強守護`
-            : isWeeklyMidPullbackBuy
-            ? `回踩週線中線($${weeklyMidline.toFixed(1)}) + 日線奇點買`
-            : `中線下方左側試探(日${dScore}/週${wScore}/月${mScore})`;
-
-          tradeLogs.unshift({
-            date: currDay.date,
-            type: units >= 3 ? 'STRONG BUY' : 'BUY',
-            action,
-            shares: buyShares,
-            units: `買入${units}份`,
-            confidence,
-            price: currDay.rawClose.toFixed(2),
-            totalHolding: longShares,
-            holdingType: 'LONG',
-            source,
-            profitPct: null,
-            msg: `[${currDay.date}] ${action} ${buyShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | ${source}`
-          });
-        }
-      }
-
-      // =========================================================================
-      // 【C 區：多單逃頂與順勢沽空（未跌穿週線中線留底倉；跌穿月線中線才重倉沽空）】
-      // =========================================================================
-      if (isChartSingularitySell && canTrigger) {
-        if (longShares > 0 && avgLongCost > 0) {
-          const currentProfitPct = ((currDay.rawClose - avgLongCost) / avgLongCost) * 100;
-          const profitRatio = (currDay.rawClose - avgLongCost) / avgLongCost;
-
-          // 1. 若價格已經「跌穿週線中線」且高位奇點 -> 95% 信心全數清倉 100%
-          if (isBelowWeeklyMid && currentProfitPct >= 5) {
-            const soldShares = longShares;
-            realizedProfit += (currDay.rawClose - avgLongCost) * soldShares;
-            trades.push({ profit: profitRatio });
-
-            longShares = 0;
-            avgLongCost = 0;
-            lastActionBarIndex = i;
-            const profitPct = Number(currentProfitPct.toFixed(2));
-            const confidence = '95% 滿格信心(高位奇點+跌穿週線中線)';
-            const source = `跌穿週線中線($${weeklyMidline.toFixed(1)})確認見頂(日${dScore}/週${wScore})`;
-
-            tradeLogs.unshift({
-              date: currDay.date,
-              type: 'CRITICAL SELL',
-              action: '🚨 大手全數清倉',
-              shares: soldShares,
-              units: '清空100%',
-              confidence,
-              price: currDay.rawClose.toFixed(2),
-              totalHolding: 0,
-              holdingType: 'EMPTY',
-              source,
-              profitPct,
-              profit: profitPct,
-              msg: `[${currDay.date}] 🚨 大手全數清倉 ${soldShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | 盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
-            });
-          }
-          // 2. 若價格依然穩站「週線中線」之上（大升浪未破中線）-> 只減持 50% 鎖利，保留 50% 底倉等回踩週線中線再接回！
-          else if (isAboveWeeklyMid && currentProfitPct >= 10) {
-            const isDust = longShares * currDay.rawClose < dustThreshold;
-            const sellShares = isDust ? longShares : Math.max(1, Math.floor(longShares * 0.5));
-            realizedProfit += (currDay.rawClose - avgLongCost) * sellShares;
-            trades.push({ profit: profitRatio });
-
-            longShares -= sellShares;
-            if (longShares === 0) avgLongCost = 0;
-            lastActionBarIndex = i;
-            const profitPct = Number(currentProfitPct.toFixed(2));
-            const confidence = '75% 週線高位奇點鎖利(未破週中線・留50%底倉)';
-            const source = `週線奇點沽鎖利，守穩週中線($${weeklyMidline.toFixed(1)})留底倉`;
-
-            tradeLogs.unshift({
-              date: currDay.date,
-              type: 'SELL',
-              action: '🟠 波段鎖利50%',
-              shares: sellShares,
-              units: isDust ? '清零' : '鎖利50%',
-              confidence,
-              price: currDay.rawClose.toFixed(2),
-              totalHolding: longShares,
-              holdingType: longShares > 0 ? 'LONG' : 'EMPTY',
-              source,
-              profitPct,
-              profit: profitPct,
-              msg: `[${currDay.date}] 🟠 波段鎖利50% ${sellShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | 盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
-            });
-          }
-        }
-        // 順勢沽空：必須「跌穿週線中線」才准沽空；只有連「月線中線」都跌穿才准大手沽空 3 份！
-        else if (
-          longShares === 0 &&
-          isBelowWeeklyMid &&
-          shortShares * currDay.rawClose < unitCapital * 4
-        ) {
-          const isMegaShort = isBelowMonthlyMid && wScore >= 70;
-          const units = isMegaShort ? 3 : 1;
-          const openShortShares = Math.floor((unitCapital * units) / currDay.rawClose);
-
-          if (openShortShares > 0) {
-            avgShortPrice =
-              ((shortShares * avgShortPrice) + (openShortShares * currDay.rawClose)) /
-              (shortShares + openShortShares);
-            shortShares += openShortShares;
-            lastActionBarIndex = i;
-
-            const action = isMegaShort ? '🟣 大手重倉沽空' : '🟪 小注試探沽空';
-            const confidence = isMegaShort
-              ? '95% 滿格信心(跌穿月線中線+高位奇點・3份)'
-              : '65% 跌穿週線中線(月線仍強・僅1份試空)';
-            const source = isMegaShort
-              ? `雙雙跌穿週/月線中線($${monthlyMidline.toFixed(1)})重倉沽空`
-              : `跌穿週線中線($${weeklyMidline.toFixed(1)})但月線中線仍在下方支撐`;
-
-            tradeLogs.unshift({
-              date: currDay.date,
-              type: isMegaShort ? 'STRONG SHORT' : 'SHORT',
-              action,
-              shares: openShortShares,
-              units: `沽空${units}份`,
-              confidence,
-              price: currDay.rawClose.toFixed(2),
-              totalHolding: shortShares,
-              holdingType: 'SHORT',
-              source,
-              profitPct: null,
-              msg: `[${currDay.date}] ${action} ${openShortShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | ${source}`
+              msg: `[${currDay.date}] ${action} ${covered.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | 盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
             });
           }
         }
       }
     }
 
-    const unrealizedLong =
-      longShares > 0 && avgLongCost > 0 ? (currDay.rawClose - avgLongCost) * longShares : 0;
-    const unrealizedShort =
-      shortShares > 0 && avgShortPrice > 0 ? (avgShortPrice - currDay.rawClose) * shortShares : 0;
-    const equity = initialFund + realizedProfit + unrealizedLong + unrealizedShort;
+    const longMarketValue = longShares * currDay.rawClose;
+    const shortEquityValue =
+      shortShares > 0 && avgShortPrice > 0
+        ? shortShares * avgShortPrice + (avgShortPrice - currDay.rawClose) * shortShares
+        : 0;
+    const equity = cashPool + longMarketValue + shortEquityValue;
 
     if (equity > peakEquity) peakEquity = equity;
     if (peakEquity > 0) {
@@ -1444,15 +1420,13 @@ function executeStaircaseBacktest(
   }
 
   const lastClose = haDaily[haDaily.length - 1].rawClose;
-  const finalUnrealizedLong =
-    longShares > 0 && avgLongCost > 0 && Number.isFinite(lastClose) && lastClose > 0
-      ? (lastClose - avgLongCost) * longShares
-      : 0;
-  const finalUnrealizedShort =
+  const finalLongMarketValue =
+    longShares > 0 && Number.isFinite(lastClose) && lastClose > 0 ? longShares * lastClose : 0;
+  const finalShortEquityValue =
     shortShares > 0 && avgShortPrice > 0 && Number.isFinite(lastClose) && lastClose > 0
-      ? (avgShortPrice - lastClose) * shortShares
+      ? shortShares * avgShortPrice + (avgShortPrice - lastClose) * shortShares
       : 0;
-  const finalEquity = initialFund + realizedProfit + finalUnrealizedLong + finalUnrealizedShort;
+  const finalEquity = cashPool + finalLongMarketValue + finalShortEquityValue;
 
   const statTrades = [...trades];
   if (statTrades.length === 0 && Number.isFinite(lastClose) && lastClose > 0) {

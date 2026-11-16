@@ -94,23 +94,34 @@ export function calculateTFDRSeries(
       lastLowIdx = i;
     }
 
-    score = Math.max(0, Math.min(100, Math.round(score)));
-
     // 映射主圖動態 6 軌臨界曲線價格
     const velocity = (closes[i] - closes[Math.max(0, i - 5)]) / 5;
     const prevVelocity = (closes[Math.max(0, i - 5)] - closes[Math.max(0, i - 10)]) / 5;
     const accelFactor = 1 + Math.min(0.6, Math.max(-0.4, (velocity - prevVelocity) / atr));
     const unit = atr * accelFactor;
 
+    const band95 = Number((mid + unit * 3.8).toFixed(2)); // 最頂層 95
+    const band90 = Number((mid + unit * 3.1).toFixed(2)); // 中間層 90
+    const band85 = Number((mid + unit * 2.4).toFixed(2)); // 預警層 85
+    const band25 = Number((mid - unit * 2.4).toFixed(2)); // 觀察層 25
+    const band15 = Number((mid - unit * 3.1).toFixed(2)); // 中間層 15
+    const band10 = Number((mid - unit * 3.8).toFixed(2)); // 最底層 10
+
+    // 確保 K 線最低價觸及或跌穿綠色 15 地板線時對稱觸發奇點底評分 (<= 15)
+    if (lows[i] <= band15) {
+      score = Math.min(score, 15);
+    }
+    score = Math.max(0, Math.min(100, Math.round(score)));
+
     results.push({
       index: i,
       score,
-      band95: Number((mid + unit * 3.8).toFixed(2)), // 最頂層 95
-      band90: Number((mid + unit * 3.1).toFixed(2)), // 中間層 90
-      band85: Number((mid + unit * 2.4).toFixed(2)), // 預警層 85
-      band25: Number((mid - unit * 2.4).toFixed(2)), // 觀察層 25
-      band15: Number((mid - unit * 3.1).toFixed(2)), // 中間層 15
-      band10: Number((mid - unit * 3.8).toFixed(2)), // 最底層 10
+      band95,
+      band90,
+      band85,
+      band25,
+      band15,
+      band10,
     });
   }
   return results;

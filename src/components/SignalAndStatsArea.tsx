@@ -141,31 +141,34 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
         </div>
 
         <div className="text-[10px] text-center text-gray-500 mt-1.5">
-          三級中間線（生命線）＋奇點接力共振（含5日防重複觸發鎖）；未計手續費及滑點
+          月線通道護航＋踩週線中線奇點補回（真實資金池複利滾存・含5日防重複鎖）；未計手續費及滑點
         </div>
 
         {/* 整合於決策中樞底部的雙核回測交易紀錄 */}
         <div className="mt-3 pt-2.5 border-t border-slate-800">
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-xs font-bold text-amber-400">
-              📜 雙向多空破梯回測交易紀錄（週月重倉・日線試探・上下滑動檢視）
+              📜 月線通道＋複利滾存回測交易紀錄（踩週中線重倉補回・上下滑動檢視）
             </span>
             <span className="text-[11px] text-slate-400">共 {tradeLogs.length} 筆操盤指令</span>
           </div>
           <div className="max-h-64 overflow-y-auto pr-1 space-y-1.5 overscroll-contain">
             {tradeLogs.length > 0 ? (
               tradeLogs.map((log, idx) => {
-                const actionColor = log.action.includes('買入')
-                  ? 'text-emerald-400'
-                  : log.action.includes('沽空')
-                  ? 'text-purple-400'
-                  : log.action.includes('平空')
-                  ? 'text-cyan-400'
-                  : log.action.includes('鎖利')
-                  ? 'text-amber-400'
-                  : log.action.includes('減倉')
-                  ? 'text-orange-400'
-                  : 'text-red-400';
+                const actionColor =
+                  log.action.includes('買入') ||
+                  log.action.includes('補回') ||
+                  log.action.includes('低吸')
+                    ? 'text-emerald-400'
+                    : log.action.includes('沽空')
+                    ? 'text-purple-400'
+                    : log.action.includes('平空')
+                    ? 'text-cyan-400'
+                    : log.action.includes('鎖利')
+                    ? 'text-amber-400'
+                    : log.action.includes('減倉')
+                    ? 'text-orange-400'
+                    : 'text-red-400';
 
                 return (
                   <div

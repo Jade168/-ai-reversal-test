@@ -112,7 +112,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     );
   }, [activeData]);
 
-  // 計算 TFDR 歷史奇點轉折點（僅取 score >= 90 與 <= 15 的波段極值點，避免連續相鄰 K 線重疊）
+  // 計算 TFDR 歷史奇點轉折點（高位：score >= 90；低位：score <= 20 或最低價觸及/跌穿 band15 地板線）
   const tfdrTurningPoints = useMemo(() => {
     const highs: Array<{ index: number; price: number }> = [];
     const lows: Array<{ index: number; price: number }> = [];
@@ -120,9 +120,12 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       return { highs, lows };
     }
 
+    const isBuySingularityAt = (idx: number) =>
+      idx >= 14 && (tfdrSeries[idx].score <= 20 || activeData[idx].l <= tfdrSeries[idx].band15);
+
     let i = 0;
     while (i < tfdrSeries.length) {
-      if (tfdrSeries[i].score >= 90) {
+      if (i >= 14 && tfdrSeries[i].score >= 90) {
         let bestIdx = i;
         let bestHigh = activeData[i].h;
         let j = i + 1;
@@ -142,11 +145,11 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
 
     i = 0;
     while (i < tfdrSeries.length) {
-      if (tfdrSeries[i].score <= 15) {
+      if (isBuySingularityAt(i)) {
         let bestIdx = i;
         let bestLow = activeData[i].l;
         let j = i + 1;
-        while (j < tfdrSeries.length && tfdrSeries[j].score <= 15) {
+        while (j < tfdrSeries.length && isBuySingularityAt(j)) {
           if (activeData[j].l <= bestLow) {
             bestLow = activeData[j].l;
             bestIdx = j;
@@ -695,7 +698,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
         ctx.restore();
       }
     } else {
-      // TFDR 模式：(c) 僅在分數 >= 90 或 <= 15 的歷史轉折點標出「奇點沽」與「奇點買」
+      // TFDR 模式：(c) 在高位(score >= 90)標出「奇點沽」，低位(score <= 20 或 low <= band15)對稱標出「奇點買」
       let lastHighSingularityX = -999;
       tfdrTurningPoints.highs.forEach(tp => {
         if (tp.index >= startIdx && tp.index <= endIdx) {
