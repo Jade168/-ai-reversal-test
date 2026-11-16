@@ -141,7 +141,7 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
         </div>
 
         <div className="text-[10px] text-center text-gray-500 mt-1.5">
-          直接對齊圖表奇點買/沽信號＋週線時機共振（含5日防重複觸發鎖）；未計手續費及滑點
+          三級中間線（生命線）＋奇點接力共振（含5日防重複觸發鎖）；未計手續費及滑點
         </div>
 
         {/* 整合於決策中樞底部的雙核回測交易紀錄 */}
