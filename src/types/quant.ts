@@ -61,10 +61,16 @@ export interface BacktestStats {
 export interface TradeLog {
   type: string;
   msg: string;
-  date?: string;
-  price?: string;
+  date: string;
+  action: string;
+  shares: number;
+  units: string;
+  confidence: string;
+  price: string;
+  totalHolding: number;
+  source: string;
+  profitPct: number | null;
   profit?: number;
-  source?: string;
 }
 
 export interface ResonanceAnalysis {

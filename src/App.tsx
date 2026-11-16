@@ -48,7 +48,7 @@ export const App: React.FC = () => {
   const [symbol, setSymbol] = useState('TSLA');
   const [period, setPeriod] = useState('daily');
   const [assetType, setAssetType] = useState('stock');
-  const [fund, setFund] = useState(100000);
+  const [fund, setFund] = useState(1000000);
   const [buyPrice, setBuyPrice] = useState('');
   const [coreInt, setCoreInt] = useState(1836.15);
   const [coreDec, setCoreDec] = useState(0.08);

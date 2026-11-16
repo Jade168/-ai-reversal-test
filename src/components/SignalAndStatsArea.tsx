@@ -141,54 +141,60 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
         </div>
 
         <div className="text-[10px] text-center text-gray-500 mt-1.5">
-          下一棒開市價模擬成交（已納入數律＋TFDR週月共振過濾）；未計手續費及滑點
+          以 10 份倉位金字塔模型模擬成交（依 AI 信心度分批重倉 / 減半鎖利）；未計手續費及滑點
         </div>
 
         {/* 整合於決策中樞底部的雙核回測交易紀錄 */}
         <div className="mt-3 pt-2.5 border-t border-slate-800">
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-xs font-bold text-amber-400">
-              📜 雙核融合回測交易紀錄（日週月共振過濾・上下滑動檢視）
+              📜 AI 信心度分批加減倉交易紀錄（日週月共振・上下滑動檢視）
             </span>
-            <span className="text-[11px] text-slate-400">共 {tradeLogs.length} 筆精選訊號</span>
+            <span className="text-[11px] text-slate-400">共 {tradeLogs.length} 筆操盤指令</span>
           </div>
-          <div className="max-h-56 overflow-y-auto pr-1 space-y-1 overscroll-contain">
+          <div className="max-h-64 overflow-y-auto pr-1 space-y-1.5 overscroll-contain">
             {tradeLogs.length > 0 ? (
               tradeLogs.map((log, idx) => (
                 <div
                   key={idx}
-                  className="text-xs p-1.5 rounded bg-slate-800/70 border border-slate-700/50 flex items-center justify-between gap-2"
+                  className="text-xs p-2 rounded bg-slate-800/80 border border-slate-700/60 flex flex-col gap-1"
                 >
-                  <div className="min-w-0 flex items-center flex-wrap gap-1">
-                    <span className="text-slate-400 font-mono text-[11px]">[{log.date || '--'}]</span>
-                    <span
-                      className={`font-bold ${
-                        log.type.toUpperCase().includes('BUY') ? 'text-emerald-400' : 'text-red-400'
-                      }`}
-                    >
-                      {log.type.toUpperCase().includes('BUY') ? '買入' : '賣出'}
-                    </span>
-                    <span className="px-1 py-0.2 text-[10px] rounded bg-indigo-950 text-indigo-300 border border-indigo-700/50">
-                      {log.source || '1836數律+TFDR週月共振'}
-                    </span>
-                  </div>
-                  <div className="text-right font-mono text-[11px] shrink-0">
-                    <span className="text-slate-200">${log.price || '--'}</span>
-                    {log.profit !== undefined && (
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center flex-wrap gap-1.5 min-w-0">
+                      <span className="text-slate-400 font-mono text-[11px]">[{log.date}]</span>
                       <span
-                        className={`ml-1.5 font-bold ${
-                          log.profit >= 0 ? 'text-emerald-400' : 'text-red-400'
+                        className={`font-bold ${
+                          log.action.includes('買入') ? 'text-emerald-400' : 'text-red-400'
                         }`}
                       >
-                        {log.profit >= 0 ? `+${log.profit}%` : `${log.profit}%`}
+                        {log.action} {log.shares.toLocaleString()}股
                       </span>
-                    )}
+                      <span className="px-1.5 py-0.2 text-[10px] rounded bg-amber-950/80 text-amber-300 border border-amber-600/40">
+                        {log.confidence}
+                      </span>
+                    </div>
+                    <div className="font-mono text-[11px] shrink-0">
+                      <span className="text-slate-200">@ ${log.price}</span>
+                      {log.profitPct !== null && (
+                        <span
+                          className={`ml-1.5 font-bold ${
+                            log.profitPct >= 0 ? 'text-emerald-400' : 'text-red-400'
+                          }`}
+                        >
+                          {log.profitPct >= 0 ? `+${log.profitPct}%` : `${log.profitPct}%`}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 text-[10px] text-slate-400">
+                    <span className="truncate">觸發依據：{log.source}</span>
+                    <span className="shrink-0">操作後總持倉：{log.totalHolding.toLocaleString()} 股</span>
                   </div>
                 </div>
               ))
             ) : (
               <div className="text-slate-500 text-center py-4 text-xs">
-                點擊「啟動分析」生成數律＋TFDR 雙核融合回測紀錄...
+                點擊「啟動分析」生成數律＋TFDR AI 信心度分批回測紀錄...
               </div>
             )}
           </div>
