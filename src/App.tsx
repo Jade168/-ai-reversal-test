@@ -28,7 +28,12 @@ import {
   analyzeNewsImpact
 } from './services/marketData';
 import { generateLocalAiResponse, callExpertAi, QuantContext } from './services/aiChat';
-import { MultiTimeframeTFDR, computeMultiTimeframeTFDRFromDaily } from './services/tfdrIndicator';
+import {
+  MultiTimeframeTFDR,
+  TFDRPoint,
+  calculateTFDRSeries,
+  computeMultiTimeframeTFDRFromDaily
+} from './services/tfdrIndicator';
 
 import { HeaderChart } from './components/HeaderChart';
 import { ApiConfigCard } from './components/ApiConfigCard';
@@ -66,6 +71,7 @@ export const App: React.FC = () => {
     forecastLine: []
   });
   const [tfdr, setTfdr] = useState<MultiTimeframeTFDR | null>(null);
+  const [latestTfdrPoint, setLatestTfdrPoint] = useState<TFDRPoint | null>(null);
 
   // UI Status
   const [isLoading, setIsLoading] = useState(false);
@@ -234,6 +240,13 @@ export const App: React.FC = () => {
       }
       const tfdrMatrix = computeMultiTimeframeTFDRFromDaily(dailyKlinesForTfdr);
       setTfdr(tfdrMatrix);
+
+      const chartTfdrSeries = calculateTFDRSeries(
+        klines.map(k => k.c),
+        klines.map(k => k.h),
+        klines.map(k => k.l)
+      );
+      setLatestTfdrPoint(chartTfdrSeries.length > 0 ? chartTfdrSeries[chartTfdrSeries.length - 1] : null);
 
       addChatMessage(
         'ai',
@@ -535,6 +548,7 @@ export const App: React.FC = () => {
             sentiment={sentiment}
             userBuyPrice={buyPrice}
             tfdr={tfdr}
+            latestTfdrPoint={latestTfdrPoint}
           />
 
           {/* Fourier Z-Axis Component */}

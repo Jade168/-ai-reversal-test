@@ -59,8 +59,12 @@ export interface BacktestStats {
 }
 
 export interface TradeLog {
-  type: 'buy' | 'sell';
+  type: string;
   msg: string;
+  date?: string;
+  price?: string;
+  profit?: number;
+  source?: string;
 }
 
 export interface ResonanceAnalysis {

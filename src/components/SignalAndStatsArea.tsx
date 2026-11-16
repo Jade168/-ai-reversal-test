@@ -1,6 +1,6 @@
 import React from 'react';
 import { ModelBar, SymbolInfo, BacktestStats, ResonanceAnalysis } from '../types/quant';
-import { MultiTimeframeTFDR } from '../services/tfdrIndicator';
+import { MultiTimeframeTFDR, TFDRPoint } from '../services/tfdrIndicator';
 
 interface SignalAndStatsAreaProps {
   lastBar: ModelBar | null;
@@ -10,43 +10,8 @@ interface SignalAndStatsAreaProps {
   sentiment: string;
   userBuyPrice: string;
   tfdr?: MultiTimeframeTFDR | null;
+  latestTfdrPoint?: TFDRPoint | null;
 }
-
-const getScoreTone = (score: number) => {
-  if (score > 80) return 'text-red-400';
-  if (score < 30) return 'text-emerald-400';
-  if (score >= 70) return 'text-amber-300';
-  return 'text-slate-100';
-};
-
-const getRiskCardStyle = (riskLevel: MultiTimeframeTFDR['riskLevel']) => {
-  switch (riskLevel) {
-    case 'EXTREME_TOP':
-      return {
-        wrapper: 'bg-red-950/35 border-red-500/70',
-        title: 'text-red-300',
-        badge: 'bg-red-500/20 text-red-300 border-red-500/50'
-      };
-    case 'SHORT_OVERHEAT':
-      return {
-        wrapper: 'bg-amber-950/30 border-amber-500/70',
-        title: 'text-amber-300',
-        badge: 'bg-amber-500/20 text-amber-300 border-amber-500/50'
-      };
-    case 'EXTREME_BOTTOM':
-      return {
-        wrapper: 'bg-emerald-950/35 border-emerald-500/70',
-        title: 'text-emerald-300',
-        badge: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50'
-      };
-    default:
-      return {
-        wrapper: 'bg-[#0f172a]/90 border-slate-700',
-        title: 'text-sky-300',
-        badge: 'bg-slate-800 text-slate-300 border-slate-600'
-      };
-  }
-};
 
 export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
   lastBar,
@@ -55,74 +20,40 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
   resonance,
   sentiment,
   userBuyPrice,
-  tfdr
+  tfdr,
+  latestTfdrPoint
 }) => {
   if (!lastBar || !symbolInfo || !stats) return null;
 
   const isStrongBuy = lastBar.buySignal || lastBar.reversalSignal === 'STRONG_BUY';
   const isCriticalSell = lastBar.sellSignal || lastBar.reversalSignal === 'CRITICAL_SELL';
 
-  let signalClass = 'bg-white/5 border border-slate-700 text-white';
-  let signalText = '🟡 STATUS: HOLD';
+  const quantStatus = isStrongBuy
+    ? '🟢 STRONG BUY'
+    : isCriticalSell
+    ? '🔴 CRITICAL SELL'
+    : '🟡 STATUS: HOLD';
 
-  if (isStrongBuy) {
-    signalClass = 'bg-emerald-500/15 border border-emerald-500 text-emerald-400';
-    signalText = '🟢 STRONG BUY（時空共振買入）';
-  } else if (isCriticalSell) {
-    signalClass = 'bg-red-500/15 border border-red-500 text-red-400';
-    signalText = '🔴 CRITICAL SELL（時空共振賣出）';
-  }
+  const riskBadgeClass =
+    tfdr?.riskLevel === 'EXTREME_TOP'
+      ? 'bg-red-600 text-white'
+      : tfdr?.riskLevel === 'EXTREME_BOTTOM'
+      ? 'bg-emerald-600 text-white'
+      : tfdr?.riskLevel === 'SHORT_OVERHEAT'
+      ? 'bg-orange-500 text-white'
+      : isStrongBuy
+      ? 'bg-emerald-700 text-emerald-100'
+      : isCriticalSell
+      ? 'bg-red-700 text-red-100'
+      : 'bg-slate-700 text-amber-300';
 
   const numericBuyPrice = userBuyPrice ? parseFloat(userBuyPrice) : null;
   const isTotalReturnProfit = parseFloat(stats.totalReturn) >= 0;
-  const tfdrTheme = tfdr ? getRiskCardStyle(tfdr.riskLevel) : null;
 
   return (
     <div className="mb-1 space-y-1">
-      {/* TFDR 時空奇點共振矩陣 */}
-      {tfdr && tfdrTheme && (
-        <div className={`p-2 rounded-md border text-xs ${tfdrTheme.wrapper}`}>
-          <div className="flex items-center justify-between mb-1.5">
-            <span className={`font-bold text-[11px] ${tfdrTheme.title}`}>
-              ⚡ TFDR 時空奇點共振矩陣
-            </span>
-            <span className={`px-1.5 py-0.5 rounded-xs border text-[9px] font-semibold ${tfdrTheme.badge}`}>
-              {tfdr.riskLevel}
-            </span>
-          </div>
-
-          <div className="grid grid-cols-3 gap-1 mb-1.5">
-            <div className="bg-black/50 p-1.5 rounded-sm text-center border border-white/10">
-              <div className="text-[9px] text-gray-400">日線分數</div>
-              <div className={`text-sm font-extrabold font-mono ${getScoreTone(tfdr.dailyScore)}`}>
-                {tfdr.dailyScore}
-              </div>
-            </div>
-            <div className="bg-black/50 p-1.5 rounded-sm text-center border border-white/10">
-              <div className="text-[9px] text-gray-400">週線分數</div>
-              <div className={`text-sm font-extrabold font-mono ${getScoreTone(tfdr.weeklyScore)}`}>
-                {tfdr.weeklyScore}
-              </div>
-            </div>
-            <div className="bg-black/50 p-1.5 rounded-sm text-center border border-white/10">
-              <div className="text-[9px] text-gray-400">月線分數</div>
-              <div className={`text-sm font-extrabold font-mono ${getScoreTone(tfdr.monthlyScore)}`}>
-                {tfdr.monthlyScore}
-              </div>
-            </div>
-          </div>
-
-          <div className={`font-bold text-[11px] mb-0.5 ${tfdrTheme.title}`}>
-            {tfdr.regimeTitle}
-          </div>
-          <div className="text-[10.5px] leading-relaxed text-gray-200">
-            {tfdr.actionAdvice}
-          </div>
-        </div>
-      )}
-
       {/* Date & Live Price Header */}
-      <div className="flex items-center justify-between text-xs mb-1">
+      <div className="flex items-center justify-between text-xs">
         <span className="px-1.5 py-0.5 rounded-xs bg-[#1f2937] text-gray-400 text-[10px]">
           日期：{lastBar.date?.split(' ')[0]}
         </span>
@@ -131,63 +62,84 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
         </span>
       </div>
 
-      {/* Main Signal Box */}
-      <div className={`p-2 rounded-md text-center text-sm font-bold shadow-xs ${signalClass}`}>
-        {signalText}
-      </div>
+      {/* ⚡ 雙核終極量化決策中樞（合併 TFDR 奇點矩陣 + 量化訊號框 + 回測統計） */}
+      <div className="bg-slate-900/90 border border-indigo-500/40 rounded-lg p-3 mb-2 shadow-lg">
+        {/* 頂部標題與日週月奇點分數並排 */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pb-2 mb-2 border-b border-slate-800">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-bold text-amber-400">⚡ 雙核量化決策中樞</span>
+            <span className={`px-2 py-0.5 text-xs font-bold rounded ${riskBadgeClass}`}>
+              {quantStatus}{tfdr ? ` · ${tfdr.regimeTitle}` : ''}
+            </span>
+          </div>
 
-      {/* Cosmic Status Banner */}
-      <div
-        className="text-[11px] text-center font-bold py-1 px-2 rounded-sm border border-[#334155]/50"
-        style={{
-          background: isStrongBuy ? '#064e3b' : isCriticalSell ? '#7f1d1d' : '#1e293b',
-          color: isStrongBuy ? '#34d399' : isCriticalSell ? '#f87171' : '#fbbf24'
-        }}
-      >
-        {isStrongBuy
-          ? '🟢 STATUS: STRONG BUY · 時空共振點'
-          : isCriticalSell
-          ? '🔴 STATUS: CRITICAL SELL · 時空反轉點'
-          : '🟡 STATUS: HOLD · 實驗量化訊號'}
-      </div>
+          {/* 日/週/月 TFDR 分數膠囊 */}
+          {tfdr && (
+            <div className="flex items-center gap-1.5 text-xs flex-wrap">
+              <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+                日線TFDR: <b className="text-white font-mono">{tfdr.dailyScore}</b>
+              </span>
+              <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+                週線TFDR: <b className="text-white font-mono">{tfdr.weeklyScore}</b>
+              </span>
+              <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+                月線TFDR: <b className="text-white font-mono">{tfdr.monthlyScore}</b>
+              </span>
+            </div>
+          )}
+        </div>
 
-      {/* Next bar execution note */}
-      <div className="text-[10px] text-center text-gray-400 py-0.5">
-        下一棒開市價模擬成交；未計手續費及滑點
-      </div>
-
-      {/* 6-Grid Stats Panel */}
-      <div className="grid grid-cols-3 gap-1 my-1">
-        <div className="bg-[#111] p-1.5 rounded-sm text-center border border-[#222]">
-          <div className="text-[9px] text-[#888] mb-0.5">總收益率</div>
-          <div className={`text-xs font-bold ${isTotalReturnProfit ? 'text-[#10b981]' : 'text-[#ef4444]'}`}>
-            {stats.totalReturn}%
+        {/* 明確的操作指令與 TFDR 逃頂/抄底參考價 */}
+        <div className="text-xs text-slate-200 bg-slate-800/60 p-2 rounded mb-2 leading-relaxed">
+          <span className="text-indigo-400 font-bold">【明確操作指令】</span>
+          {tfdr?.actionAdvice || '按原定 1836.15 數律支撐阻力位執行波段操作。'}
+          <div className="mt-1 flex flex-wrap gap-3 text-[11px]">
+            <span className="text-red-400">
+              🔴 TFDR 90 逃頂參考: <b className="font-mono">${latestTfdrPoint ? latestTfdrPoint.band90.toFixed(2) : '--'}</b>
+            </span>
+            <span className="text-emerald-400">
+              🟢 TFDR 15 抄底參考: <b className="font-mono">${latestTfdrPoint ? latestTfdrPoint.band15.toFixed(2) : '--'}</b>
+            </span>
           </div>
         </div>
 
-        <div className="bg-[#111] p-1.5 rounded-sm text-center border border-[#222]">
-          <div className="text-[9px] text-[#888] mb-0.5">勝率</div>
-          <div className="text-xs font-bold text-[#10b981]">{stats.winRate}%</div>
+        {/* 總收益率、勝率、盈虧比等核心回測網格 */}
+        <div className="grid grid-cols-3 gap-1">
+          <div className="bg-black/45 p-1.5 rounded-sm text-center border border-slate-800">
+            <div className="text-[9px] text-[#888] mb-0.5">總收益率</div>
+            <div className={`text-xs font-bold ${isTotalReturnProfit ? 'text-[#10b981]' : 'text-[#ef4444]'}`}>
+              {stats.totalReturn}%
+            </div>
+          </div>
+
+          <div className="bg-black/45 p-1.5 rounded-sm text-center border border-slate-800">
+            <div className="text-[9px] text-[#888] mb-0.5">勝率</div>
+            <div className="text-xs font-bold text-[#10b981]">{stats.winRate}%</div>
+          </div>
+
+          <div className="bg-black/45 p-1.5 rounded-sm text-center border border-slate-800">
+            <div className="text-[9px] text-[#888] mb-0.5">盈虧比</div>
+            <div className="text-xs font-bold text-gray-200">{stats.profitLossRatio}</div>
+          </div>
+
+          <div className="bg-black/45 p-1.5 rounded-sm text-center border border-slate-800">
+            <div className="text-[9px] text-[#888] mb-0.5">最大回撤</div>
+            <div className="text-xs font-bold text-[#ef4444]">{stats.maxDrawdown}%</div>
+          </div>
+
+          <div className="bg-black/45 p-1.5 rounded-sm text-center border border-slate-800">
+            <div className="text-[9px] text-[#888] mb-0.5">交易次數</div>
+            <div className="text-xs font-bold text-[#ffd700]">{stats.tradeCount}</div>
+          </div>
+
+          <div className="bg-black/45 p-1.5 rounded-sm text-center border border-slate-800">
+            <div className="text-[9px] text-[#888] mb-0.5">年化收益</div>
+            <div className="text-xs font-bold text-gray-200">{stats.annualReturn}%</div>
+          </div>
         </div>
 
-        <div className="bg-[#111] p-1.5 rounded-sm text-center border border-[#222]">
-          <div className="text-[9px] text-[#888] mb-0.5">盈虧比</div>
-          <div className="text-xs font-bold text-gray-200">{stats.profitLossRatio}</div>
-        </div>
-
-        <div className="bg-[#111] p-1.5 rounded-sm text-center border border-[#222]">
-          <div className="text-[9px] text-[#888] mb-0.5">最大回撤</div>
-          <div className="text-xs font-bold text-[#ef4444]">{stats.maxDrawdown}%</div>
-        </div>
-
-        <div className="bg-[#111] p-1.5 rounded-sm text-center border border-[#222]">
-          <div className="text-[9px] text-[#888] mb-0.5">交易次數</div>
-          <div className="text-xs font-bold text-[#ffd700]">{stats.tradeCount}</div>
-        </div>
-
-        <div className="bg-[#111] p-1.5 rounded-sm text-center border border-[#222]">
-          <div className="text-[9px] text-[#888] mb-0.5">年化收益</div>
-          <div className="text-xs font-bold text-gray-200">{stats.annualReturn}%</div>
+        <div className="text-[10px] text-center text-gray-500 mt-1.5">
+          下一棒開市價模擬成交（已納入數律＋TFDR奇點雙核）；未計手續費及滑點
         </div>
       </div>
 

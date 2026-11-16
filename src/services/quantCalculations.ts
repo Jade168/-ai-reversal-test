@@ -11,6 +11,7 @@ import {
   MonthlyStrategyResult,
   ReversalAnchor
 } from '../types/quant';
+import { calculateTFDRSeries } from './tfdrIndicator';
 
 export const QUANT_CONFIG = {
   coreNumber: 1836.15,
@@ -1017,11 +1018,18 @@ export function runBacktestEngine(modelData: ModelBar[], configuredFund: number 
   let cash = initialFund;
   let shares = 0;
   let entryCapital = 0;
-  let entryPrice = 0;
   let peakEquity = initialFund;
   let maxDrawdown = 0;
   const trades: { profit: number }[] = [];
   const logs: TradeLog[] = [];
+
+  const tfdrSeries = modelData.length > 0
+    ? calculateTFDRSeries(
+        modelData.map(b => Number(b.c)),
+        modelData.map(b => Number(b.h)),
+        modelData.map(b => Number(b.l))
+      )
+    : [];
 
   for (let idx = 0; idx < modelData.length; idx += 1) {
     const item = modelData[idx];
@@ -1029,26 +1037,50 @@ export function runBacktestEngine(modelData: ModelBar[], configuredFund: number 
 
     if (idx > 0) {
       const signalBar = modelData[idx - 1];
+      const signalTfdr = tfdrSeries[idx - 1];
       const rawOpen = Number(item.o);
       const executionPrice = Number.isFinite(rawOpen) && rawOpen > 0 ? rawOpen : close;
 
-      if (signalBar.buySignal && shares === 0 && cash > 0 && executionPrice > 0) {
+      const classicBuy = Boolean(signalBar.buySignal || signalBar.reversalSignal === 'STRONG_BUY');
+      const tfdrBuy = Boolean(signalTfdr && signalTfdr.score <= 15);
+      const classicSell = Boolean(signalBar.sellSignal || signalBar.reversalSignal === 'CRITICAL_SELL');
+      const tfdrSell = Boolean(signalTfdr && signalTfdr.score >= 90);
+
+      const dateStr = (signalBar.date || '').split(' ')[0];
+
+      if ((classicBuy || tfdrBuy) && shares === 0 && cash > 0 && executionPrice > 0) {
         entryCapital = cash;
-        entryPrice = executionPrice;
         shares = cash / executionPrice;
         cash = 0;
-        logs.push({ type: 'buy', msg: `[${signalBar.date}] STRONG BUY; 下一棒開市價 @ ${executionPrice.toFixed(2)}` });
-      } else if (signalBar.sellSignal && shares > 0 && executionPrice > 0) {
+
+        const source = classicBuy && tfdrBuy ? '數律+[TFDR奇點]' : tfdrBuy ? '[TFDR奇點]' : '1836數律';
+        const type = tfdrBuy && !classicBuy ? 'BUY (奇點買)' : 'STRONG BUY';
+        logs.push({
+          date: dateStr,
+          type,
+          price: executionPrice.toFixed(2),
+          source,
+          msg: `[${dateStr}] ${type} ${source} @ ${executionPrice.toFixed(2)}`
+        });
+      } else if ((classicSell || tfdrSell) && shares > 0 && executionPrice > 0) {
         cash = shares * executionPrice;
         const profit = cash - entryCapital;
-        trades.push({ profit: entryCapital > 0 ? profit / entryCapital : 0 });
+        const profitRatio = entryCapital > 0 ? profit / entryCapital : 0;
+        const profitPct = Number((profitRatio * 100).toFixed(2));
+        trades.push({ profit: profitRatio });
+
+        const source = classicSell && tfdrSell ? '數律+[TFDR奇點]' : tfdrSell ? '[TFDR奇點]' : '1836數律';
+        const type = tfdrSell && !classicSell ? 'SELL (奇點沽)' : 'CRITICAL SELL';
         logs.push({
-          type: 'sell',
-          msg: `[${signalBar.date}] CRITICAL SELL; 下一棒開市價 @ ${executionPrice.toFixed(2)} | 盈虧: ${profit >= 0 ? '+' : ''}${profit.toFixed(2)} (${((profit / entryCapital) * 100).toFixed(2)}%)`
+          date: dateStr,
+          type,
+          price: executionPrice.toFixed(2),
+          profit: profitPct,
+          source,
+          msg: `[${dateStr}] ${type} ${source} @ ${executionPrice.toFixed(2)} | 盈虧: ${profit >= 0 ? '+' : ''}${profit.toFixed(2)} (${profitPct}%)`
         });
         shares = 0;
         entryCapital = 0;
-        entryPrice = 0;
       }
     }
 
@@ -1063,10 +1095,17 @@ export function runBacktestEngine(modelData: ModelBar[], configuredFund: number 
     if (Number.isFinite(exitPrice) && exitPrice > 0) {
       cash = shares * exitPrice;
       const profit = cash - entryCapital;
-      trades.push({ profit: entryCapital > 0 ? profit / entryCapital : 0 });
+      const profitRatio = entryCapital > 0 ? profit / entryCapital : 0;
+      const profitPct = Number((profitRatio * 100).toFixed(2));
+      const lastDate = (last.date || '').split(' ')[0] || '回測結束';
+      trades.push({ profit: profitRatio });
       logs.push({
-        type: 'sell',
-        msg: `[回測結束] 當前收盤強制平倉 @ ${exitPrice.toFixed(2)} | 盈虧: ${profit >= 0 ? '+' : ''}${profit.toFixed(2)}`
+        date: lastDate,
+        type: 'SELL (期末結算)',
+        price: exitPrice.toFixed(2),
+        profit: profitPct,
+        source: '回測結算',
+        msg: `[${lastDate}] 回測期末平倉 @ ${exitPrice.toFixed(2)} | 盈虧: ${profit >= 0 ? '+' : ''}${profit.toFixed(2)} (${profitPct}%)`
       });
     }
   }
