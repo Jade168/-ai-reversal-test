@@ -3,8 +3,14 @@ import { RawKline } from '../types/quant';
 export interface TFDRPoint {
   index: number;
   score: number;      // 0 - 100 分數 (>80 危險頂, <30 黃金底)
-  band90: number;     // 對應 K 線上的紅色逃頂參考價
-  band15: number;     // 對應 K 線上的綠色抄底參考價
+  // 上方紅色危險阻力帶 (3條動態曲線)
+  band95: number;     // 95 極度危險頂
+  band90: number;     // 90 奇點逃頂線
+  band85: number;     // 85 加速預警線
+  // 下方綠色黃金支撐帶 (3條動態曲線)
+  band25: number;     // 25 觀察支撐線
+  band15: number;     // 15 奇點抄底線
+  band10: number;     // 10 極度恐慌底
 }
 
 export interface MultiTimeframeTFDR {
@@ -30,7 +36,16 @@ export function calculateTFDRSeries(
 
   for (let i = 0; i < closes.length; i++) {
     if (i < period) {
-      results.push({ index: i, score: 50, band90: highs[i], band15: lows[i] });
+      results.push({
+        index: i,
+        score: 50,
+        band95: highs[i],
+        band90: highs[i],
+        band85: highs[i],
+        band25: lows[i],
+        band15: lows[i],
+        band10: lows[i],
+      });
       continue;
     }
 
@@ -81,17 +96,21 @@ export function calculateTFDRSeries(
 
     score = Math.max(0, Math.min(100, Math.round(score)));
 
-    // 映射主圖動態臨界軌道價格
-    const velocity = (closes[i] - closes[i - 5]) / 5;
-    const prevVelocity = (closes[i - 5] - closes[i - 10]) / 5;
+    // 映射主圖動態 6 軌臨界曲線價格
+    const velocity = (closes[i] - closes[Math.max(0, i - 5)]) / 5;
+    const prevVelocity = (closes[Math.max(0, i - 5)] - closes[Math.max(0, i - 10)]) / 5;
     const accelFactor = 1 + Math.min(0.6, Math.max(-0.4, (velocity - prevVelocity) / atr));
     const unit = atr * accelFactor;
 
     results.push({
       index: i,
       score,
-      band90: Number((mid + unit * 3.2).toFixed(2)),
-      band15: Number((mid - unit * 3.8).toFixed(2)),
+      band95: Number((mid + unit * 3.8).toFixed(2)), // 最頂層 95
+      band90: Number((mid + unit * 3.1).toFixed(2)), // 中間層 90
+      band85: Number((mid + unit * 2.4).toFixed(2)), // 預警層 85
+      band25: Number((mid - unit * 2.4).toFixed(2)), // 觀察層 25
+      band15: Number((mid - unit * 3.1).toFixed(2)), // 中間層 15
+      band10: Number((mid - unit * 3.8).toFixed(2)), // 最底層 10
     });
   }
   return results;

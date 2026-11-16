@@ -229,11 +229,11 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
         minPrice = Math.min(minPrice, lastTfdr.band15);
       }
     } else {
-      // TFDR 模式：納入可視區 band90 / band15 通道上下軌
+      // TFDR 模式：納入可視區 band95 / band10 上下 6 軌通道極值
       visibleTfdr.forEach((pt, idx) => {
-        if (startIdx + idx >= 14) {
-          if (pt.band90 > 0) maxPrice = Math.max(maxPrice, pt.band90);
-          if (pt.band15 > 0) minPrice = Math.min(minPrice, pt.band15);
+        if (startIdx + idx >= 14 || visibleTfdr.length <= 14) {
+          if (pt.band95 > 0) maxPrice = Math.max(maxPrice, pt.band95);
+          if (pt.band10 > 0) minPrice = Math.min(minPrice, pt.band10);
         }
       });
     }
@@ -319,88 +319,111 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       ctx.stroke();
       ctx.setLineDash([]);
     } else if (visibleTfdr.length > 0) {
-      // TFDR 模式：(a) 隱藏繁雜均線 (b) 繪製 band90 紅虛線與 band15 綠虛線通道
+      // TFDR 模式：(a) 隱藏繁雜均線 (b) 繪製上下各 3 條動態波動曲線 + 半透明帶狀陰影
       ctx.save();
-      ctx.beginPath();
-      ctx.setLineDash([5, 4]);
-      let startedTop = false;
-      visibleTfdr.forEach((pt, i) => {
-        if (pt.band90 > 0) {
-          const x = getX(i);
-          const y = getY(pt.band90);
-          if (!startedTop) {
-            ctx.moveTo(x, y);
-            startedTop = true;
-          } else {
-            ctx.lineTo(x, y);
-          }
-        }
-      });
-      ctx.strokeStyle = 'rgba(239, 68, 68, 0.85)';
-      ctx.lineWidth = 1.8;
-      ctx.stroke();
 
+      // 1. 紅色危險天花板帶半透明陰影 (band85 ~ band95)
       ctx.beginPath();
-      let startedBot = false;
       visibleTfdr.forEach((pt, i) => {
-        if (pt.band15 > 0) {
-          const x = getX(i);
-          const y = getY(pt.band15);
-          if (!startedBot) {
-            ctx.moveTo(x, y);
-            startedBot = true;
-          } else {
-            ctx.lineTo(x, y);
-          }
-        }
+        const x = getX(i);
+        const y = getY(pt.band95);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
       });
-      ctx.strokeStyle = 'rgba(16, 185, 129, 0.85)';
-      ctx.lineWidth = 1.8;
-      ctx.stroke();
+      for (let i = visibleTfdr.length - 1; i >= 0; i--) {
+        ctx.lineTo(getX(i), getY(visibleTfdr[i].band85));
+      }
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(239, 68, 68, 0.08)';
+      ctx.fill();
+
+      // 2. 綠色抄底地板帶半透明陰影 (band25 ~ band10)
+      ctx.beginPath();
+      visibleTfdr.forEach((pt, i) => {
+        const x = getX(i);
+        const y = getY(pt.band25);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      for (let i = visibleTfdr.length - 1; i >= 0; i--) {
+        ctx.lineTo(getX(i), getY(visibleTfdr[i].band10));
+      }
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(34, 197, 94, 0.08)';
+      ctx.fill();
+
+      // 輔助繪製單條動態曲線
+      const drawDynamicCurve = (
+        extractor: (pt: (typeof visibleTfdr)[number]) => number,
+        color: string,
+        lineWidth: number,
+        dash: number[]
+      ) => {
+        ctx.beginPath();
+        ctx.setLineDash(dash);
+        visibleTfdr.forEach((pt, i) => {
+          const x = getX(i);
+          const y = getY(extractor(pt));
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.strokeStyle = color;
+        ctx.lineWidth = lineWidth;
+        ctx.stroke();
+      };
+
+      // 上方三條紅色動態曲線
+      drawDynamicCurve(pt => pt.band95, '#ef4444', 1.5, []);      // 95 極度危險頂 (深紅實線)
+      drawDynamicCurve(pt => pt.band90, '#f87171', 1.2, [5, 4]);  // 90 奇點逃頂線 (亮紅虛線)
+      drawDynamicCurve(pt => pt.band85, '#fca5a5', 1.0, [2, 3]);  // 85 加速預警線 (淺紅點線)
+
+      // 下方三條綠色動態曲線
+      drawDynamicCurve(pt => pt.band25, '#86efac', 1.0, [2, 3]);  // 25 觀察支撐線 (淺綠點線)
+      drawDynamicCurve(pt => pt.band15, '#4ade80', 1.2, [5, 4]);  // 15 奇點抄底線 (亮綠虛線)
+      drawDynamicCurve(pt => pt.band10, '#22c55e', 1.5, []);      // 10 極度恐慌底 (深綠實線)
       ctx.setLineDash([]);
 
-      // 右側通道標籤
+      // 右側末端 6 軌標註（自適應防重疊間距）
       const rightMostTfdr = visibleTfdr[visibleTfdr.length - 1];
       if (rightMostTfdr) {
-        const drawBandTag = (price: number, text: string, bg: string, border: string, textColor: string, offsetUp: boolean) => {
-          const yRaw = getY(price);
-          ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
+        const drawEndTag = (yCenter: number, text: string, color: string, bg: string) => {
+          ctx.font = 'bold 9.5px -apple-system, BlinkMacSystemFont, sans-serif';
           const tw = ctx.measureText(text).width;
-          const bw = tw + 10;
-          const bh = 16;
-          const bx = margin.left + plotW - bw - 4;
-          const by = Math.max(
-            margin.top + 2,
-            Math.min(margin.top + plotH - bh - 2, offsetUp ? yRaw - bh - 3 : yRaw + 3)
-          );
+          const bw = tw + 8;
+          const bh = 13;
+          const bx = margin.left + plotW - bw - 3;
+          const by = Math.max(margin.top + 1, Math.min(margin.top + plotH - bh - 1, yCenter - bh / 2));
+
           ctx.fillStyle = bg;
-          ctx.strokeStyle = border;
-          ctx.lineWidth = 1;
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 0.8;
           ctx.beginPath();
-          ctx.roundRect(bx, by, bw, bh, 3);
+          ctx.roundRect(bx, by, bw, bh, 2.5);
           ctx.fill();
           ctx.stroke();
-          ctx.fillStyle = textColor;
+
+          ctx.fillStyle = color;
           ctx.textAlign = 'center';
-          ctx.fillText(text, bx + bw / 2, by + 11.5);
+          ctx.fillText(text, bx + bw / 2, by + 9.5);
         };
 
-        drawBandTag(
-          rightMostTfdr.band90,
-          `TFDR 90 危險頂 (${rightMostTfdr.band90})`,
-          'rgba(127, 29, 29, 0.82)',
-          'rgba(239, 68, 68, 0.85)',
-          '#fecaca',
-          true
-        );
-        drawBandTag(
-          rightMostTfdr.band15,
-          `TFDR 15 黃金底 (${rightMostTfdr.band15})`,
-          'rgba(6, 78, 59, 0.82)',
-          'rgba(16, 185, 129, 0.85)',
-          '#a7f3d0',
-          false
-        );
+        // 頂部 3 標籤從上往下防重疊排列
+        const y95 = getY(rightMostTfdr.band95);
+        const y90 = Math.max(y95 + 14, getY(rightMostTfdr.band90));
+        const y85 = Math.max(y90 + 14, getY(rightMostTfdr.band85));
+
+        drawEndTag(y95, '95 極頂', '#ef4444', 'rgba(69, 10, 10, 0.85)');
+        drawEndTag(y90, '90 危險', '#f87171', 'rgba(69, 10, 10, 0.82)');
+        drawEndTag(y85, '85 警戒', '#fca5a5', 'rgba(69, 10, 10, 0.78)');
+
+        // 底部 3 標籤從下往上防重疊排列
+        const y10 = getY(rightMostTfdr.band10);
+        const y15 = Math.min(y10 - 14, getY(rightMostTfdr.band15));
+        const y25 = Math.min(y15 - 14, getY(rightMostTfdr.band25));
+
+        drawEndTag(y25, '25 觀察', '#86efac', 'rgba(5, 46, 22, 0.78)');
+        drawEndTag(y15, '15 黃金底', '#4ade80', 'rgba(5, 46, 22, 0.82)');
+        drawEndTag(y10, '10 極底', '#22c55e', 'rgba(5, 46, 22, 0.85)');
       }
       ctx.restore();
     }
@@ -1137,7 +1160,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
         <div className="text-xs text-gray-300 font-medium">
           {chartMode === 'CLASSIC'
             ? '目前顯示：1836.15 數律共振 + 強支強阻'
-            : '目前顯示：TFDR 時空奇點通道 (90危險頂 / 15黃金底)'}
+            : '目前顯示：TFDR 6 軌動態奇點通道 (95/90/85 頂帶 · 25/15/10 底帶)'}
         </div>
         <div className="flex items-center gap-2">
           {/* Zoom controls */}
@@ -1205,10 +1228,22 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           ) : (
             <>
               <span className="flex items-center gap-1 text-[#ef4444] font-bold">
-                <span className="w-3 h-0.5 inline-block border-b border-dashed border-[#ef4444]"></span> TFDR 90 危險頂
+                <span className="w-3 h-0.5 inline-block bg-[#ef4444]"></span> 95極頂
               </span>
-              <span className="flex items-center gap-1 text-[#10b981] font-bold">
-                <span className="w-3 h-0.5 inline-block border-b border-dashed border-[#10b981]"></span> TFDR 15 黃金底
+              <span className="flex items-center gap-1 text-[#f87171]">
+                <span className="w-3 h-0.5 inline-block border-b border-dashed border-[#f87171]"></span> 90危險
+              </span>
+              <span className="flex items-center gap-1 text-[#fca5a5]">
+                <span className="w-3 h-0.5 inline-block border-b border-dotted border-[#fca5a5]"></span> 85警戒
+              </span>
+              <span className="flex items-center gap-1 text-[#86efac]">
+                <span className="w-3 h-0.5 inline-block border-b border-dotted border-[#86efac]"></span> 25觀察
+              </span>
+              <span className="flex items-center gap-1 text-[#4ade80]">
+                <span className="w-3 h-0.5 inline-block border-b border-dashed border-[#4ade80]"></span> 15黃金底
+              </span>
+              <span className="flex items-center gap-1 text-[#22c55e] font-bold">
+                <span className="w-3 h-0.5 inline-block bg-[#22c55e]"></span> 10極底
               </span>
               <span className="text-[#10b981]">▲ 奇點買</span>
               <span className="text-[#ef4444]">▼ 奇點沽</span>
