@@ -11,7 +11,7 @@ import {
   MonthlyStrategyResult,
   ReversalAnchor
 } from '../types/quant';
-import { computeAlignedMultiTimeframeTFDRSeries } from './tfdrIndicator';
+import { calculateTFDRSeries } from './tfdrIndicator';
 
 export const QUANT_CONFIG = {
   coreNumber: 1836.15,
@@ -1012,217 +1012,438 @@ export function calculateCosmicReversalSignal(klineData: RawKline[], currentPeri
   return results;
 }
 
-interface HeikinAshiBar {
+/**
+ * ⚡ 雙核終極量化決策系統 - 富途平均K線(Heikin-Ashi)多級階梯共振回測模組
+ * 核心哲學：月線定骨架鎖底倉，周線定方向控節奏，日線破梯精準扣扳機
+ */
+export interface KLineBar {
   date: string;
-  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+export interface HeikinAshiBar {
+  date: string;
   open: number;
   high: number;
   low: number;
   close: number;
   rawClose: number;
-  isBullish: boolean; // 平均陽燭
-  isBearish: boolean; // 平均陰燭
+  isBullish: boolean;
+  isBearish: boolean;
 }
 
-function computeHeikinAshi(data: ModelBar[]): HeikinAshiBar[] {
+export function convertToHeikinAshi(data: KLineBar[]): HeikinAshiBar[] {
   const ha: HeikinAshiBar[] = [];
-  for (let i = 0; i < data.length; i += 1) {
+  for (let i = 0; i < data.length; i++) {
     const d = data[i];
-    const dOpen = Number(d.o);
-    const dHigh = Number(d.h);
-    const dLow = Number(d.l);
-    const dClose = Number(d.c);
-
-    const haClose = (dOpen + dHigh + dLow + dClose) / 4;
-    const haOpen = i === 0 ? (dOpen + dClose) / 2 : (ha[i - 1].open + ha[i - 1].close) / 2;
-    const haHigh = Math.max(dHigh, haOpen, haClose);
-    const haLow = Math.min(dLow, haOpen, haClose);
+    const haClose = (d.open + d.high + d.low + d.close) / 4;
+    const haOpen = i === 0 ? (d.open + d.close) / 2 : (ha[i - 1].open + ha[i - 1].close) / 2;
+    const haHigh = Math.max(d.high, haOpen, haClose);
+    const haLow = Math.min(d.low, haOpen, haClose);
 
     ha.push({
-      date: (d.date || '').split(' ')[0],
-      timestamp: Number.isFinite(Number(d.timestamp))
-        ? Number(d.timestamp)
-        : Date.parse(String(d.date || '')),
+      date: d.date,
       open: haOpen,
       high: haHigh,
       low: haLow,
       close: haClose,
-      rawClose: dClose,
+      rawClose: d.close,
       isBullish: haClose > haOpen,
-      isBearish: haClose < haOpen
+      isBearish: haClose <= haOpen
     });
   }
   return ha;
 }
 
-// ===================== 回測引擎（TFDR 奇點能量 ＋ 平均K線 Heikin-Ashi 破梯確認） =====================
-export function runBacktestEngine(
-  modelData: ModelBar[],
+function aggregateKLineBars(dailyData: KLineBar[], step: number): KLineBar[] {
+  const aggregated: KLineBar[] = [];
+  for (let i = 0; i < dailyData.length; i += step) {
+    const chunk = dailyData.slice(i, i + step);
+    if (chunk.length === 0) continue;
+    let hi = -Infinity;
+    let lo = Infinity;
+    for (const bar of chunk) {
+      if (bar.high > hi) hi = bar.high;
+      if (bar.low < lo) lo = bar.low;
+    }
+    aggregated.push({
+      date: chunk[chunk.length - 1].date,
+      open: chunk[0].open,
+      high: hi,
+      low: lo,
+      close: chunk[chunk.length - 1].close
+    });
+  }
+  return aggregated;
+}
+
+function executeStaircaseBacktest(
+  dailyData: KLineBar[],
+  weeklyData: KLineBar[],
+  monthlyData: KLineBar[],
+  dailyTFDR: { score: number }[],
+  weeklyTFDR: { score: number }[],
+  monthlyTFDR: { score: number }[],
   configuredFund: number = 1000000,
-  period: string = 'daily',
-  dailyBars?: RawKline[]
-) {
+  barsPerYear: number = 252
+): { stats: BacktestStats; logs: TradeLog[] } {
   const initialFund =
     Number.isFinite(configuredFund) && configuredFund > 0 ? configuredFund : 1000000;
-  const unitCapital = initialFund / 10; // 分為 10 份倉位管理，預設 1,000,000 下每 1 份標準注碼 $100,000
+  const unitCapital = initialFund / 10; // 每份標準注碼 $100,000
 
-  let cash = initialFund;
-  let totalShares = 0;       // 當前累計持有總股數
-  let avgCost = 0;           // 持倉平均成本價
-  let realizedProfit = 0;    // 累計已實現盈虧
+  const haDaily = convertToHeikinAshi(dailyData);
+  const haWeekly = convertToHeikinAshi(weeklyData);
+  const haMonthly = convertToHeikinAshi(monthlyData);
+
+  let longShares = 0;
+  let avgLongCost = 0;
+  let shortShares = 0;
+  let avgShortPrice = 0;
+  let lastActionBarIndex = -999; // 防止同一週期連續兩天重複重倉鎖死資金
+
+  let realizedProfit = 0;
   let peakEquity = initialFund;
   let maxDrawdown = 0;
 
   const trades: { profit: number }[] = [];
-  const logs: TradeLog[] = [];
+  const tradeLogs: TradeLog[] = [];
 
-  const haData = computeHeikinAshi(modelData);
-  const sourceDaily = dailyBars && dailyBars.length > 0 ? dailyBars : modelData;
-  const alignedTfdr = computeAlignedMultiTimeframeTFDRSeries(sourceDaily);
-  let tfdrCursor = 0;
-  const startIdx = haData.length > 40 ? 30 : Math.max(2, Math.min(10, Math.floor(haData.length * 0.2)));
-
-  for (let i = 0; i < haData.length; i += 1) {
-    const curr = haData[i];
-    if (!Number.isFinite(curr.rawClose) || curr.rawClose <= 0) continue;
-
-    if (i >= startIdx && i >= 2) {
-      const prev = haData[i - 1];
-      const prev2 = haData[i - 2];
-
-      while (
-        tfdrCursor + 1 < alignedTfdr.length &&
-        Number.isFinite(curr.timestamp) &&
-        alignedTfdr[tfdrCursor + 1].timestamp <= curr.timestamp
-      ) {
-        tfdrCursor += 1;
+  if (haDaily.length === 0 || haWeekly.length === 0 || haMonthly.length === 0) {
+    return {
+      logs: tradeLogs,
+      stats: {
+        totalReturn: '0.00',
+        winRate: '0.00',
+        profitLossRatio: '0.00',
+        maxDrawdown: '0.00',
+        finalFund: initialFund.toFixed(2),
+        tradeCount: 0,
+        annualReturn: '0.00'
       }
+    };
+  }
 
-      const tfdrSnapshot =
-        sourceDaily === modelData && alignedTfdr[i]
-          ? alignedTfdr[i]
-          : alignedTfdr[tfdrCursor] || { dailyScore: 50, weeklyScore: 50, monthlyScore: 50 };
+  const startIdx = haDaily.length > 35 ? 30 : Math.min(2, haDaily.length);
 
-      const dScore = tfdrSnapshot.dailyScore;
-      const wScore = tfdrSnapshot.weeklyScore;
-      const mScore = tfdrSnapshot.monthlyScore;
+  for (let i = 0; i < haDaily.length; i++) {
+    const currDay = haDaily[i];
+    if (!Number.isFinite(currDay.rawClose) || currDay.rawClose <= 0) continue;
 
-      // 【核心形態 1：下跌梯級終結（破頂轉陽）】
-      // 條件：前兩根還在走下跌梯級(prev.high < prev2.high)，今日正式「升穿昨日平均高點(curr.high > prev.high)」且「轉為平均陽燭(curr.isBullish)」
-      const isBreakDownStaircase =
-        prev.high < prev2.high && curr.high > prev.high && curr.isBullish;
+    if (i >= startIdx && i >= 1) {
+      const prevDay = haDaily[i - 1];
 
-      // 【核心形態 2：上漲梯級斷裂（破底轉陰）】
-      // 條件：前兩根還在走上漲梯級(prev.low > prev2.low)，今日正式「跌穿昨日平均低點(curr.low < prev.low)」且「轉為平均陰燭(curr.isBearish)」
-      const isBreakUpStaircase =
-        prev.low > prev2.low && curr.low < prev.low && curr.isBearish;
+      const wIdx = Math.min(haWeekly.length - 1, Math.floor(i / 5));
+      const mIdx = Math.min(haMonthly.length - 1, Math.floor(i / 21));
+      const currWeek = haWeekly[wIdx];
+      const prevWeek = wIdx > 0 ? haWeekly[wIdx - 1] : currWeek;
 
-      // 【一、買入決策：必須等到「平均K線破梯轉陽」才准扣扳機，絕不在下跌梯級中接飛刀】
-      if (isBreakDownStaircase && totalShares * curr.rawClose < unitCapital * 6 && cash > 0) {
-        // 1. 95% 信心大手買入 (3份)：週線與日線同時進入底部奇點(日<=28, 週<=35) + 平均K線破梯轉陽
-        const isMegaBuy = dScore <= 28 && wScore <= 35;
-        // 2. 75% 信心分批買入 (1份)：日線進入低位(<=32) 且 月線健康(<75) + 平均K線破梯轉陽
-        const isNormalBuy = !isMegaBuy && dScore <= 32 && mScore < 75;
+      const dScore = dailyTFDR[i]?.score ?? 50;
+      const prevDScore = dailyTFDR[i - 1]?.score ?? 50;
+      const wScore = weeklyTFDR[wIdx]?.score ?? 50;
+      const mScore = monthlyTFDR[mIdx]?.score ?? 50;
 
-        if (isMegaBuy || isNormalBuy) {
-          const units = isMegaBuy ? 3 : 1;
-          const deployCapital = Math.min(cash, unitCapital * units);
-          const buyShares = Math.floor(deployCapital / curr.rawClose);
+      // 週線結構確認（本週升穿上週高點 / 跌穿上週低點）
+      const isWeeklyBreakUp = currWeek.high > prevWeek.high && currWeek.isBullish;
+      const isWeeklyBreakDown = currWeek.low < prevWeek.low && currWeek.isBearish;
 
-          if (buyShares > 0) {
-            const actualCost = buyShares * curr.rawClose;
-            cash -= actualCost;
-            avgCost = ((totalShares * avgCost) + actualCost) / (totalShares + buyShares);
-            totalShares += buyShares;
+      // 【核心對齊：直接讀取圖表上的「奇點買」與「奇點沽」信號】
+      // 當日線 TFDR 觸及 <= 22（或剛從 <= 20 拐頭向上）即對應圖表上的「奇點買」
+      const isChartSingularityBuy =
+        (dScore <= 22 || (prevDScore <= 20 && dScore <= 26)) &&
+        currDay.rawClose >= prevDay.rawClose * 0.98;
+      // 當日線 TFDR 觸及 >= 84（或剛從 >= 86 拐頭向下）即對應圖表上的「奇點沽」
+      const isChartSingularitySell = dScore >= 84 || (prevDScore >= 86 && dScore >= 80);
 
-            const action = isMegaBuy ? '🔥 大手買入' : '🟢 分批買入';
-            const confidence = isMegaBuy
-              ? '95% 極高信心(破梯+週日雙底)'
-              : '75% 穩健信心(破梯確認買)';
-            const source = `平均K線破梯轉陽 + TFDR(日${dScore}/週${wScore}/月${mScore})`;
+      // 防重複觸發鎖：同一波段至少相隔 5 個交易日才允許再次開倉
+      const canTriggerNewOrder = i - lastActionBarIndex >= 5;
+      const dustThreshold = unitCapital * 0.25; // 預設 1,000,000 時為 $25,000
 
-            logs.unshift({
-              date: curr.date,
-              type: isMegaBuy ? 'STRONG BUY' : 'BUY',
-              action,
-              shares: buyShares,
-              units: `${units}份倉位`,
+      // =========================================================================
+      // 【A 區：空單平倉（對齊圖表「奇點買」信號）】
+      // =========================================================================
+      if (shortShares > 0 && avgShortPrice > 0) {
+        const shortProfitPct = ((avgShortPrice - currDay.rawClose) / avgShortPrice) * 100;
+        const shortProfitRatio = (avgShortPrice - currDay.rawClose) / avgShortPrice;
+
+        // 1. 空單強制風控止損 (-10%)
+        if (shortProfitPct <= -10.0) {
+          const coverShares = shortShares;
+          realizedProfit += (avgShortPrice - currDay.rawClose) * coverShares;
+          trades.push({ profit: shortProfitRatio });
+
+          shortShares = 0;
+          avgShortPrice = 0;
+          lastActionBarIndex = i;
+          const profitPct = Number(shortProfitPct.toFixed(2));
+          const confidence = '風控觸發 (-10% 防軋空)';
+          const source = '觸及 -10% 空單止損保護線';
+
+          tradeLogs.unshift({
+            date: currDay.date,
+            type: 'BUY TO COVER',
+            action: '🛡️ 空單止損平倉',
+            shares: coverShares,
+            units: '強制平空100%',
+            confidence,
+            price: currDay.rawClose.toFixed(2),
+            totalHolding: 0,
+            holdingType: 'EMPTY',
+            source,
+            profitPct,
+            profit: profitPct,
+            msg: `[${currDay.date}] 🛡️ 空單止損平倉 ${coverShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | 盈虧: ${profitPct}%`
+          });
+        }
+        // 2. 圖表出現「奇點買」信號 -> 根據週線時機決定全平或小平
+        else if (isChartSingularityBuy && canTriggerNewOrder) {
+          const isWeeklyAligned = isWeeklyBreakUp || wScore <= 42;
+          if (isWeeklyAligned) {
+            const coverShares = shortShares;
+            realizedProfit += (avgShortPrice - currDay.rawClose) * coverShares;
+            trades.push({ profit: shortProfitRatio });
+
+            shortShares = 0;
+            avgShortPrice = 0;
+            lastActionBarIndex = i;
+            const profitPct = Number(shortProfitPct.toFixed(2));
+            const confidence = '95% 滿格信心(圖表奇點買+週線共振)';
+            const source = `奇點買 + 週線時機確認(日${dScore}/週${wScore})`;
+
+            tradeLogs.unshift({
+              date: currDay.date,
+              type: 'BUY TO COVER',
+              action: '💎 大手全數平空',
+              shares: coverShares,
+              units: '全數平空100%',
               confidence,
-              price: curr.rawClose.toFixed(2),
-              totalHolding: totalShares,
+              price: currDay.rawClose.toFixed(2),
+              totalHolding: 0,
+              holdingType: 'EMPTY',
               source,
-              profitPct: null,
-              msg: `[${curr.date}] ${action} ${buyShares.toLocaleString()}股 (${confidence}) @ $${curr.rawClose.toFixed(2)} | 依據: ${source}`
+              profitPct,
+              profit: profitPct,
+              msg: `[${currDay.date}] 💎 大手全數平空 ${coverShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | 盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+            });
+          } else if (shortProfitPct >= 8) {
+            const isDust = shortShares * currDay.rawClose < dustThreshold;
+            const coverShares = isDust ? shortShares : Math.max(1, Math.floor(shortShares * 0.3));
+            realizedProfit += (avgShortPrice - currDay.rawClose) * coverShares;
+            trades.push({ profit: shortProfitRatio });
+
+            shortShares -= coverShares;
+            if (shortShares === 0) avgShortPrice = 0;
+            lastActionBarIndex = i;
+            const profitPct = Number(shortProfitPct.toFixed(2));
+            const confidence = '40% 信心不足(週線未轉強・留70%空單)';
+            const source = `圖表奇點買但週線仍弱(日${dScore}/週${wScore})`;
+
+            tradeLogs.unshift({
+              date: currDay.date,
+              type: 'BUY TO COVER',
+              action: '🔷 小注平空30%',
+              shares: coverShares,
+              units: isDust ? '清零平空' : '小注平空30%',
+              confidence,
+              price: currDay.rawClose.toFixed(2),
+              totalHolding: shortShares,
+              holdingType: shortShares > 0 ? 'SHORT' : 'EMPTY',
+              source,
+              profitPct,
+              profit: profitPct,
+              msg: `[${currDay.date}] 🔷 小注平空30% ${coverShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | 盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
             });
           }
         }
       }
 
-      // 【二、賣出決策：只要上漲梯級沒斷(curr.low > prev.low)就死拿利潤，直到「破底轉陰」才賣出】
-      if (totalShares > 0 && avgCost > 0 && isBreakUpStaircase) {
-        const currentProfitPct = ((curr.rawClose - avgCost) / avgCost) * 100;
+      // =========================================================================
+      // 【B 區：多單買入開倉（嚴格對齊圖表「奇點買」+ 週線時機判斷）】
+      // =========================================================================
+      if (
+        shortShares === 0 &&
+        isChartSingularityBuy &&
+        canTriggerNewOrder &&
+        longShares * currDay.rawClose < unitCapital * 6
+      ) {
+        // 週線時機配合（週線低位 <= 45 或 週線正式升穿上週） -> 95% 信心大手重倉 3 份！
+        const isWeeklyTimingGood = wScore <= 45 || isWeeklyBreakUp;
+        const units = isWeeklyTimingGood ? 3 : 1;
+        const buyShares = Math.floor((unitCapital * units) / currDay.rawClose);
 
-        // 1. 95% 信心大手清倉 (清空100%)：日線與週線進入高位奇點(日>=80, 週>=75) + 平均K線破梯轉陰
-        const isMegaSell = dScore >= 80 && wScore >= 75;
-        // 2. 75% 信心分批鎖利 (減持50%)：日線過熱(>=78) 且 利潤大於12% + 平均K線破梯轉陰
-        const isPartialSell = !isMegaSell && dScore >= 78 && currentProfitPct >= 12;
+        if (buyShares > 0) {
+          avgLongCost =
+            ((longShares * avgLongCost) + (buyShares * currDay.rawClose)) /
+            (longShares + buyShares);
+          longShares += buyShares;
+          lastActionBarIndex = i;
 
-        if (isMegaSell || isPartialSell) {
-          const sellRatio = isMegaSell ? 1.0 : 0.5;
-          const sellShares = Math.max(1, Math.floor(totalShares * sellRatio));
+          const action = isWeeklyTimingGood ? '🔥 大手重倉買入' : '🟢 小注試探買入';
+          const confidence = isWeeklyTimingGood
+            ? '95% 滿格信心(圖表奇點買+週線共振・3份)'
+            : '40% 信心不足(僅日線奇點買・買1份)';
+          const source = isWeeklyTimingGood
+            ? `圖表奇點買 + 週線低位共振(日${dScore}/週${wScore}/月${mScore})`
+            : `圖表奇點買但週線未配合(日${dScore}/週${wScore}/月${mScore})`;
 
-          const proceeds = sellShares * curr.rawClose;
-          const profitRatio = (curr.rawClose - avgCost) / avgCost;
-          realizedProfit += (curr.rawClose - avgCost) * sellShares;
-          cash += proceeds;
-          totalShares -= sellShares;
-          if (totalShares <= 0) {
-            totalShares = 0;
-            avgCost = 0;
-          }
-
-          const profitPct = Number(currentProfitPct.toFixed(2));
-          trades.push({ profit: profitRatio });
-
-          const action = isMegaSell ? '🚨 大手清倉' : '🟠 分批減倉';
-          const confidence = isMegaSell
-            ? '95% 極高信心(破梯+雙頂逃頂)'
-            : '75% 波段過熱(破梯鎖利)';
-          const source = `平均K線破梯轉陰 + TFDR(日${dScore}/週${wScore}/月${mScore})`;
-
-          logs.unshift({
-            date: curr.date,
-            type: isMegaSell ? 'CRITICAL SELL' : 'SELL',
+          tradeLogs.unshift({
+            date: currDay.date,
+            type: isWeeklyTimingGood ? 'STRONG BUY' : 'BUY',
             action,
-            shares: sellShares,
-            units: isMegaSell ? '清空100%' : '減持50%',
+            shares: buyShares,
+            units: isWeeklyTimingGood ? '重倉3份' : '試探1份',
             confidence,
-            price: curr.rawClose.toFixed(2),
-            totalHolding: totalShares,
+            price: currDay.rawClose.toFixed(2),
+            totalHolding: longShares,
+            holdingType: 'LONG',
             source,
-            profitPct,
-            profit: profitPct,
-            msg: `[${curr.date}] ${action} ${sellShares.toLocaleString()}股 (${confidence}) @ $${curr.rawClose.toFixed(2)} | 盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+            profitPct: null,
+            msg: `[${currDay.date}] ${action} ${buyShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | ${source}`
           });
+        }
+      }
+
+      // =========================================================================
+      // 【C 區：多單逃頂清倉 與 順勢沽空（嚴格對齊圖表「奇點沽」+ 週線時機判斷）】
+      // =========================================================================
+      if (isChartSingularitySell && canTriggerNewOrder) {
+        // 情況 1：手上有多單 -> 根據週線時機決定全數清倉或小注鎖利
+        if (longShares > 0 && avgLongCost > 0) {
+          const currentProfitPct = ((currDay.rawClose - avgLongCost) / avgLongCost) * 100;
+          const profitRatio = (currDay.rawClose - avgLongCost) / avgLongCost;
+          // 週線也處於高位(>=75) 或 週線正式跌穿上週 -> 95% 信心大手全數清倉（釋放資金給後續波段！）
+          const isWeeklyTopAligned = wScore >= 75 || isWeeklyBreakDown;
+
+          if (isWeeklyTopAligned && currentProfitPct >= 5) {
+            const soldShares = longShares;
+            realizedProfit += (currDay.rawClose - avgLongCost) * soldShares;
+            trades.push({ profit: profitRatio });
+
+            longShares = 0;
+            avgLongCost = 0;
+            lastActionBarIndex = i;
+            const profitPct = Number(currentProfitPct.toFixed(2));
+            const confidence = '95% 滿格信心(圖表奇點沽+週線共振清倉)';
+            const source = `圖表奇點沽 + 週線高位確認(日${dScore}/週${wScore}/月${mScore})`;
+
+            tradeLogs.unshift({
+              date: currDay.date,
+              type: 'CRITICAL SELL',
+              action: '🚨 大手全數清倉',
+              shares: soldShares,
+              units: '清空100%',
+              confidence,
+              price: currDay.rawClose.toFixed(2),
+              totalHolding: 0,
+              holdingType: 'EMPTY',
+              source,
+              profitPct,
+              profit: profitPct,
+              msg: `[${currDay.date}] 🚨 大手全數清倉 ${soldShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | 盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+            });
+          } else if (!isWeeklyTopAligned && currentProfitPct >= 10) {
+            const isDust = longShares * currDay.rawClose < dustThreshold;
+            const sellShares = isDust ? longShares : Math.max(1, Math.floor(longShares * 0.25));
+            realizedProfit += (currDay.rawClose - avgLongCost) * sellShares;
+            trades.push({ profit: profitRatio });
+
+            longShares -= sellShares;
+            if (longShares === 0) avgLongCost = 0;
+            lastActionBarIndex = i;
+            const profitPct = Number(currentProfitPct.toFixed(2));
+            const confidence = '40% 信心不足(週線未見頂・留75%底倉)';
+            const source = `圖表奇點沽但週線仍健康(日${dScore}/週${wScore}/月${mScore})`;
+
+            tradeLogs.unshift({
+              date: currDay.date,
+              type: 'SELL',
+              action: '🟡 小注鎖利25%',
+              shares: sellShares,
+              units: isDust ? '清零' : '鎖利25%',
+              confidence,
+              price: currDay.rawClose.toFixed(2),
+              totalHolding: longShares,
+              holdingType: longShares > 0 ? 'LONG' : 'EMPTY',
+              source,
+              profitPct,
+              profit: profitPct,
+              msg: `[${currDay.date}] 🟡 小注鎖利25% ${sellShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | 盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+            });
+          }
+        }
+        // 情況 2：目前空倉 -> 若圖表出現「奇點沽」且「週線跌穿上週」，順勢開倉沽空
+        else if (
+          longShares === 0 &&
+          isWeeklyBreakDown &&
+          shortShares * currDay.rawClose < unitCapital * 4
+        ) {
+          const isMegaShort = wScore >= 75 && mScore >= 68;
+          const units = isMegaShort ? 3 : 1;
+          const openShortShares = Math.floor((unitCapital * units) / currDay.rawClose);
+          if (openShortShares > 0) {
+            avgShortPrice =
+              ((shortShares * avgShortPrice) + (openShortShares * currDay.rawClose)) /
+              (shortShares + openShortShares);
+            shortShares += openShortShares;
+            lastActionBarIndex = i;
+
+            const action = isMegaShort ? '🟣 大手重倉沽空' : '🟪 小注試探沽空';
+            const confidence = isMegaShort
+              ? '95% 滿格信心(圖表奇點沽+週線跌穿・3份)'
+              : '70% 週線跌穿確認(小注1份試空)';
+            const source = `圖表奇點沽 + 週K跌穿上週(日${dScore}/週${wScore}/月${mScore})`;
+
+            tradeLogs.unshift({
+              date: currDay.date,
+              type: isMegaShort ? 'STRONG SHORT' : 'SHORT',
+              action,
+              shares: openShortShares,
+              units: `沽空${units}份`,
+              confidence,
+              price: currDay.rawClose.toFixed(2),
+              totalHolding: shortShares,
+              holdingType: 'SHORT',
+              source,
+              profitPct: null,
+              msg: `[${currDay.date}] ${action} ${openShortShares.toLocaleString()}股 (${confidence}) @ $${currDay.rawClose.toFixed(2)} | ${source}`
+            });
+          }
         }
       }
     }
 
-    const equity = cash + totalShares * curr.rawClose;
+    const unrealizedLong =
+      longShares > 0 && avgLongCost > 0 ? (currDay.rawClose - avgLongCost) * longShares : 0;
+    const unrealizedShort =
+      shortShares > 0 && avgShortPrice > 0 ? (avgShortPrice - currDay.rawClose) * shortShares : 0;
+    const equity = initialFund + realizedProfit + unrealizedLong + unrealizedShort;
+
     if (equity > peakEquity) peakEquity = equity;
     if (peakEquity > 0) {
       maxDrawdown = Math.max(maxDrawdown, ((peakEquity - equity) / peakEquity) * 100);
     }
   }
 
-  const lastClose = haData.length > 0 ? haData[haData.length - 1].rawClose : 0;
-  const finalEquity =
-    cash + (totalShares > 0 && Number.isFinite(lastClose) && lastClose > 0 ? totalShares * lastClose : 0);
+  const lastClose = haDaily[haDaily.length - 1].rawClose;
+  const finalUnrealizedLong =
+    longShares > 0 && avgLongCost > 0 && Number.isFinite(lastClose) && lastClose > 0
+      ? (lastClose - avgLongCost) * longShares
+      : 0;
+  const finalUnrealizedShort =
+    shortShares > 0 && avgShortPrice > 0 && Number.isFinite(lastClose) && lastClose > 0
+      ? (avgShortPrice - lastClose) * shortShares
+      : 0;
+  const finalEquity = initialFund + realizedProfit + finalUnrealizedLong + finalUnrealizedShort;
 
-  // 若全期皆為持倉未平倉，以期末市值計算統計勝率供參考（保留真實剩餘持倉）
   const statTrades = [...trades];
-  if (statTrades.length === 0 && totalShares > 0 && avgCost > 0 && Number.isFinite(lastClose) && lastClose > 0) {
-    statTrades.push({ profit: (lastClose - avgCost) / avgCost });
+  if (statTrades.length === 0 && Number.isFinite(lastClose) && lastClose > 0) {
+    if (longShares > 0 && avgLongCost > 0) {
+      statTrades.push({ profit: (lastClose - avgLongCost) / avgLongCost });
+    } else if (shortShares > 0 && avgShortPrice > 0) {
+      statTrades.push({ profit: (avgShortPrice - lastClose) / avgShortPrice });
+    }
   }
 
   const totalReturn = initialFund > 0 ? ((finalEquity - initialFund) / initialFund) * 100 : 0;
@@ -1230,10 +1451,9 @@ export function runBacktestEngine(
   const losingTrades = statTrades.filter(t => t.profit <= 0);
   const totalWin = winningTrades.reduce((sum, t) => sum + t.profit, 0);
   const totalLoss = Math.abs(losingTrades.reduce((sum, t) => sum + t.profit, 0));
-  const barsPerYear = period === 'monthly' ? 12 : (period === 'weekly' ? 52 : (period === '5min' ? 19656 : 252));
   const annualReturn =
-    haData.length > 0 && totalReturn > -100
-      ? (Math.pow(1 + totalReturn / 100, barsPerYear / haData.length) - 1) * 100
+    haDaily.length > 0 && totalReturn > -100
+      ? (Math.pow(1 + totalReturn / 100, barsPerYear / haDaily.length) - 1) * 100
       : totalReturn <= -100
       ? -100
       : 0;
@@ -1243,12 +1463,88 @@ export function runBacktestEngine(
     winRate: statTrades.length > 0 ? ((winningTrades.length / statTrades.length) * 100).toFixed(2) : '0.00',
     profitLossRatio: totalLoss > 0 ? (totalWin / totalLoss).toFixed(2) : (totalWin > 0 ? '無虧損交易' : '0.00'),
     maxDrawdown: maxDrawdown.toFixed(2),
-    finalFund: (initialFund + realizedProfit + (totalShares > 0 && avgCost > 0 ? (lastClose - avgCost) * totalShares : 0)).toFixed(2),
-    tradeCount: logs.length,
+    finalFund: finalEquity.toFixed(2),
+    tradeCount: tradeLogs.length,
     annualReturn: annualReturn.toFixed(2)
   };
 
-  return { stats, logs };
+  return { stats, logs: tradeLogs };
+}
+
+export function runStaircaseBacktest(
+  dailyData: KLineBar[],
+  weeklyData: KLineBar[],
+  monthlyData: KLineBar[],
+  dailyTFDR: { score: number }[],
+  weeklyTFDR: { score: number }[],
+  monthlyTFDR: { score: number }[]
+): TradeLog[] {
+  return executeStaircaseBacktest(
+    dailyData,
+    weeklyData,
+    monthlyData,
+    dailyTFDR,
+    weeklyTFDR,
+    monthlyTFDR
+  ).logs;
+}
+
+// ===================== 回測引擎接線入口（自動將日線每5根聚合成週線、每21根聚合成月線） =====================
+export function runBacktestEngine(
+  modelData: ModelBar[],
+  configuredFund: number = 1000000,
+  period: string = 'daily',
+  dailyBars?: RawKline[]
+) {
+  const sourceBars: RawKline[] = dailyBars && dailyBars.length > 0 ? dailyBars : modelData;
+  const dailyData: KLineBar[] = sourceBars.map(bar => ({
+    date: (bar.date || '').split(' ')[0],
+    open: Number(bar.o),
+    high: Number(bar.h),
+    low: Number(bar.l),
+    close: Number(bar.c)
+  }));
+
+  const weeklyData = aggregateKLineBars(dailyData, 5);
+  const monthlyData = aggregateKLineBars(dailyData, 21);
+
+  const dailyTFDR = calculateTFDRSeries(
+    dailyData.map(b => b.close),
+    dailyData.map(b => b.high),
+    dailyData.map(b => b.low)
+  );
+  const weeklyTFDR = calculateTFDRSeries(
+    weeklyData.map(b => b.close),
+    weeklyData.map(b => b.high),
+    weeklyData.map(b => b.low)
+  );
+  const monthlyTFDR = calculateTFDRSeries(
+    monthlyData.map(b => b.close),
+    monthlyData.map(b => b.high),
+    monthlyData.map(b => b.low)
+  );
+
+  const usingDailyResolution = Boolean(dailyBars && dailyBars.length > 0) || period === 'daily';
+  const barsPerYear = usingDailyResolution
+    ? 252
+    : period === 'monthly'
+    ? 12
+    : period === 'weekly'
+    ? 52
+    : period === '5min'
+    ? 19656
+    : 252;
+
+  return executeStaircaseBacktest(
+    dailyData,
+    weeklyData,
+    monthlyData,
+    dailyTFDR,
+    weeklyTFDR,
+    monthlyTFDR,
+    configuredFund,
+    barsPerYear
+  );
 }
 
 // ===================== 傅立葉 Z 軸及技術指標 (Fourier Z-Axis) =====================

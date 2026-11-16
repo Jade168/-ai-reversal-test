@@ -68,6 +68,7 @@ export interface TradeLog {
   confidence: string;
   price: string;
   totalHolding: number;
+  holdingType: 'LONG' | 'SHORT' | 'EMPTY';
   source: string;
   profitPct: number | null;
   profit?: number;

@@ -141,60 +141,82 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
         </div>
 
         <div className="text-[10px] text-center text-gray-500 mt-1.5">
-          以 10 份倉位金字塔模型＋平均K線破梯確認模擬成交（TFDR 奇點能量驅動）；未計手續費及滑點
+          直接對齊圖表奇點買/沽信號＋週線時機共振（含5日防重複觸發鎖）；未計手續費及滑點
         </div>
 
         {/* 整合於決策中樞底部的雙核回測交易紀錄 */}
         <div className="mt-3 pt-2.5 border-t border-slate-800">
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-xs font-bold text-amber-400">
-              📜 AI 信心度分批加減倉交易紀錄（日週月共振・上下滑動檢視）
+              📜 雙向多空破梯回測交易紀錄（週月重倉・日線試探・上下滑動檢視）
             </span>
             <span className="text-[11px] text-slate-400">共 {tradeLogs.length} 筆操盤指令</span>
           </div>
           <div className="max-h-64 overflow-y-auto pr-1 space-y-1.5 overscroll-contain">
             {tradeLogs.length > 0 ? (
-              tradeLogs.map((log, idx) => (
-                <div
-                  key={idx}
-                  className="text-xs p-2 rounded bg-slate-800/80 border border-slate-700/60 flex flex-col gap-1"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center flex-wrap gap-1.5 min-w-0">
-                      <span className="text-slate-400 font-mono text-[11px]">[{log.date}]</span>
-                      <span
-                        className={`font-bold ${
-                          log.action.includes('買入') ? 'text-emerald-400' : 'text-red-400'
-                        }`}
-                      >
-                        {log.action} {log.shares.toLocaleString()}股
-                      </span>
-                      <span className="px-1.5 py-0.2 text-[10px] rounded bg-amber-950/80 text-amber-300 border border-amber-600/40">
-                        {log.confidence}
-                      </span>
+              tradeLogs.map((log, idx) => {
+                const actionColor = log.action.includes('買入')
+                  ? 'text-emerald-400'
+                  : log.action.includes('沽空')
+                  ? 'text-purple-400'
+                  : log.action.includes('平空')
+                  ? 'text-cyan-400'
+                  : log.action.includes('鎖利')
+                  ? 'text-amber-400'
+                  : log.action.includes('減倉')
+                  ? 'text-orange-400'
+                  : 'text-red-400';
+
+                return (
+                  <div
+                    key={idx}
+                    className="text-xs p-2 rounded bg-slate-800/80 border border-slate-700/60 flex flex-col gap-1"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center flex-wrap gap-1.5 min-w-0">
+                        <span className="text-slate-400 font-mono text-[11px]">[{log.date}]</span>
+                        <span className={`font-bold ${actionColor}`}>
+                          {log.action} {log.shares.toLocaleString()}股
+                        </span>
+                        <span className="px-1.5 py-0.2 text-[10px] rounded bg-amber-950/80 text-amber-300 border border-amber-600/40">
+                          {log.confidence}
+                        </span>
+                      </div>
+                      <div className="font-mono text-[11px] shrink-0">
+                        <span className="text-slate-200">@ ${log.price}</span>
+                        {log.profitPct !== null && (
+                          <span
+                            className={`ml-1.5 font-bold ${
+                              log.profitPct >= 0 ? 'text-emerald-400' : 'text-red-400'
+                            }`}
+                          >
+                            {log.profitPct >= 0 ? `+${log.profitPct}%` : `${log.profitPct}%`}
+                          </span>
+                        )}
+                      </div>
                     </div>
-                    <div className="font-mono text-[11px] shrink-0">
-                      <span className="text-slate-200">@ ${log.price}</span>
-                      {log.profitPct !== null && (
-                        <span
-                          className={`ml-1.5 font-bold ${
-                            log.profitPct >= 0 ? 'text-emerald-400' : 'text-red-400'
-                          }`}
-                        >
-                          {log.profitPct >= 0 ? `+${log.profitPct}%` : `${log.profitPct}%`}
+                    <div className="flex items-center justify-between gap-2 text-[10px] text-slate-400">
+                      <span className="truncate">觸發依據：{log.source}</span>
+                      {log.holdingType === 'SHORT' ? (
+                        <span className="shrink-0 text-purple-400 font-medium">
+                          操作後空單持倉：{log.totalHolding.toLocaleString()} 股
+                        </span>
+                      ) : log.holdingType === 'LONG' ? (
+                        <span className="shrink-0 text-emerald-400 font-medium">
+                          操作後多單持倉：{log.totalHolding.toLocaleString()} 股
+                        </span>
+                      ) : (
+                        <span className="shrink-0 text-slate-400">
+                          操作後總持倉：0 股 (空倉)
                         </span>
                       )}
                     </div>
                   </div>
-                  <div className="flex items-center justify-between gap-2 text-[10px] text-slate-400">
-                    <span className="truncate">觸發依據：{log.source}</span>
-                    <span className="shrink-0">操作後總持倉：{log.totalHolding.toLocaleString()} 股</span>
-                  </div>
-                </div>
-              ))
+                );
+              })
             ) : (
               <div className="text-slate-500 text-center py-4 text-xs">
-                點擊「啟動分析」生成數律＋TFDR AI 信心度分批回測紀錄...
+                點擊「啟動分析」生成數律＋TFDR 雙向多空破梯回測紀錄...
               </div>
             )}
           </div>
