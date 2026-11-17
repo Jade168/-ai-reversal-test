@@ -272,11 +272,12 @@ export const App: React.FC = () => {
         tfdr: tfdrMatrix,
         latestTfdrPoint: latestPt
       });
-      setExpertSummary(localInput ? evaluateLocalExpertSummary(localInput) : null);
+      const localSummary = localInput ? evaluateLocalExpertSummary(localInput) : null;
+      setExpertSummary(localSummary);
 
       addChatMessage(
         'ai',
-        `📊 【${sym} 369+142857 複合共振分析速覽】\n\n【現價位置】現價: $${lastBar.c.toFixed(2)} | 歸元數: ${resAnalysis.guiYuan.current}\n\n【142857 循環位】\n🟢 溝貨區: $${resAnalysis.suggestions.strongBuy} - $${resAnalysis.suggestions.buyZone}\n🔴 賣出區: $${resAnalysis.suggestions.sellZone} - $${resAnalysis.suggestions.target2}\n\n【TFDR 三維奇點】日線 ${tfdrMatrix.dailyScore} | 週線 ${tfdrMatrix.weeklyScore} | 月線 ${tfdrMatrix.monthlyScore}\n${tfdrMatrix.regimeTitle}\n\n【信號判斷】${resAnalysis.signal} - ${resAnalysis.action}\n\n【回測數據】總收益率: ${bStats.totalReturn}% | 勝率: ${bStats.winRate}%`
+        `📊 【${sym} 369+142857 複合共振分析速覽】\n\n【現價位置】現價: $${lastBar.c.toFixed(2)} | 歸元數: ${resAnalysis.guiYuan.current}\n\n【142857 循環位】\n🟢 溝貨區: $${resAnalysis.suggestions.strongBuy} - $${resAnalysis.suggestions.buyZone}\n🔴 賣出區: $${resAnalysis.suggestions.sellZone} - $${resAnalysis.suggestions.target2}\n\n【TFDR 三維奇點】日線 ${tfdrMatrix.dailyScore} | 週線 ${tfdrMatrix.weeklyScore} | 月線 ${tfdrMatrix.monthlyScore}\n${tfdrMatrix.regimeTitle}${localSummary ? `\n\n【專家大腦同步指令】${localSummary.confidenceTag}\n• ${localSummary.regimeLabel}｜${localSummary.trendQuality}\n• ${localSummary.coreAction}` : ''}\n\n【信號判斷】${resAnalysis.signal} - ${resAnalysis.action}\n\n【回測數據】總收益率: ${bStats.totalReturn}% | 勝率: ${bStats.winRate}%`
       );
     } catch (err: any) {
       console.error(err);

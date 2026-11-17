@@ -1098,10 +1098,10 @@ function executeStaircaseBacktest(
   const haWeekly = convertToHeikinAshi(weeklyData);
   const haMonthly = convertToHeikinAshi(monthlyData);
 
-  const getMidline = (arr: HeikinAshiBar[], idx: number, period: number = 20) => {
+  const getDailyMidline = (arr: HeikinAshiBar[], idx: number, period: number) => {
     const start = Math.max(0, idx - period + 1);
     let sum = 0;
-    for (let k = start; k <= idx; k++) sum += arr[k].close;
+    for (let k = start; k <= idx; k++) sum += arr[k].rawClose;
     return sum / (idx - start + 1);
   };
 
@@ -1147,8 +1147,9 @@ function executeStaircaseBacktest(
       const mIdx = Math.min(haMonthly.length - 1, Math.floor(i / 21));
       const currMonth = haMonthly[mIdx];
 
-      const weeklyMidline = getMidline(haWeekly, wIdx, 20);
-      const monthlyMidline = getMidline(haMonthly, mIdx, 12);
+      // 統一採用 100 日線 (約20週生命線) 與 250 日線 (約12個月生命線) 收盤平均價
+      const weeklyMidline = getDailyMidline(haDaily, i, 100);
+      const monthlyMidline = getDailyMidline(haDaily, i, 250);
 
       const dScore = dailyTFDR[i]?.score ?? 50;
       const prevDScore = dailyTFDR[i - 1]?.score ?? 50;
@@ -1225,7 +1226,7 @@ function executeStaircaseBacktest(
 
       if (!stoppedOut) {
         // =========================================================================
-        // 【鐵律 2：絕對牛熊隔離（完全對齊左側專家大腦）】
+        // 【鐵律 2：絕對牛熊隔離（250 日月線生命線，完全對齊左側專家大腦）】
         // =========================================================================
         const isMonthlyUptrend = currDay.rawClose >= monthlyMidline;
         const isMonthlyDowntrend = currDay.rawClose < monthlyMidline * 0.97 && currMonth.isBearish;
@@ -1233,7 +1234,7 @@ function executeStaircaseBacktest(
         const isAtWeeklyMid =
           currDay.rawClose >= weeklyMidline * 0.95 && currDay.rawClose <= weeklyMidline * 1.05;
         const isBuySig =
-          (dScore <= 22 || (prevDScore <= 20 && dScore <= 26)) &&
+          (dScore <= 25 || (prevDScore <= 22 && dScore <= 26)) &&
           currDay.rawClose >= prevDay.rawClose * 0.98;
         const isSellSig = dScore >= 84 || (prevDScore >= 86 && dScore >= 80);
         const canAct = i - lastActionBarIndex >= 5;
@@ -1255,8 +1256,8 @@ function executeStaircaseBacktest(
             avgShortPrice = 0;
             lastActionBarIndex = i;
             const profitPct = Number(pnlPct.toFixed(2));
-            const confidence = '100% 站回月線生命線(嚴禁空單)';
-            const source = `現價站穩月線中線($${monthlyMidline.toFixed(1)})之上，全面平空`;
+            const confidence = '100% 站回250日月線生命線(嚴禁空單)';
+            const source = `現價站穩250日月線中線($${monthlyMidline.toFixed(1)})之上，全面平空`;
 
             tradeLogs.unshift({
               date: currDay.date,
@@ -1275,11 +1276,11 @@ function executeStaircaseBacktest(
             });
           }
 
-          // 2. 低位補回與低吸（僅限沒有空單且回踩週線中線/下方奇點時）
+          // 2. 低位補回與低吸（僅限沒有空單且未跌破週線中線/回踩週線中線時）
           if (
             shortShares === 0 &&
             isBuySig &&
-            currDay.rawClose >= weeklyMidline * 0.97 &&
+            (currDay.rawClose >= weeklyMidline * 0.97 || isAtWeeklyMid) &&
             canAct &&
             cashPool > currDay.rawClose * 10
           ) {

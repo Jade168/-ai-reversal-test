@@ -230,29 +230,23 @@ export function buildLocalAnalysisInput(params: {
     return null;
   }
 
-  const dailyBars: SimpleBar[] = dailyKlines.map(bar => ({
-    open: Number(bar.o),
-    high: Number(bar.h),
-    low: Number(bar.l),
-    close: Number(bar.c)
-  }));
+  const dailyCloses = dailyKlines.map(bar => Number(bar.c));
+  const calcSma = (arr: number[], period: number) => {
+    const slice = arr.slice(-period);
+    if (slice.length === 0) return currentPrice;
+    return slice.reduce((sum, val) => sum + val, 0) / slice.length;
+  };
 
-  const weeklyBars = aggregateBars(dailyBars, 5);
-  const monthlyBars = aggregateBars(dailyBars, 21);
+  const weeklyMidline = calcSma(dailyCloses, 100) || currentPrice;
+  const monthlyMidline = calcSma(dailyCloses, 250) || currentPrice;
 
-  const weeklyHa = computeLastHeikinAshiMidline(weeklyBars, 20);
-  const monthlyHa = computeLastHeikinAshiMidline(monthlyBars, 12);
-
-  const weeklyMidline = weeklyHa.midline || currentPrice;
-  const monthlyMidline = monthlyHa.midline || currentPrice;
-
-  // 與回測大腦保持一致：現價 >= 月線生命線即為月線大升通道
+  // 與回測大腦保持一致：現價 >= 250 日月線生命線即為月線大升通道
   const isMonthlyUptrend = currentPrice >= monthlyMidline;
 
   return {
     symbol,
     currentPrice,
-    closes: dailyBars.map(b => b.close),
+    closes: dailyCloses,
     weeklyMidline,
     monthlyMidline,
     isMonthlyUptrend,
