@@ -39,6 +39,11 @@ import {
   calculateTFDRSeries,
   computeMultiTimeframeTFDRFromDaily
 } from './services/tfdrIndicator';
+import {
+  LocalExpertSummary,
+  buildLocalAnalysisInput,
+  evaluateLocalExpertSummary
+} from './services/localQuantAnalyst';
 
 import { HeaderChart } from './components/HeaderChart';
 import { ApiConfigCard } from './components/ApiConfigCard';
@@ -78,6 +83,7 @@ export const App: React.FC = () => {
   });
   const [tfdr, setTfdr] = useState<MultiTimeframeTFDR | null>(null);
   const [latestTfdrPoint, setLatestTfdrPoint] = useState<TFDRPoint | null>(null);
+  const [expertSummary, setExpertSummary] = useState<LocalExpertSummary | null>(null);
 
   // UI Status
   const [isLoading, setIsLoading] = useState(false);
@@ -256,7 +262,17 @@ export const App: React.FC = () => {
         klines.map(k => k.h),
         klines.map(k => k.l)
       );
-      setLatestTfdrPoint(chartTfdrSeries.length > 0 ? chartTfdrSeries[chartTfdrSeries.length - 1] : null);
+      const latestPt = chartTfdrSeries.length > 0 ? chartTfdrSeries[chartTfdrSeries.length - 1] : null;
+      setLatestTfdrPoint(latestPt);
+
+      const localInput = buildLocalAnalysisInput({
+        symbol: sym,
+        currentPrice: lastBar.c,
+        dailyKlines: dailyKlinesForTfdr,
+        tfdr: tfdrMatrix,
+        latestTfdrPoint: latestPt
+      });
+      setExpertSummary(localInput ? evaluateLocalExpertSummary(localInput) : null);
 
       addChatMessage(
         'ai',
@@ -586,6 +602,7 @@ export const App: React.FC = () => {
             userBuyPrice={buyPrice}
             tfdr={tfdr}
             latestTfdrPoint={latestTfdrPoint}
+            expertSummary={expertSummary}
             tradeLogs={tradeLogs}
           />
 

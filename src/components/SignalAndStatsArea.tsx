@@ -1,6 +1,7 @@
 import React from 'react';
 import { ModelBar, SymbolInfo, BacktestStats, ResonanceAnalysis, TradeLog } from '../types/quant';
 import { MultiTimeframeTFDR, TFDRPoint } from '../services/tfdrIndicator';
+import { LocalExpertSummary } from '../services/localQuantAnalyst';
 
 interface SignalAndStatsAreaProps {
   lastBar: ModelBar | null;
@@ -11,6 +12,7 @@ interface SignalAndStatsAreaProps {
   userBuyPrice: string;
   tfdr?: MultiTimeframeTFDR | null;
   latestTfdrPoint?: TFDRPoint | null;
+  expertSummary?: LocalExpertSummary | null;
   tradeLogs?: TradeLog[];
 }
 
@@ -23,6 +25,7 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
   userBuyPrice,
   tfdr,
   latestTfdrPoint,
+  expertSummary,
   tradeLogs = []
 }) => {
   if (!lastBar || !symbolInfo || !stats) return null;
@@ -91,10 +94,24 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
           )}
         </div>
 
-        {/* 明確的操作指令與 TFDR 逃頂/抄底參考價 */}
+        {/* 明確的操作指令與 TFDR 逃頂/抄底參考價（同步左側專家分析大腦結論） */}
         <div className="text-xs text-slate-200 bg-slate-800/60 p-2 rounded mb-2 leading-relaxed">
-          <span className="text-indigo-400 font-bold">【明確操作指令】</span>
-          {tfdr?.actionAdvice || '按原定 1836.15 數律支撐阻力位執行波段操作。'}
+          <div className="flex flex-wrap items-center gap-1.5 mb-1">
+            <span className="text-indigo-400 font-bold">【明確操作指令】</span>
+            {expertSummary && (
+              <span className="font-bold text-amber-300">{expertSummary.confidenceTag}</span>
+            )}
+          </div>
+          <div>
+            {expertSummary
+              ? expertSummary.coreAction
+              : tfdr?.actionAdvice || '按原定 1836.15 數律支撐阻力位執行波段操作。'}
+          </div>
+          {expertSummary && (
+            <div className="mt-1 text-[10.5px] text-slate-400">
+              {expertSummary.regimeLabel} ｜ {expertSummary.trendQuality}
+            </div>
+          )}
           <div className="mt-1 flex flex-wrap gap-3 text-[11px]">
             <span className="text-red-400">
               🔴 TFDR 90 逃頂參考: <b className="font-mono">${latestTfdrPoint ? latestTfdrPoint.band90.toFixed(2) : '--'}</b>
@@ -141,7 +158,7 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
         </div>
 
         <div className="text-[10px] text-center text-gray-500 mt-1.5">
-          月線通道護航＋踩週線中線奇點補回（真實資金池複利滾存・含5日防重複鎖）；未計手續費及滑點
+          專家級牛熊隔離＋考夫曼KER主升減倉鎖利（統一 -8% 硬止損・真實現金池複利）；未計手續費及滑點
         </div>
 
         {/* 整合於決策中樞底部的雙核回測交易紀錄 */}
