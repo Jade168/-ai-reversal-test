@@ -1,16 +1,39 @@
-import { ModelBar, SymbolInfo, BacktestStats, BatchScanResult, ApiConfig, NewsItem } from '../types/quant';
+import { ModelBar, SymbolInfo, BacktestStats, BatchScanResult, ApiConfig, NewsItem, RawKline } from '../types/quant';
 import { QUANT_CONFIG } from './quantCalculations';
-import { MultiTimeframeTFDR } from './tfdrIndicator';
+import { MultiTimeframeTFDR, TFDRPoint } from './tfdrIndicator';
+import { buildLocalAnalysisInput, generateLocalExpertReport } from './localQuantAnalyst';
 
 export interface QuantContext {
   symbolInfo: SymbolInfo | null;
   modelData: ModelBar[];
+  dailyKlines?: RawKline[];
   stats: BacktestStats | null;
   batchScanResults: BatchScanResult[];
   newsList: NewsItem[];
   sentiment: string;
   globalHotNews: NewsItem[];
   tfdr?: MultiTimeframeTFDR | null;
+  latestTfdrPoint?: TFDRPoint | null;
+}
+
+export function generateZeroTokenDiagnosis(context: QuantContext): string | null {
+  const { symbolInfo, modelData, dailyKlines, tfdr, latestTfdrPoint } = context;
+  if (!symbolInfo || !tfdr) return null;
+
+  const sourceKlines: RawKline[] =
+    dailyKlines && dailyKlines.length > 0 ? dailyKlines : modelData;
+  if (!sourceKlines || sourceKlines.length === 0) return null;
+
+  const currentPrice = Number(symbolInfo.latestPrice) || sourceKlines[sourceKlines.length - 1].c;
+  const inputData = buildLocalAnalysisInput({
+    symbol: symbolInfo.symbol,
+    currentPrice,
+    dailyKlines: sourceKlines,
+    tfdr,
+    latestTfdrPoint
+  });
+  if (!inputData) return null;
+  return generateLocalExpertReport(inputData);
 }
 
 function formatTfdrSystemBlock(tfdr?: MultiTimeframeTFDR | null): string {
@@ -30,16 +53,33 @@ export function generateLocalAiResponse(input: string, context: QuantContext): s
   const { symbolInfo, modelData, stats, batchScanResults, sentiment, tfdr } = context;
 
   if (
+    lowerInput.includes('診斷') ||
+    lowerInput.includes('零流量') ||
+    lowerInput.includes('考夫曼') ||
+    lowerInput.includes('ker') ||
+    lowerInput.includes('通道') ||
+    lowerInput.includes('生命線') ||
+    lowerInput.includes('本地報告')
+  ) {
+    const localReport = generateZeroTokenDiagnosis(context);
+    if (!localReport) {
+      return '你仲未分析股票或者未計算出 TFDR 三維數據㗎！請先喺上方輸入股票代碼並點擊「啟動分析」。';
+    }
+    return localReport;
+  }
+
+  if (
     lowerInput.includes('tfdr') ||
     lowerInput.includes('奇點') ||
     lowerInput.includes('減速') ||
     lowerInput.includes('共振矩陣') ||
     lowerInput.includes('分數')
   ) {
+    const localReport = generateZeroTokenDiagnosis(context);
     if (!symbolInfo || !tfdr) {
       return '你仲未分析股票或者未計算出 TFDR 三維數據㗎！請先喺上方輸入股票代碼並點擊「啟動分析」。';
     }
-    return `【${symbolInfo.symbol} TFDR 時空奇點共振矩陣（粵語解讀）】
+    return localReport || `【${symbolInfo.symbol} TFDR 時空奇點共振矩陣（粵語解讀）】
 📊 三維週期分數（>80 危險頂 / <30 黃金底）：
 • 日線 TFDR：${tfdr.dailyScore} 分
 • 週線 TFDR：${tfdr.weeklyScore} 分
@@ -246,13 +286,24 @@ export function generateLocalAiResponse(input: string, context: QuantContext): s
   return '你好！我是 1836.15 數律量化 AI 助手。請先在上方輸入股票代碼（例如 TSLA / 00700 / NVDA）並點擊「啟動分析」，我會即時抓取東方財富真實數據，為你提供精準的支撐阻力、時空共振買賣點同回測分析！';
 }
 
-// ===================== 專家深度分析 (Claude / Gemini / 自定義 AI) =====================
-export async function callExpertAi(input: string, context: QuantContext, apiConfig: ApiConfig): Promise<string> {
+// ===================== 專家深度分析 (Claude / Gemini / 自定義 AI + 4小時智能省流快取) =====================
+export async function callExpertAi(
+  input: string,
+  context: QuantContext,
+  apiConfig: ApiConfig,
+  forceRefresh: boolean = false
+): Promise<string> {
   const { symbolInfo, modelData, stats, batchScanResults, newsList, sentiment, globalHotNews, tfdr } = context;
   const tfdrSystemBlock = formatTfdrSystemBlock(tfdr);
   const effectiveSystemPrompt = tfdrSystemBlock
     ? `${QUANT_CONFIG.systemPrompt}\n\n${tfdrSystemBlock}`
     : QUANT_CONFIG.systemPrompt;
+
+  const activeSymbol = symbolInfo?.symbol || 'DEFAULT';
+  const currentPrice =
+    modelData.length > 0
+      ? modelData[modelData.length - 1].c
+      : Number(symbolInfo?.latestPrice || 0);
 
   // 建立 15 維度數據上下文
   let marketContext = '暫無股票數據，請先執行分析獲取真實市場數據';
@@ -326,6 +377,26 @@ ${tfdr ? tfdrSystemBlock : ''}
   // 檢查是否配置了用戶自有 API
   if (apiConfig.url && apiConfig.key) {
     if (apiConfig.provider === 'claude') {
+      // 檢查 4 小時內且價格波動 < 1.5% 的本地快取
+      const cacheKey = `claude_quant_cache_${activeSymbol}`;
+      if (!forceRefresh && currentPrice > 0) {
+        try {
+          const cachedRaw = localStorage.getItem(cacheKey);
+          if (cachedRaw) {
+            const cached = JSON.parse(cachedRaw);
+            const isFresh = Date.now() - Number(cached.timestamp) < 4 * 60 * 60 * 1000;
+            const cachedPrice = Number(cached.price);
+            const priceDiffPct =
+              cachedPrice > 0 ? Math.abs(currentPrice - cachedPrice) / cachedPrice : 1;
+            if (isFresh && priceDiffPct < 0.015 && typeof cached.report === 'string') {
+              return `⚡【已啟用 4小時省流快取・0 Token 消耗】\n${cached.report}`;
+            }
+          }
+        } catch {
+          // 忽略損壞快取，繼續雲端調用
+        }
+      }
+
       const proxyBody = {
         url: apiConfig.url,
         headers: {
@@ -351,7 +422,22 @@ ${tfdr ? tfdrSystemBlock : ''}
       if (!data.content || !data.content[0]?.text) {
         throw new Error(data.error?.message || 'Claude API 返回格式異常');
       }
-      return data.content[0].text;
+      const reportText: string = data.content[0].text;
+      if (currentPrice > 0) {
+        try {
+          localStorage.setItem(
+            cacheKey,
+            JSON.stringify({
+              timestamp: Date.now(),
+              price: currentPrice,
+              report: reportText
+            })
+          );
+        } catch {
+          // 忽略儲存容量錯誤
+        }
+      }
+      return reportText;
     } else {
       // Gemini 或 OpenAI 格式
       const proxyBody = {
@@ -384,8 +470,10 @@ ${tfdr ? tfdrSystemBlock : ''}
     }
   }
 
-  // 若未配置外部 API，提供內建高階專家分析
-  return generateBuiltinExpertAnalysis(symbolInfo, modelData, stats, sentiment, tfdr);
+  // 若未配置外部 API，優先使用本地零流量開源量化報告 + 內建高階專家分析
+  const zeroTokenReport = generateZeroTokenDiagnosis(context);
+  const builtinReport = generateBuiltinExpertAnalysis(symbolInfo, modelData, stats, sentiment, tfdr);
+  return zeroTokenReport ? `${zeroTokenReport}\n\n---\n${builtinReport}` : builtinReport;
 }
 
 function generateBuiltinExpertAnalysis(

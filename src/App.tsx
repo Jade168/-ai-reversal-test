@@ -27,7 +27,12 @@ import {
   fetchGlobalHotNews,
   analyzeNewsImpact
 } from './services/marketData';
-import { generateLocalAiResponse, callExpertAi, QuantContext } from './services/aiChat';
+import {
+  generateLocalAiResponse,
+  generateZeroTokenDiagnosis,
+  callExpertAi,
+  QuantContext
+} from './services/aiChat';
 import {
   MultiTimeframeTFDR,
   TFDRPoint,
@@ -56,6 +61,7 @@ export const App: React.FC = () => {
 
   // Market & Quant Data
   const [rawData, setRawData] = useState<RawKline[]>([]);
+  const [dailyKlines, setDailyKlines] = useState<RawKline[]>([]);
   const [modelData, setModelData] = useState<ModelBar[]>([]);
   const [symbolInfo, setSymbolInfo] = useState<SymbolInfo | null>(null);
   const [stats, setStats] = useState<BacktestStats | null>(null);
@@ -211,6 +217,8 @@ export const App: React.FC = () => {
           dailyKlinesForTfdr = klines;
         }
       }
+
+      setDailyKlines(dailyKlinesForTfdr);
 
       // Backtest Engine (1836.15 數律 + TFDR 日週月三維共振融合版)
       const { stats: bStats, logs } = runBacktestEngine(computedModel, fund, period, dailyKlinesForTfdr);
@@ -403,12 +411,14 @@ export const App: React.FC = () => {
     const context: QuantContext = {
       symbolInfo,
       modelData,
+      dailyKlines,
       stats,
       batchScanResults,
       newsList,
       sentiment,
       globalHotNews,
-      tfdr
+      tfdr,
+      latestTfdrPoint
     };
 
     setTimeout(() => {
@@ -417,8 +427,30 @@ export const App: React.FC = () => {
     }, 250);
   };
 
+  // Zero-Token Local Expert Diagnosis
+  const handleRunZeroTokenDiagnosis = () => {
+    const context: QuantContext = {
+      symbolInfo,
+      modelData,
+      dailyKlines,
+      stats,
+      batchScanResults,
+      newsList,
+      sentiment,
+      globalHotNews,
+      tfdr,
+      latestTfdrPoint
+    };
+    const report = generateZeroTokenDiagnosis(context);
+    if (!report) {
+      addChatMessage('error', '請先點擊「啟動分析」取得日線與 TFDR 數據後再執行零流量診斷！');
+      return;
+    }
+    addChatMessage('ai', report);
+  };
+
   // Expert AI Chat
-  const handleSendExpert = async (text: string) => {
+  const handleSendExpert = async (text: string, forceRefresh: boolean = false) => {
     if (!aiModelReady) {
       addChatMessage('error', '請先點擊上方「初始化AI」連接大腦！');
       return;
@@ -429,16 +461,18 @@ export const App: React.FC = () => {
     const context: QuantContext = {
       symbolInfo,
       modelData,
+      dailyKlines,
       stats,
       batchScanResults,
       newsList,
       sentiment,
       globalHotNews,
-      tfdr
+      tfdr,
+      latestTfdrPoint
     };
 
     try {
-      const reply = await callExpertAi(text, context, apiConfig);
+      const reply = await callExpertAi(text, context, apiConfig, forceRefresh);
       addChatMessage('expert', reply);
     } catch (err: any) {
       addChatMessage('error', `❌ 專家分析調用失敗: ${err.message}`);
@@ -511,6 +545,7 @@ export const App: React.FC = () => {
             onInitAi={handleInitAi}
             onSendLocal={handleSendLocal}
             onSendExpert={handleSendExpert}
+            onRunZeroTokenDiagnosis={handleRunZeroTokenDiagnosis}
             isSendingExpert={isSendingExpert}
           />
         </div>

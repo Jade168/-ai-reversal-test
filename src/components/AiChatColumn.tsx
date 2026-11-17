@@ -6,7 +6,8 @@ interface AiChatColumnProps {
   aiReady: boolean;
   onInitAi: () => void;
   onSendLocal: (text: string) => void;
-  onSendExpert: (text: string) => void;
+  onSendExpert: (text: string, forceRefresh?: boolean) => void;
+  onRunZeroTokenDiagnosis?: () => void;
   isSendingExpert?: boolean;
 }
 
@@ -16,9 +17,11 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
   onInitAi,
   onSendLocal,
   onSendExpert,
+  onRunZeroTokenDiagnosis,
   isSendingExpert = false
 }) => {
   const [inputText, setInputText] = useState('');
+  const [forceRefreshCloud, setForceRefreshCloud] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -42,8 +45,8 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
   };
 
   const handleExpertClick = () => {
-    if (!inputText.trim()) return;
-    onSendExpert(inputText.trim());
+    const query = inputText.trim() || '請結合月線通道、週線生命線與 TFDR 奇點給我完整實戰操盤報告';
+    onSendExpert(query, forceRefreshCloud);
     setInputText('');
   };
 
@@ -157,13 +160,22 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
       </div>
 
       {/* Action Buttons */}
-      <div className="flex gap-1">
+      <div className="flex gap-1 mb-1">
         <button
           onClick={handleLocalClick}
           className="flex-1 h-8 px-2 text-xs font-bold rounded bg-[#10b981] text-white hover:bg-[#059669] transition active:scale-98"
         >
           💬 AI對話
         </button>
+        {onRunZeroTokenDiagnosis && (
+          <button
+            onClick={onRunZeroTokenDiagnosis}
+            className="flex-1 h-8 px-2 text-xs font-bold rounded bg-amber-600 text-white hover:bg-amber-500 transition active:scale-98"
+            title="開源量化零流量分析員（0 Token 消耗，0.01 秒生成）"
+          >
+            ⚡ 零流量診斷
+          </button>
+        )}
         <button
           onClick={handleExpertClick}
           disabled={isSendingExpert}
@@ -172,6 +184,15 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
           🌐 專家分析
         </button>
       </div>
+      <label className="flex items-center justify-end gap-1.5 text-[10px] text-slate-400 cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={forceRefreshCloud}
+          onChange={(e) => setForceRefreshCloud(e.target.checked)}
+          className="accent-purple-500 w-3 h-3"
+        />
+        <span>強制刷新雲端報告（跳過 4 小時省流快取）</span>
+      </label>
     </div>
   );
 };
