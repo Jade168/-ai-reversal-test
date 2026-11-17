@@ -1397,11 +1397,11 @@ function executeStaircaseBacktest(
             });
           }
 
-          // 2. 大跌通道反彈遇阻 -> 順勢重倉沽空
+          // 2. 大跌通道反彈遇阻 -> 順勢重倉沽空（嚴格要求 dailyTFDR >= 84）
           if (
             longShares === 0 &&
             shortShares === 0 &&
-            dScore >= 80 &&
+            dScore >= 84 &&
             canAct &&
             cashPool > currDay.rawClose * 10
           ) {
@@ -1413,7 +1413,7 @@ function executeStaircaseBacktest(
               lastActionBarIndex = i;
 
               const confidence = '90% 月線大跌通道(反彈高位奇點沽空)';
-              const source = `月線失守 + 反彈日TFDR(${dScore})>=80 遇阻順勢沽空`;
+              const source = `月線失守 + 反彈日TFDR(${dScore})>=84 遇阻順勢沽空`;
 
               tradeLogs.unshift({
                 date: currDay.date,

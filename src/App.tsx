@@ -554,16 +554,18 @@ export const App: React.FC = () => {
       {/* 3. Main Split Container (AI Column 40%, Data Column 60%) */}
       <div className="flex flex-col md:flex-row gap-1.5 w-full">
         {/* Left: AI Column (40% desktop) */}
-        <div className="w-full md:w-[40%] flex-shrink-0 flex flex-col order-2 md:order-1">
-          <AiChatColumn
-            messages={chatMessages}
-            aiReady={aiModelReady}
-            onInitAi={handleInitAi}
-            onSendLocal={handleSendLocal}
-            onSendExpert={handleSendExpert}
-            onRunZeroTokenDiagnosis={handleRunZeroTokenDiagnosis}
-            isSendingExpert={isSendingExpert}
-          />
+        <div className="w-full md:w-[40%] flex-shrink-0 flex flex-col order-2 md:order-1 md:relative">
+          <div className="w-full md:absolute md:inset-0 flex flex-col">
+            <AiChatColumn
+              messages={chatMessages}
+              aiReady={aiModelReady}
+              onInitAi={handleInitAi}
+              onSendLocal={handleSendLocal}
+              onSendExpert={handleSendExpert}
+              onRunZeroTokenDiagnosis={handleRunZeroTokenDiagnosis}
+              isSendingExpert={isSendingExpert}
+            />
+          </div>
         </div>
 
         {/* Right: Quant Data Column (60% desktop) */}

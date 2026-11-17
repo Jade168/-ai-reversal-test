@@ -51,7 +51,7 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
   };
 
   return (
-    <div className="bg-[#0a0a0a] p-2 rounded-md border border-[#8b5cf6] flex flex-col h-full min-h-[380px]">
+    <div className="bg-[#0a0a0a] p-2 rounded-md border border-[#8b5cf6] flex flex-col h-[520px] md:h-full min-h-[380px]">
       {/* Title */}
       <div className="text-[#8b5cf6] mb-1.5 text-[11px] font-semibold">
         🧠 數律AI大腦 v2.0｜東方財富真實數據·聯網分析·語音交互
@@ -83,7 +83,7 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
       </div>
 
       {/* Messages Scroll Area */}
-      <div className="flex-1 overflow-y-auto max-h-[420px] p-1.5 pr-1 overscroll-contain bg-[#050505] rounded-md mb-1.5 border border-[#222] space-y-2 text-xs">
+      <div className="flex-1 min-h-0 overflow-y-auto p-1.5 pr-1 overscroll-contain bg-[#050505] rounded-md mb-1.5 border border-[#222] space-y-2 text-xs">
         {messages.map((msg) => {
           if (msg.role === 'system') {
             return (
