@@ -83,7 +83,7 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
       </div>
 
       {/* Messages Scroll Area */}
-      <div className="flex-1 overflow-y-auto p-1.5 bg-[#050505] rounded-md mb-1.5 border border-[#222] space-y-2 text-xs">
+      <div className="flex-1 overflow-y-auto max-h-[420px] p-1.5 pr-1 overscroll-contain bg-[#050505] rounded-md mb-1.5 border border-[#222] space-y-2 text-xs">
         {messages.map((msg) => {
           if (msg.role === 'system') {
             return (
