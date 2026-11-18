@@ -1198,7 +1198,8 @@ export function runBacktestEngine(
         });
       }
 
-      // D. 跌入下跌浪大勢 (isBearRegime: 同時跌穿月50與季50中間線) → 立即 100% 清倉多單並嚴禁抄底
+      // D. 跌入下跌浪大勢 (isBearRegime: 同時跌穿月50與季50中間線) → 立即 100% 清倉多單並嚴禁抄底；
+      //    或週線結構突變（週線大陰跌穿前兩枝低位，isWeeklyBreakClear）→ 同樣立即 100% 清倉，唔等破 50 線。
       if (longShares > 0 && avgLongCost > 0 && verdict.signal === 'FULL_CLEAR') {
         const sellShares = longShares;
         const netExitPrice = todayOpen * (1 - FEE_RATE);
@@ -1215,6 +1216,7 @@ export function runBacktestEngine(
         pendingBuyback = null;
         lastActionBarIndex = i;
         const profitPct = Number((pnlRatio * 100).toFixed(2));
+        const isWeeklyBreak = verdict.isWeeklyBreakClear === true;
 
         tradeLogs.unshift({
           date: execDate,
@@ -1223,17 +1225,21 @@ export function runBacktestEngine(
           puzzleHint: hintBase,
           complianceTag: '✅ 精準執行',
           type: 'CRITICAL SELL',
-          action: '🚨 順勢引擎・破月季50線100%清倉',
+          action: isWeeklyBreak ? '🚨 順勢引擎・週線突變100%清倉' : '🚨 順勢引擎・破月季50線100%清倉',
           shares: sellShares,
-          units: '跌穿月/季50線清倉100%',
-          confidence: `收盤$${prevOverlay.close} < 月50($${m50.toFixed(2)}) & 季50($${q50.toFixed(2)})`,
+          units: isWeeklyBreak ? '週線大陰跌穿前兩枝清倉100%' : '跌穿月/季50線清倉100%',
+          confidence: isWeeklyBreak
+            ? `週線平均K線大陰跌穿前兩枝低位（收盤$${prevOverlay.close}）`
+            : `收盤$${prevOverlay.close} < 月50($${m50.toFixed(2)}) & 季50($${q50.toFixed(2)})`,
           price: todayOpen.toFixed(2),
           totalHolding: 0,
           holdingType: 'EMPTY',
-          source: `跌穿月50($${m50.toFixed(2)})與季50($${q50.toFixed(2)})雙中間線進入下跌浪，開盤 100% 清倉並禁買`,
+          source: isWeeklyBreak
+            ? `週線平均K線出現大陰燭跌穿前面兩枝週線低位，結構突變轉跌，開盤 100% 清倉保命`
+            : `跌穿月50($${m50.toFixed(2)})與季50($${q50.toFixed(2)})雙中間線進入下跌浪，開盤 100% 清倉並禁買`,
           profitPct,
           profit: profitPct,
-          msg: `[${execDate}] 🚨 順勢引擎・破月季50線100%清倉 ${sellShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+          msg: `[${execDate}] ${isWeeklyBreak ? '🚨 順勢引擎・週線突變100%清倉' : '🚨 順勢引擎・破月季50線100%清倉'} ${sellShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
         });
       }
 

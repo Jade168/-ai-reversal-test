@@ -76,10 +76,16 @@ export interface OverlayPoint {
   wHaBreakDown?: boolean;
   isMonthlyBreakDown?: boolean;
   isMonthlyBreakUp?: boolean;
+  isWeeklyBreakDown?: boolean; // 週線大陰跌穿前兩枝低位（currW.low < prev1W.low && < prev2W.low，且收陰）
   currMHaHigh?: number | null;
   currMHaLow?: number | null;
   prevMHaHigh?: number | null;
   prevMHaLow?: number | null;
+  currWHaLow?: number | null;
+  prevWHaLow?: number | null;
+  prev2WHaLow?: number | null;
+  wHaBodyDropPct?: number | null; // 本週週線 HA 實體跌幅（% open），收陽時為 0（供週線大陰 (a) 過濾）
+  wHaBodyDropAtr?: number | null; // 本週週線 HA 實體跌幅／週線 ATR（供週線大陰 (a) 過濾）
   qPeriodEnd: string | null;
   mPeriodEnd: string | null;
   wPeriodEnd: string | null;
@@ -177,10 +183,17 @@ export interface PuzzleVerdict {
   lastSellPrice?: number | null; // 上次高拋成交參考價（收市價；回測會以實際 T 開盤成交價為準），供補回單 96% 折扣驗證
   isBuyback?: boolean; // 本次 GOLDEN_BUY 是否高拋後的補回單
   isStructuralStop?: boolean; // 本次 COVER_SHORT 是否結構止損（收市重返週線／月線 50 中間線），而非奇點買升穿平空
-  isLongBullShield?: boolean; // 長牛護盾是否開啟：四態制下只在主升浪（S1）與牛市洗盤（S2）開啟；護盾開啟時回測高拋必須浮盈 >= +8% 先可以執行
+  isLongBullShield?: boolean; // 長牛護盾是否開啟：四態制下只在主升浪（S1）與牛市洗盤（S2）開啟；護盾開啟時回測高拋必須浮盈 >= +8% 先可以執行。規則 A／B 生效期間強制關閉（高位派發期保命優先，破位即減）
   marketState?: MarketState; // 四態大勢：S1 主升浪 / S2 牛市洗盤 / S3 過渡警戒 / S4 大跌浪防禦
-  maxBuyRatio?: number; // 該態新買入上限：S1/S2 0.80，S3 0.30，S4 0
+  maxBuyRatio?: number; // 該態新買入上限：S1/S2 0.80，S3 0.30，S4 0；規則 A 過熱期壓到 0.20，規則 B 禁買期為 0
   crossedBelowM50?: boolean; // 本日收市首次由上往下跌穿月 50 線（前日收市在線上，本日收市在線下）
+  monthlyOverheat?: boolean; // 規則 A：月線過熱降倉鎖是否生效（mTfdr ≥ 85，或曾觸及 ≥ 90 且未釋放到 ≤ 65）
+  monthlyTopLock?: boolean; // 規則 B：月線破底禁買鎖是否生效（過熱期月 HA 破底，100% 禁買）
+  weeklyBreakLock?: boolean; // 週線突變禁買鎖是否生效（週線大陰跌穿前兩枝低位，100% 禁買）
+  isWeeklyBreakClear?: boolean; // 本次 FULL_CLEAR 是否由週線突變觸發（結構突變即離場），而非跌穿月／季 50 線
+  buyTier?: 1 | 2 | null; // 分級做 T：本次 GOLDEN_BUY 嘅級別（Tier 1 中線回調買 50%／Tier 2 深回調買 100%），非買入時為 null
+  isChaseBuy?: boolean; // 本次 GOLDEN_BUY 是否拋物線逼空追擊買入（48 < dTfdr ≤ 65，三級 HA 齊升，日 HA 轉陽破前高，買 40%）
+  isUnlockCapBuy?: boolean; // 本次 GOLDEN_BUY 是否畀週線鎖解鎖限倉壓到 40%（右側確認倉，唔係底部全倉）
   compactHint: string;
 }
 
@@ -683,6 +696,10 @@ function getLivePeriodTelemetry(
   currHaLow: number | null;
   prevHaHigh: number | null;
   prevHaLow: number | null;
+  prev2HaLow: number | null;
+  haOpen: number | null;
+  haClose: number | null;
+  atr: number;
 } {
   const snap = state.snapshot;
   const active = state.active;
@@ -690,6 +707,7 @@ function getLivePeriodTelemetry(
     const len = state.ha.length;
     const currHa = len > 0 ? state.ha[len - 1] : null;
     const prevHa = len > 1 ? state.ha[len - 2] : null;
+    const prev2Ha = len > 2 ? state.ha[len - 3] : null;
     const isPeriodHighLowBreakDown = Boolean(
       currHa && prevHa && currHa.high < prevHa.high && currHa.low < prevHa.low
     );
@@ -706,11 +724,16 @@ function getLivePeriodTelemetry(
       currHaHigh: currHa ? Number(currHa.high.toFixed(2)) : null,
       currHaLow: currHa ? Number(currHa.low.toFixed(2)) : null,
       prevHaHigh: prevHa ? Number(prevHa.high.toFixed(2)) : null,
-      prevHaLow: prevHa ? Number(prevHa.low.toFixed(2)) : null
+      prevHaLow: prevHa ? Number(prevHa.low.toFixed(2)) : null,
+      prev2HaLow: prev2Ha ? Number(prev2Ha.low.toFixed(2)) : null,
+      haOpen: currHa ? Number(currHa.open.toFixed(2)) : null,
+      haClose: currHa ? Number(currHa.close.toFixed(2)) : null,
+      atr: snap.atr
     };
   }
 
   const lastSealedHa = state.ha[state.ha.length - 1];
+  const prev2SealedHa = state.ha.length > 1 ? state.ha[state.ha.length - 2] : null;
   const liveHaClose = (active.open + active.high + active.low + active.close) / 4;
   const liveHaOpen = (lastSealedHa.open + lastSealedHa.close) / 2;
   const liveHaHigh = Math.max(active.high, liveHaOpen, liveHaClose);
@@ -750,7 +773,11 @@ function getLivePeriodTelemetry(
     currHaHigh: Number(liveHaHigh.toFixed(2)),
     currHaLow: Number(liveHaLow.toFixed(2)),
     prevHaHigh: Number(lastSealedHa.high.toFixed(2)),
-    prevHaLow: Number(lastSealedHa.low.toFixed(2))
+    prevHaLow: Number(lastSealedHa.low.toFixed(2)),
+    prev2HaLow: prev2SealedHa ? Number(prev2SealedHa.low.toFixed(2)) : null,
+    haOpen: Number(liveHaOpen.toFixed(2)),
+    haClose: Number(liveHaClose.toFixed(2)),
+    atr: snap.atr
   };
 }
 
@@ -809,6 +836,21 @@ export const PARTIAL_PROFIT_RATIO = 0.45; // 高拋鎖利 45%，保留 55% 核�
 export const BUYBACK_DISCOUNT = 0.96; // 高拋後補回單：成交價必須低於上次沽價 ×96%（只限同波段 30 個交易日內）
 export const LAST_SELL_EXPIRY_BARS = 30; // lastSellPrice 過期：高拋後超過 30 個交易日，96% 折扣錨點作廢，下一輪買入視為全新入場
 export const SHORT_COOLDOWN_BARS = 15; // 空單止損平空後 15 個交易日內嚴禁重複開空（防連環止損冷卻）
+// ── 月線大頂風控（規則 A＋B）──
+export const MONTHLY_OVERHEAT_TFDR = 85; // 規則 A (A1)：月 TFDR ≥ 85 即過熱
+export const MONTHLY_TOP_TFDR = 90; // 規則 A (A2)：月 TFDR 曾觸及 ≥ 90（月線奇點沽）
+export const MONTHLY_RELEASE_TFDR = 65; // 規則 A 釋放：月 TFDR 回調到 ≤ 65 先解除過熱
+export const MONTHLY_TOP_BUY_CAP = 0.2; // 規則 A 過熱期新買入上限 20%（全新買入＋補回單一律適用）
+// ── 日線做 T 分級（只限 S1/S2 大升浪）──
+export const TIER1_BUY_TFDR = 48; // S1/S2 買入武裝放寬到 dTfdr ≤ 48（涵蓋中線 45–48 回調，避開 50 以上橫行區）
+export const TIER1_DEEP_TFDR = 35; // Tier 2 深回調：dTfdr ≤ 35；Tier 1 中線回調：35 < dTfdr ≤ 48
+export const TIER1_SIZE_FACTOR = 0.5; // Tier 1 買入正常目標倉位的 50%（細注做 T）；Tier 2 買入 100%
+// ── 拋物線逼空主升浪順勢追擊 ──
+export const CHASE_BUY_TFDR_LOW = 48; // 追擊區間下限：dTfdr > 48（唔係 Tier 1 回調區）
+export const CHASE_BUY_TFDR_HIGH = 65; // 追擊區間上限：dTfdr ≤ 65（中線強勢區）
+export const CHASE_BUY_SIZE_RATIO = 0.4; // 逼空追擊建倉 40%（唔使等日線跌到 ≤48 先買）
+// ── 週線鎖解鎖限倉 ──
+export const WEEKLY_UNLOCK_BUY_CAP = 0.4; // 週線鎖解鎖後第一筆買入上限 40%（右側確認倉：解鎖嗰陣已過最便宜底部，絕不 80% 全倉）
 
 /** 跨交易日保存的奇點武裝狀態：必須由 buildFullPuzzleTimeline 按時間順序逐日傳入同一個 tracker，絕不能逐日重建。 */
 export interface SingularityTriggerState {
@@ -829,6 +871,7 @@ export interface SingularityTriggerState {
   buyBestLow: number | null;
   shortBestHigh: number | null;
   coverBestLow: number | null;
+  buyArmMinDTfdr: number | null; // 本次買入武裝期間見過的最低日 TFDR（決定分級做 T：≤35 為 Tier 2 全額，35–48 為 Tier 1 半額）
 }
 
 export function createSingularityTriggerState(): SingularityTriggerState {
@@ -848,8 +891,53 @@ export function createSingularityTriggerState(): SingularityTriggerState {
     sellBestHigh: null,
     buyBestLow: null,
     shortBestHigh: null,
-    coverBestLow: null
+    coverBestLow: null,
+    buyArmMinDTfdr: null
   };
+}
+
+/**
+ * 月線大頂風控狀態（規則 A＋B）：必須由 buildFullPuzzleTimeline 按時間順序逐日傳入同一個 state，絕不能逐日重建。
+ * - 規則 A（月線過熱降倉鎖）：mTfdr ≥ 85，或曾觸及 ≥ 90 且之後從未出現真正底部反轉
+ *   （月 TFDR 回調到 ≤ 65 且月 HA 正式轉陽唔再破底）→ 新買入上限壓到 20%。
+ *   刻意唔設 3 個月到期日：AAPL 2012 證明派發期可以拖 8 個月而唔釋放（2–3 月見頂，9 月買入嗰陣
+ *   月 TFDR 最低只係 69）；而單靠 mTfdr ≤ 65 釋放會提前 2–3 日解除警報（10-23 跌到 64，
+ *   10-25 月 HA 先破底），令規則 B 永遠觸發唔到。
+ * - 規則 B（月線破底禁買鎖）：規則 A 生效期間，月 HA「高不過前高＋低破前低」→ 100% 禁買，直至月 HA
+ *   正式走出底部轉陽且唔再破底先解鎖。
+ */
+export interface MonthlyTopState {
+  lastM90Index: number | null; // 上次 mTfdr >= 90 嗰支 bar（規則 A 觸發錨點）
+  lastM65Index: number | null; // 上次真正底部反轉嗰支 bar（mTfdr <= 65 且月 HA 轉陽唔破底，規則 A 釋放錨點）
+  topLock: boolean; // 規則 B 100% 禁買鎖是否生效中
+}
+
+export function createMonthlyTopState(): MonthlyTopState {
+  return { lastM90Index: null, lastM65Index: null, topLock: false };
+}
+
+/**
+ * 週線突變狀態（Rule 1＋2：週線大陰跌穿前兩枝禁買鎖＋結構突變即離場）。
+ * - 觸發（(a)+(b) 雙重過濾，缺一不可）：週線平均K線收陰且最低點直接跌穿前面兩枝週線低位
+ *   （currW.low < prev1W.low && currW.low < prev2W.low，AAPL 2012-10 見頂嗰枝大陰燭），
+ *   且 (a) 真大陰燭：本週週線 HA 實體跌幅 > 1.2 倍週線 ATR 或 >= 3.5%，
+ *   且 (b) 高位見頂背景：月線過熱（規則 A）生效中，或過去 4 週內週線 TFDR 曾觸及 >= 75。
+ *   牛市正常洗盤細陰燭（2012-04-16）會被 (a) 過濾，上升途中普通震盪會被 (b) 過濾。
+ * - 生效期間：100% 禁止一切做多買入與補回單（maxBuyRatio=0）；觸發當日強制清倉離場（signal=FULL_CLEAR）。
+ * - 解鎖：週線平均K線重新轉陽且最高點升穿上一枝週線高位（wHaBreakUp）。
+ * - 解鎖限倉 40%（右側確認紀律）：解鎖嗰刻價錢已經離開最恐慌地板價（AAPL 2012-06 解鎖嗰陣
+ *   $16.8，地板 $15.3），錯過咗最便宜嘅「黃金第一買點」，所以解鎖後第一筆買入（GOLDEN_BUY／
+ *   逼空追擊）倉位上限強制鎖定 40%，絕不給 80% 全倉；該筆買入訊號發出後解除限倉，後續再回踩
+ *   出現新低位奇點且大勢 S1/S2 先按規則逐步加注（unlockCapActive）。
+ */
+export interface WeeklyBreakState {
+  breakLock: boolean; // 週線突變禁買鎖是否生效中
+  lastW75Index: number | null; // 上次 wTfdr >= 75 嗰支 bar（(b) 高位背景錨點：過去 4 週 ≈ 20 交易日內曾觸及）
+  unlockCapActive: boolean; // 週線鎖剛解鎖：下一筆買入限倉 40%（右側確認倉，唔係底部全倉）；買入訊號發出後解除
+}
+
+export function createWeeklyBreakState(): WeeklyBreakState {
+  return { breakLock: false, lastW75Index: null, unlockCapActive: false };
 }
 
 /** 奇點 K 線（及平均K線）最低位 = 原 K 線 low 與平均K線 open/close 三者最低。 */
@@ -881,7 +969,9 @@ export function evaluatePuzzleVerdict(
   prev: OverlayPoint,
   prior20Low: number,
   tracker?: SingularityTriggerState,
-  barIndex?: number
+  barIndex?: number,
+  monthlyTop?: MonthlyTopState,
+  weeklyBreak?: WeeklyBreakState
 ): PuzzleVerdict {
   const idx = barIndex ?? -1; // K 線索引：buildFullPuzzleTimeline 傳入；唔傳時（-1）30 日過期與 15 日冷卻無法計算，一律沿用舊有保守行為
   const { close, low, haOpen, haClose, dTfdr, qMid50, mMid50, wMid50 } = curr;
@@ -922,22 +1012,102 @@ export function evaluatePuzzleVerdict(
   // 四態大勢分類（季 60／月 55／月 48 門檻；季 TFDR 為 null 時退化用價位判定）。
   // 門檻經真實數據校準：AAPL 慢牛股季線強勢中樞約 58，設 65 會卡死八年零交易，設 60 先入到 S1/S2；
   // 季線跌落 50–60（NVDA 2026-10-28 季 62）即入 S3 試探倉 30%，封死假反彈重倉。
-  const { state: marketState, maxBuyRatio } = classifyMarketState(
+  const { state: marketState, maxBuyRatio: stateMaxBuyRatio } = classifyMarketState(
     curr.qTfdr,
     curr.mTfdr,
     close,
     q50Trend,
     m50Trend
   );
+  // ── 月線大頂風控（規則 A＋B）──
+  // 規則 A（月線過熱降倉鎖）：(A1) 當前 mTfdr ≥ 85；或 (A2) 月 TFDR 曾觸及 ≥ 90，之後從未出現
+  //   真正底部反轉（月 TFDR 回調到 ≤ 65 且月 HA 正式轉陽唔再破底）釋放。刻意唔設 3 個月到期日：
+  //   AAPL 2012 證明派發期可以拖 8 個月而唔釋放（2–3 月見頂，9 月買入嗰陣月 TFDR 最低只係 69），
+  //   而單靠 mTfdr ≤ 65 釋放會提前 2–3 日解除警報（10-23 跌到 64，10-25 月 HA 先破底），令規則 B
+  //   永遠觸發唔到。mTfdr 為 null 時唔更新錨點。
+  const topState = monthlyTop ?? createMonthlyTopState();
+  const mTfdrNow = curr.mTfdr;
+  if (mTfdrNow != null && idx >= 0) {
+    if (mTfdrNow >= MONTHLY_TOP_TFDR) topState.lastM90Index = idx;
+    // 釋放錨點：只在真正底部反轉嗰陣更新——月 TFDR 回調到 ≤ 65 之餘，月 HA 亦要正式轉陽且唔再破底。
+    // 單靠 mTfdr ≤ 65 會提前釋放（AAPL 2012：10-23 跌到 64 釋放，10-25 月 HA 先破底，規則 B
+    // 永遠觸發唔到，11 月重倉 80% 接飛刀）。呢個修法確保規則 A 喺破底嗰陣仍然生效，規則 B 先捉到。
+    if (mTfdrNow <= MONTHLY_RELEASE_TFDR && curr.mHaBull && !curr.mHaBreakDown) {
+      topState.lastM65Index = idx;
+    }
+  }
+  const monthlyOverheat =
+    (mTfdrNow != null && mTfdrNow >= MONTHLY_OVERHEAT_TFDR) ||
+    (topState.lastM90Index != null &&
+      (topState.lastM65Index == null || topState.lastM65Index < topState.lastM90Index));
+  // 規則 B（月線破底禁買鎖）：月 HA「高不過前高＋低破前低」本身就係大頂確認（Peter 核心教導），
+  //   但只在月線曾經見頂（mTfdr 曾觸及 ≥ 90，lastM90Index 錨點）嘅背景下先生效，避免喺從未見頂
+  //   嘅橫行市過度禁買。唔要求規則 A 當刻生效——因為月 TFDR 回調到 ≤ 65（規則 A 釋放）同月 HA
+  //   破底（確認見頂）可以相差幾日（AAPL 2012：10-19 跌到 63 釋放，10-25 月 HA 先破底），
+  //   若要求規則 A 生效，規則 B 永遠觸發唔到，11 月重倉 80% 接飛刀。見頂錨點喺完全復甦嗰陣
+  //   清除（解鎖嗰陣月 TFDR 已回升到 ≥ 65），否則會永久保留，令規則 B 喺往後每一次月 HA 破底
+  //   都觸發（NVDA 實測：回報由 +988% 跌到 +70%）。喺 S4（價跌穿雙 50 線）嗰陣 maxBuyRatio
+  //   本來就係 0，規則 B 觸發亦無影響。一經觸發即鎖定，唔會因條件消失而自動解除。
+  //   解鎖要等月 HA 正式走出底部轉陽且唔再破底。用 if / else if：觸發日唔評估解鎖，避免同一日
+  //   又觸發又解鎖（月 HA 轉陽但低位仍穿前低嘅「走低高收」燭）。
+  if (curr.isMonthlyBreakDown && topState.lastM90Index != null) {
+    topState.topLock = true;
+  } else if (topState.topLock && curr.mHaBull && !curr.mHaBreakDown) {
+    topState.topLock = false;
+    // 完全復甦（月 HA 轉陽且月 TFDR 已回升到 ≥ 65）：清除見頂錨點，之前嘅見頂警戒解除。
+    // 若月 TFDR 仲係 < 65，錨點保留，之後再破底仍會觸發規則 B。
+    if (mTfdrNow != null && mTfdrNow >= MONTHLY_RELEASE_TFDR) {
+      topState.lastM90Index = null;
+      topState.lastM65Index = null;
+    }
+  }
+  const monthlyTopLock = topState.topLock;
+  // 週線突變禁買鎖（Rule 1，(a)+(b) 雙重過濾）：必須同時滿足三個條件先觸發——
+  //   (基礎結構) 週線平均K線收陰且最低點直接跌穿前面兩枝週線低位（AAPL 2012-10 見頂嗰枝大陰燭）；
+  //   (a) 真大陰燭：本週週線 HA 實體跌幅 > 1.2 倍週線 ATR，或實體跌幅 >= 3.5%（過濾牛市正常洗盤細陰燭）；
+  //   (b) 高位見頂背景：月線過熱（規則 A）生效中，或過去 4 週（20 交易日）內週線 TFDR 曾觸及 >= 75
+  //   （確認係高位見頂破位，唔係上升途中普通震盪）。三者缺一都唔觸發。
+  //   生效期間 100% 禁止一切做多買入與補回單（maxBuyRatio=0），徹底過濾下跌浪中所有日線假底反彈陷阱。
+  //   解鎖：週線平均K線重新轉陽且最高點升穿上一枝週線高位（wHaBreakUp）。
+  //   用 if / else if：觸發日唔評估解鎖。justTriggered 供結構突變即離場（Rule 2）用。
+  const wbState = weeklyBreak ?? createWeeklyBreakState();
+  if (curr.wTfdr != null && curr.wTfdr >= 75 && idx >= 0) {
+    wbState.lastW75Index = idx;
+  }
+  const w75Recent =
+    (idx >= 0 && wbState.lastW75Index != null && idx - wbState.lastW75Index <= 20) ||
+    (curr.wTfdr != null && curr.wTfdr >= 75);
+  const weeklyBigBear = (curr.wHaBodyDropAtr ?? 0) > 1.2 || (curr.wHaBodyDropPct ?? 0) >= 3.5;
+  const weeklyHighTop = monthlyOverheat || w75Recent;
+  const weeklyBreakTriggered = Boolean(curr.isWeeklyBreakDown) && weeklyBigBear && weeklyHighTop;
+  let weeklyBreakJustTriggered = false;
+  if (weeklyBreakTriggered) {
+    if (!wbState.breakLock) weeklyBreakJustTriggered = true;
+    wbState.breakLock = true;
+  } else if (wbState.breakLock && curr.wHaBreakUp) {
+    wbState.breakLock = false;
+    // 解鎖限倉 40%：鎖定解除嗰刻，價錢已經離開最恐慌地板（右側確認起漲段），錯過咗最便宜嘅
+    // 「黃金第一買點」，所以下一筆買入限倉 40%，絕不給 80% 全倉；該筆買入訊號發出後解除限倉。
+    wbState.unlockCapActive = true;
+  }
+  const weeklyBreakLock = wbState.breakLock;
+  // 規則 A 壓上限到 20%（全新買入＋補回單一律適用）；規則 B／週線突變鎖 100% 禁買（上限 0）。
+  // 回測分支 F 已用 verdict.maxBuyRatio 設上限（maxBuyRatio 0 ⇒ 0 股 ⇒ 唔成交），所以引擎呢度改就夠，唔使改回測。
+  const maxBuyRatio = monthlyTopLock || weeklyBreakLock
+    ? 0
+    : monthlyOverheat
+    ? Math.min(stateMaxBuyRatio, MONTHLY_TOP_BUY_CAP)
+    : stateMaxBuyRatio;
   // 月 50 線首次穿越：前日收市在線上、本日收市跌穿線下（只在穿越瞬間成立一次，下一日
   // 前日收市已在線下即不再觸發）。供狀態③減半倉分支用。
   const prevM50Trend = prev.mMid ?? prev.mMid50 ?? m50Trend;
   const crossedBelowM50 = prev.close >= prevM50Trend && close < m50Trend;
-  // 長牛護盾（四態制）：只在主升浪（S1）與牛市洗盤（S2）開啟。護盾開啟時，回測高拋必須滿足
+  // 長牛護盾（四態制）：只在主升浪（S1）與牛市洗盤（S2）開啟。規則 A／B 生效期間強制關閉
+  // （高位派發期保命優先，破位即減，唔等 +8% 盈利）。護盾開啟時，回測高拋必須滿足
   // 浮盈 >= +8%（todayOpen >= avgCost * 1.08）先可以執行；未達標跳過本次減倉（奇點武裝已由引擎
   // 喺 PARTIAL_PROFIT 觸發時清除，等下一個奇點頂再評估）。狀態③過渡期保命優先，破位即減倉，
   // 唔等盈利。TFDR 未累積夠樣本時為 null，退化分類已處理。
-  const isLongBullShield = marketState === 'S1' || marketState === 'S2';
+  const isLongBullShield = (marketState === 'S1' || marketState === 'S2') && !monthlyOverheat && !monthlyTopLock && !weeklyBreakLock;
 
   const dHaBull = haClose > haOpen;
   const dHaTurnedBull = dHaBull && haClose > prev.haClose;
@@ -953,6 +1123,8 @@ export function evaluatePuzzleVerdict(
   const mHaUp = Boolean(curr.mHaBreakUp);
   const qHaDown = Boolean(curr.qHaBreakDown);
   const mHaDown = Boolean(curr.mHaBreakDown);
+  // 三級平均K線同時向上梯級（季／月／週皆陽且週線唔破底）：強勢大升浪確認，供 Tier 1 同逼空追擊買入共用。
+  const haStaircaseUp = qHaBull && mHaBull && Boolean(curr.wHaBull) && !wBreakDown;
 
   const dTfdrLow6 = curr.dTfdrLow6 ?? curr.dTfdrLow5 ?? Math.min(dTfdr, prev.dTfdr);
   const dTfdrHigh6 = curr.dTfdrHigh6 ?? curr.dTfdrHigh3 ?? Math.max(dTfdr, prev.dTfdr);
@@ -990,6 +1162,7 @@ export function evaluatePuzzleVerdict(
   let buybackRefPrice: number | null = null;
   let isBuybackTrade = false;
   let isStructuralStop = false;
+  let buyTier: 1 | 2 | null = null; // 分級做 T：本次 GOLDEN_BUY 嘅級別（Tier 1 買 50%／Tier 2 買 100%）
 
   if (isBullRegime) {
     // 轉回上升浪：清除下跌浪的沽空武裝；多單的 lastSellPrice 保留作補回折扣參考
@@ -1042,14 +1215,29 @@ export function evaluatePuzzleVerdict(
         isBuybackTrade = isBuyback;
         buybackRefPrice = trigger.lastSellPrice;
         signal = 'GOLDEN_BUY';
-        // 買入倉位跟四態大勢上限：S1/S2 重倉 80%，S3 試探倉 30%（回測再以 maxBuyRatio 設上限作雙重保障）
-        sizeRatio = maxBuyRatio;
+        // 買入倉位跟四態大勢上限（已扣減規則 A 20%／規則 B 0 上限）：S1/S2 重倉 80%，S3 試探倉 30%
+        // （回測再以 maxBuyRatio 設上限作雙重保障）。分級做 T（只限 S1/S2）：武裝期間最低日 TFDR
+        // 喺 35–48（Tier 1 中線健康回調）買入正常目標嘅 50% 細注；≤ 35（Tier 2 深回調黃金坑）
+        // 買入 100% 全額。S3 維持原有門檻與 30% 上限，唔分級。武裝期間最低 dTfdr 未記錄時（直接呼叫
+        // 而無共用 tracker），預設 Tier 2 全額，等同舊有行為。
+        let buySizeRatio = maxBuyRatio;
+        if (marketState === 'S1' || marketState === 'S2') {
+          const armMin = trigger.buyArmMinDTfdr;
+          if (armMin != null && armMin > TIER1_DEEP_TFDR) {
+            buyTier = 1;
+            buySizeRatio = maxBuyRatio * TIER1_SIZE_FACTOR;
+          } else {
+            buyTier = 2;
+          }
+        }
+        sizeRatio = buySizeRatio;
         isPuzzleCross = true;
         tfdrTurnUp = true;
         invalidationPrice = Number(Math.min(fullClearLine, Math.min(prior20Low, low) * 0.96).toFixed(2));
         trigger.buyHigh = null;
         trigger.buyDate = null;
         trigger.buyBestLow = null;
+        trigger.buyArmMinDTfdr = null;
         // 補回單已成交（以收市價作參考），清除 lastSellPrice，下一輪高拋先會重新設定
         if (isBuyback) {
           trigger.lastSellPrice = null;
@@ -1069,7 +1257,26 @@ export function evaluatePuzzleVerdict(
           trigger.sellDate = curr.date;
         }
       }
-      if (dTfdr <= SINGULARITY_BUY_TFDR) {
+      // 買入武裝：Tier 1 中線回調（35–48）只限真正強勢大升浪（季 TFDR ≥ 60 且月 TFDR ≥ 60），
+      // 涵蓋中線 45–48 附近回調，但唔碰 50 以上橫行區；月線動能 < 60（弱勢震盪期，如 00700）
+      // 只做 dTfdr ≤ 35 深回調，唔做中線高頻 T；S3/S4 維持原有 ≤ 25。
+      // 橫行區（無奇點預警、無明確拐點）唔武裝，唔做 T。武裝期間追蹤最低 dTfdr，決定觸發時 Tier。
+      // S1/S2 本身已要求季 ≥ 60，呢度再加月 ≥ 60 作雙重確認；季 TFDR 為 null（退化分類）時視為唔強勢，只做深回調。
+      // 大升浪順勢上車（Rule 3）：除咗 TFDR 強勢，季／月／週平均K線同時處於向上梯級
+      //   （三者皆陽且週線唔破底）亦視為強勢大升浪，准許 Tier 1 中線買入，唔再死等幾乎唔出現嘅 ≤ 25
+      //   深跌極底，完整吃下級級上升主升浪（AAPL 2012-01 至 04：$12.40 一路漲到 $19.62 單邊逼空，日線根本冇跌到 ≤ 25）。
+      const isStrongUptrend =
+        (marketState === 'S1' || marketState === 'S2') &&
+        (((curr.qTfdr ?? -1) >= 60 && (curr.mTfdr ?? -1) >= 60) || haStaircaseUp);
+      const buyArmThreshold = isStrongUptrend
+        ? TIER1_BUY_TFDR
+        : marketState === 'S1' || marketState === 'S2'
+        ? TIER1_DEEP_TFDR
+        : SINGULARITY_BUY_TFDR;
+      if (dTfdr <= buyArmThreshold) {
+        if (trigger.buyArmMinDTfdr == null || dTfdr < trigger.buyArmMinDTfdr) {
+          trigger.buyArmMinDTfdr = dTfdr;
+        }
         if (trigger.buyHigh == null || curr.low < (trigger.buyBestLow ?? Infinity)) {
           trigger.buyHigh = haHighOf(curr);
           trigger.buyBestLow = curr.low;
@@ -1089,6 +1296,7 @@ export function evaluatePuzzleVerdict(
     trigger.buyHigh = null;
     trigger.buyDate = null;
     trigger.buyBestLow = null;
+    trigger.buyArmMinDTfdr = null;
     trigger.lastSellPrice = null;
     trigger.lastSellIndex = null;
 
@@ -1153,11 +1361,84 @@ export function evaluatePuzzleVerdict(
     }
   }
 
+  // 拋物線逼空主升浪順勢追擊：超級逼空行情（季／月／週三級 HA 全陽梯級向上，未觸發規則 A/B
+  //   與週線突變鎖）入面，日線連 48 都跌唔到，死等 ≤48 只會完全踏空（AAPL 2012-01 至 04：
+  //   $12.40 一路漲到 $19.62，日線根本冇跌到 ≤48）。所以當日線喺 48 < dTfdr ≤ 65 中線強勢區
+  //   出現日線 HA 轉陽（前日陰→今日陽）並升穿前一日高點（close > prev.high），即允許 40% 順勢追擊建倉。
+  //   只在無其他訊號（signal 仍係 HOLD）嗰陣觸發，唔會覆寫 PARTIAL／FULL_CLEAR／SHORT。
+  //   唔經奇點武裝（唔使等 ≤25／≤48 預警），所以 buyTier 為 null、isBuyback 為 false。
+  //   結構突變即離場（下文）優先級更高：若同日週線突變觸發，FULL_CLEAR 會覆寫呢個追擊買入。
+  let isChaseBuy = false;
+  if (
+    signal === 'HOLD' &&
+    !monthlyOverheat &&
+    !monthlyTopLock &&
+    !weeklyBreakLock &&
+    haStaircaseUp &&
+    dTfdr > CHASE_BUY_TFDR_LOW &&
+    dTfdr <= CHASE_BUY_TFDR_HIGH &&
+    dHaBull &&
+    !prev.dHaBull &&
+    close > prev.high
+  ) {
+    signal = 'GOLDEN_BUY';
+    sizeRatio = CHASE_BUY_SIZE_RATIO;
+    isChaseBuy = true;
+  }
+
+  // 週線鎖解鎖限倉 40%（右側確認紀律）：週線鎖剛解鎖嗰陣，價錢已經離開最恐慌地板價（右側確認
+  //   起漲段），錯過咗最便宜嘅「黃金第一買點」，所以解鎖後第一筆買入（GOLDEN_BUY／逼空追擊）
+  //   倉位上限強制鎖定 40%，絕不給 80% 全倉。限倉只對第一筆買入生效：訊號發出後即解除，
+  //   後續再回踩出現新低位奇點且大勢 S1/S2 先按規則逐步加注。限倉同四態上限／規則 A 20% 上限
+  //   取最小值（S3 30% 仍然較細，唔受影響）；Tier 1（50%）本身已係 40%，限倉唔會再壓細佢。
+  //   結構突變即離場（下文）優先級更高：若同日週線突變觸發，FULL_CLEAR 會覆寫呢個買入，限倉唔消耗。
+  let isUnlockCapBuy = false;
+  if (signal === 'GOLDEN_BUY' && wbState.unlockCapActive) {
+    if (sizeRatio > WEEKLY_UNLOCK_BUY_CAP) {
+      sizeRatio = WEEKLY_UNLOCK_BUY_CAP;
+      isUnlockCapBuy = true;
+    }
+    // 限倉只對第一筆買入生效：無論今次買入係咪畀限倉壓細，訊號發出即解除（回測若因 canAct／
+    // entryLocked 擋走執行，引擎唔知情，下一筆買入會恢復正常倉位——呢個係引擎預先算 verdict 嘅固有限制）。
+    wbState.unlockCapActive = false;
+  }
+
+  // 結構突變即離場（Rule 2）：週線大陰跌穿前兩枝低位嗰日，唔問盈虧、唔看護盾，第一時間觸發
+  //   FULL_CLEAR（下一個開盤 100% 清倉），唔等跌穿月／季 50 線先割肉（AAPL 2012-10 見頂
+  //   第一時間逃頂，唔拖到 2013-01）。只在鎖定由 false→true 嘅觸發日覆寫一次；鎖定持續期間
+  //   其後嗰啲日只係 HOLD（maxBuyRatio=0 禁買），唔重複發清倉訊號。回測分支 D 會按
+  //   isWeeklyBreakClear 改寫 log 原因，唔會誤寫成「破月季 50 線」。
+  let isWeeklyBreakClear = false;
+  if (weeklyBreakJustTriggered) {
+    signal = 'FULL_CLEAR';
+    sizeRatio = 1.0;
+    isWeeklyBreakClear = true;
+  }
+
   const regimeBanner = isBullRegime
     ? '穩站月/季50之上・上升浪只買不空'
     : '跌穿月/季50之下・下跌浪禁買只空';
   const haTag = `日HA:${dBreakUp ? '升穿▲' : dBreakDown ? '跌穿▼' : dHaBull ? '陽' : '陰'}/週HA:${wBreakUp ? '升穿▲' : wBreakDown ? '跌穿▼' : curr.wHaBull ? '陽' : '陰'}`;
   let compactHint = `${regimeBanner}｜四態:${marketState}｜月50:$${m50Trend.toFixed(2)} 季50:$${q50Trend.toFixed(2)}｜${haTag}｜日TFDR:${dTfdr}`;
+  if (weeklyBreakLock) {
+    compactHint += `｜週線突變禁買鎖`;
+  } else if (monthlyTopLock) {
+    compactHint += `｜月線破底禁買鎖`;
+  } else if (monthlyOverheat) {
+    compactHint += `｜月線過熱・買入上限20%`;
+  }
+  if (isWeeklyBreakClear) {
+    compactHint += `｜週線大陰跌穿前兩枝・結構突變清倉`;
+  }
+  if (signal === 'GOLDEN_BUY' && buyTier != null) {
+    compactHint += buyTier === 1 ? `｜分級做T Tier1 50%` : `｜分級做T Tier2 100%`;
+  }
+  if (isChaseBuy) {
+    compactHint += `｜逼空追擊買40%`;
+  }
+  if (isUnlockCapBuy) {
+    compactHint += `｜解鎖限倉40%`;
+  }
 
   // 在 compactHint 標註本日扣扳機價位／現正武裝中的奇點價位，方便回測 log 與 UI 對數
   const armedLow = firedSellLow ?? firedShortLow ?? trigger.sellLow ?? trigger.shortLow;
@@ -1239,6 +1520,13 @@ export function evaluatePuzzleVerdict(
     marketState,
     maxBuyRatio,
     crossedBelowM50,
+    monthlyOverheat,
+    monthlyTopLock,
+    weeklyBreakLock,
+    isWeeklyBreakClear,
+    buyTier,
+    isChaseBuy,
+    isUnlockCapBuy,
     compactHint
   };
 }
@@ -1307,6 +1595,10 @@ export function buildFullPuzzleTimeline(allDailyBars: OHLCBar[]): FullTimelineRe
   // 奇點扣扳機狀態：全條時間軸共用同一個 tracker，按時間順序逐日推進（預警武裝 → 其後交易日收市穿破先扣扳機）。
   // 絕對唔可以每日起一個新 tracker，否則武裝永遠等唔到扣扳機。
   const singularityTracker = createSingularityTriggerState();
+  // 月線大頂風控狀態（規則 A＋B）：同樣全條時間軸共用同一個 state，逐日推進（曾觸及 90 嘅錨點要跨日保留）。
+  const monthlyTopState = createMonthlyTopState();
+  // 週線突變狀態（Rule 1＋2）：同樣全條時間軸共用同一個 state，逐日推進（禁買鎖要跨日保留，直到週線轉陽破高先解鎖）。
+  const weeklyBreakState = createWeeklyBreakState();
   let lastHighIdx = 0;
   let lastLowIdx = 0;
   let prevHighInterval = 14;
@@ -1495,10 +1787,29 @@ export function buildFullPuzzleTimeline(allDailyBars: OHLCBar[]): FullTimelineRe
       wHaBreakDown: liveW.haBreakDown,
       isMonthlyBreakDown: liveM.isPeriodHighLowBreakDown,
       isMonthlyBreakUp: liveM.isPeriodHighLowBreakUp,
+      isWeeklyBreakDown:
+        !liveW.haBull &&
+        liveW.currHaLow != null &&
+        liveW.prevHaLow != null &&
+        liveW.prev2HaLow != null &&
+        liveW.currHaLow < liveW.prevHaLow &&
+        liveW.currHaLow < liveW.prev2HaLow,
       currMHaHigh: liveM.currHaHigh,
       currMHaLow: liveM.currHaLow,
       prevMHaHigh: liveM.prevHaHigh,
       prevMHaLow: liveM.prevHaLow,
+      currWHaLow: liveW.currHaLow,
+      prevWHaLow: liveW.prevHaLow,
+      prev2WHaLow: liveW.prev2HaLow,
+      // 週線 HA 實體跌幅（只計收陰嗰陣；收陽為 0）。(a) 真大陰過濾：實體跌幅 > 1.2 倍週線 ATR，或 >= 3.5%。
+      wHaBodyDropPct:
+        !liveW.haBull && liveW.haOpen != null && liveW.haClose != null && liveW.haOpen > 0
+          ? Number((((liveW.haOpen - liveW.haClose) / liveW.haOpen) * 100).toFixed(2))
+          : 0,
+      wHaBodyDropAtr:
+        !liveW.haBull && liveW.haOpen != null && liveW.haClose != null && liveW.atr > 0
+          ? Number(((liveW.haOpen - liveW.haClose) / liveW.atr).toFixed(2))
+          : 0,
       qPeriodEnd: stateQ.snapshot.periodEnd,
       mPeriodEnd: stateM.snapshot.periodEnd,
       wPeriodEnd: stateW.snapshot.periodEnd
@@ -1506,7 +1817,7 @@ export function buildFullPuzzleTimeline(allDailyBars: OHLCBar[]): FullTimelineRe
     overlays[i] = point;
 
     const prevPoint = i > 0 ? overlays[i - 1] : point;
-    verdicts[i] = evaluatePuzzleVerdict(point, prevPoint, p20Low, singularityTracker, i);
+    verdicts[i] = evaluatePuzzleVerdict(point, prevPoint, p20Low, singularityTracker, i, monthlyTopState, weeklyBreakState);
 
     if (i === n - 1) {
       const rsiCloses: number[] = [];
