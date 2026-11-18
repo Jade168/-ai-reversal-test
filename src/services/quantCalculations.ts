@@ -1327,13 +1327,18 @@ export function runBacktestEngine(
       }
 
       // E. 上升浪高位止盈 45% (PARTIAL_PROFIT：日線>=88 奇點沽預警後，收市跌穿奇點 K 線最低位，保留 55% 核心底倉)
+      //     長牛護盾＋盈利鎖利：護盾開啟時（isLongBullShield：季 TFDR >= 50 且穩站季 50 線，或月 TFDR >= 55），
+      //     必須浮盈 >= +8%（todayOpen >= avgCost * 1.08）先可以高拋鎖利；未達標跳過本次減倉（奇點武裝已由引擎
+      //     喺 PARTIAL_PROFIT 觸發時清除，等下一個奇點頂再評估），徹底消滅慢牛股低賣高買內耗。
+      //     護盾關閉時（震盪／熊市）保命優先，破位即減倉，唔等盈利。
       if (
         longShares > 0 &&
         avgLongCost > 0 &&
         isBullRegime &&
         verdict.signal === 'PARTIAL_PROFIT' &&
         !partialTakenInLeg &&
-        canAct
+        canAct &&
+        !(verdict.isLongBullShield === true && todayOpen < avgLongCost * 1.08)
       ) {
         const ratio = verdict.sizeRatio > 0 ? Math.min(0.6, verdict.sizeRatio) : 0.45;
         const sellShares = Math.floor(longShares * ratio);

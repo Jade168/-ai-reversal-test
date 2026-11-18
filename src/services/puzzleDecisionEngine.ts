@@ -143,6 +143,7 @@ export interface PuzzleVerdict {
   lastSellPrice?: number | null; // 上次高拋成交參考價（收市價；回測會以實際 T 開盤成交價為準），供補回單 96% 折扣驗證
   isBuyback?: boolean; // 本次 GOLDEN_BUY 是否高拋後的補回單
   isStructuralStop?: boolean; // 本次 COVER_SHORT 是否結構止損（收市重返週線／月線 50 中間線），而非奇點買升穿平空
+  isLongBullShield?: boolean; // 長牛護盾是否開啟：(季 TFDR >= 50 且收市價穩站季線 50% 切線之上) 或 月 TFDR >= 55；護盾開啟時回測高拋必須浮盈 >= +8% 先可以執行
   compactHint: string;
 }
 
@@ -881,6 +882,12 @@ export function evaluatePuzzleVerdict(
   const aboveW50 = wMid50 != null ? close >= wMid50 : true;
   const isBullRegime = aboveM50 || aboveQ50;
   const isBearRegime = !isBullRegime; // close < m50Trend && close < q50Trend
+  // 長牛護盾（季 50 穩站）：(季 TFDR >= 50 且收市價穩站季線 50% 切線之上) 或 月 TFDR >= 55。
+  // 護盾開啟時，回測高拋必須滿足浮盈 >= +8%（todayOpen >= avgCost * 1.08）先可以執行；未達標跳過
+  // 本次減倉（奇點武裝已由引擎喺 PARTIAL_PROFIT 觸發時清除，等下一個奇點頂再評估）。護盾關閉時
+  // （震盪／熊市）保命優先，破位即減倉，唔等盈利。TFDR 未累積夠樣本時為 null，視為未達標。
+  const isLongBullShield =
+    ((curr.qTfdr ?? -1) >= 50 && close >= q50Trend) || (curr.mTfdr ?? -1) >= 55;
 
   const dHaBull = haClose > haOpen;
   const dHaTurnedBull = dHaBull && haClose > prev.haClose;
@@ -1177,6 +1184,7 @@ export function evaluatePuzzleVerdict(
     lastSellPrice: buybackRefPrice ?? trigger.lastSellPrice ?? null,
     isBuyback: isBuybackTrade,
     isStructuralStop,
+    isLongBullShield,
     compactHint
   };
 }
