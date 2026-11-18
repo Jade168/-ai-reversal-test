@@ -90,6 +90,40 @@ export type ConductionScenario =
   | 'SCENARIO_B_BULL_FLOOR'
   | 'TRANSITION';
 
+// 四態大勢分類：S1 主升浪強勢期（季>=60 且 月>=55，雙雙穩站 50 線）／S2 牛市健康洗盤期
+// （季>=60 且 月>=48，企穩季 50 線）／S3 牛熊過渡警戒期（季跌落 50–60）／S4 大跌浪防禦期
+// （價錢雙雙跌穿月／季 50 線）。季 TFDR 為 null 時（上市未滿 24 季）退化用價位判定。
+export type MarketState = 'S1' | 'S2' | 'S3' | 'S4';
+
+/** 四態大勢分類：傳入季／月 TFDR、收市價與季／月 50% 切線，回傳狀態與新買入上限。 */
+export function classifyMarketState(
+  qTfdr: number | null | undefined,
+  mTfdr: number | null | undefined,
+  close: number,
+  q50Trend: number,
+  m50Trend: number
+): { state: MarketState; maxBuyRatio: number } {
+  const aboveQ50 = close >= q50Trend;
+  const aboveM50 = close >= m50Trend;
+  // S4 優先：價錢雙雙跌穿月／季 50 線 → 清倉禁買
+  if (!aboveQ50 && !aboveM50) return { state: 'S4', maxBuyRatio: 0 };
+  const q = qTfdr ?? -1;
+  const m = mTfdr ?? -1;
+  // 季 TFDR 未累積夠樣本（上市未滿 24 季）→ 退化用價位判定：雙雙站穩 80%，只企穩一條線 30%
+  if (qTfdr == null) {
+    if (aboveQ50 && aboveM50) return { state: 'S1', maxBuyRatio: 0.8 };
+    return { state: 'S3', maxBuyRatio: 0.3 };
+  }
+  // S1：主升浪強勢期（季>=60 且 月>=55，雙雙穩站 50 線）
+  if (q >= 60 && m >= 55 && aboveQ50 && aboveM50) return { state: 'S1', maxBuyRatio: 0.8 };
+  // S2：牛市健康洗盤期（季線強勢護航，月線回調至 50 附近洗盤）
+  if (q >= 60 && m >= 48 && aboveQ50) return { state: 'S2', maxBuyRatio: 0.8 };
+  // S3：牛熊過渡警戒期（季線跌落 50–60）
+  if (q >= 50 && q < 60) return { state: 'S3', maxBuyRatio: 0.3 };
+  // 其餘（季 < 50 但價錢仍企穩至少一條線；或季 >= 60 但月深回調 < 48）→ 保守試探倉 30%
+  return { state: 'S3', maxBuyRatio: 0.3 };
+}
+
 export interface PuzzleVerdict {
   isPuzzleCross: boolean;
   signal:
@@ -143,7 +177,10 @@ export interface PuzzleVerdict {
   lastSellPrice?: number | null; // 上次高拋成交參考價（收市價；回測會以實際 T 開盤成交價為準），供補回單 96% 折扣驗證
   isBuyback?: boolean; // 本次 GOLDEN_BUY 是否高拋後的補回單
   isStructuralStop?: boolean; // 本次 COVER_SHORT 是否結構止損（收市重返週線／月線 50 中間線），而非奇點買升穿平空
-  isLongBullShield?: boolean; // 長牛護盾是否開啟：(季 TFDR >= 50 且收市價穩站季線 50% 切線之上) 或 月 TFDR >= 55；護盾開啟時回測高拋必須浮盈 >= +8% 先可以執行
+  isLongBullShield?: boolean; // 長牛護盾是否開啟：四態制下只在主升浪（S1）與牛市洗盤（S2）開啟；護盾開啟時回測高拋必須浮盈 >= +8% 先可以執行
+  marketState?: MarketState; // 四態大勢：S1 主升浪 / S2 牛市洗盤 / S3 過渡警戒 / S4 大跌浪防禦
+  maxBuyRatio?: number; // 該態新買入上限：S1/S2 0.80，S3 0.30，S4 0
+  crossedBelowM50?: boolean; // 本日收市首次由上往下跌穿月 50 線（前日收市在線上，本日收市在線下）
   compactHint: string;
 }
 
@@ -882,12 +919,25 @@ export function evaluatePuzzleVerdict(
   const aboveW50 = wMid50 != null ? close >= wMid50 : true;
   const isBullRegime = aboveM50 || aboveQ50;
   const isBearRegime = !isBullRegime; // close < m50Trend && close < q50Trend
-  // 長牛護盾（季 50 穩站）：(季 TFDR >= 50 且收市價穩站季線 50% 切線之上) 或 月 TFDR >= 55。
-  // 護盾開啟時，回測高拋必須滿足浮盈 >= +8%（todayOpen >= avgCost * 1.08）先可以執行；未達標跳過
-  // 本次減倉（奇點武裝已由引擎喺 PARTIAL_PROFIT 觸發時清除，等下一個奇點頂再評估）。護盾關閉時
-  // （震盪／熊市）保命優先，破位即減倉，唔等盈利。TFDR 未累積夠樣本時為 null，視為未達標。
-  const isLongBullShield =
-    ((curr.qTfdr ?? -1) >= 50 && close >= q50Trend) || (curr.mTfdr ?? -1) >= 55;
+  // 四態大勢分類（季 60／月 55／月 48 門檻；季 TFDR 為 null 時退化用價位判定）。
+  // 門檻經真實數據校準：AAPL 慢牛股季線強勢中樞約 58，設 65 會卡死八年零交易，設 60 先入到 S1/S2；
+  // 季線跌落 50–60（NVDA 2026-10-28 季 62）即入 S3 試探倉 30%，封死假反彈重倉。
+  const { state: marketState, maxBuyRatio } = classifyMarketState(
+    curr.qTfdr,
+    curr.mTfdr,
+    close,
+    q50Trend,
+    m50Trend
+  );
+  // 月 50 線首次穿越：前日收市在線上、本日收市跌穿線下（只在穿越瞬間成立一次，下一日
+  // 前日收市已在線下即不再觸發）。供狀態③減半倉分支用。
+  const prevM50Trend = prev.mMid ?? prev.mMid50 ?? m50Trend;
+  const crossedBelowM50 = prev.close >= prevM50Trend && close < m50Trend;
+  // 長牛護盾（四態制）：只在主升浪（S1）與牛市洗盤（S2）開啟。護盾開啟時，回測高拋必須滿足
+  // 浮盈 >= +8%（todayOpen >= avgCost * 1.08）先可以執行；未達標跳過本次減倉（奇點武裝已由引擎
+  // 喺 PARTIAL_PROFIT 觸發時清除，等下一個奇點頂再評估）。狀態③過渡期保命優先，破位即減倉，
+  // 唔等盈利。TFDR 未累積夠樣本時為 null，退化分類已處理。
+  const isLongBullShield = marketState === 'S1' || marketState === 'S2';
 
   const dHaBull = haClose > haOpen;
   const dHaTurnedBull = dHaBull && haClose > prev.haClose;
@@ -992,7 +1042,8 @@ export function evaluatePuzzleVerdict(
         isBuybackTrade = isBuyback;
         buybackRefPrice = trigger.lastSellPrice;
         signal = 'GOLDEN_BUY';
-        sizeRatio = 0.80;
+        // 買入倉位跟四態大勢上限：S1/S2 重倉 80%，S3 試探倉 30%（回測再以 maxBuyRatio 設上限作雙重保障）
+        sizeRatio = maxBuyRatio;
         isPuzzleCross = true;
         tfdrTurnUp = true;
         invalidationPrice = Number(Math.min(fullClearLine, Math.min(prior20Low, low) * 0.96).toFixed(2));
@@ -1106,7 +1157,7 @@ export function evaluatePuzzleVerdict(
     ? '穩站月/季50之上・上升浪只買不空'
     : '跌穿月/季50之下・下跌浪禁買只空';
   const haTag = `日HA:${dBreakUp ? '升穿▲' : dBreakDown ? '跌穿▼' : dHaBull ? '陽' : '陰'}/週HA:${wBreakUp ? '升穿▲' : wBreakDown ? '跌穿▼' : curr.wHaBull ? '陽' : '陰'}`;
-  let compactHint = `${regimeBanner}｜月50:$${m50Trend.toFixed(2)} 季50:$${q50Trend.toFixed(2)}｜${haTag}｜日TFDR:${dTfdr}`;
+  let compactHint = `${regimeBanner}｜四態:${marketState}｜月50:$${m50Trend.toFixed(2)} 季50:$${q50Trend.toFixed(2)}｜${haTag}｜日TFDR:${dTfdr}`;
 
   // 在 compactHint 標註本日扣扳機價位／現正武裝中的奇點價位，方便回測 log 與 UI 對數
   const armedLow = firedSellLow ?? firedShortLow ?? trigger.sellLow ?? trigger.shortLow;
@@ -1185,6 +1236,9 @@ export function evaluatePuzzleVerdict(
     isBuyback: isBuybackTrade,
     isStructuralStop,
     isLongBullShield,
+    marketState,
+    maxBuyRatio,
+    crossedBelowM50,
     compactHint
   };
 }

@@ -1091,17 +1091,14 @@ export function runBacktestEngine(
   let shortEntryNetProceeds = 0; // 已扣開空 0.25% 成本之每股淨收入
   let lastActionBarIndex = -999;
 
-  let peakEquity = initialFund; // 真實全歷史淨值峰值（嚴格誠實計算 maxDrawdown）
-  let riskPeakEquity = initialFund; // 風控狀態機專用基準峰值
+  let peakEquity = initialFund; // 真實全歷史淨值峰值（嚴格誠實計算 maxDrawdown；永不重置）
   let maxDrawdown = 0;
   let latestCloseDrawdown = 0;
-  let latestRiskDrawdown = 0;
 
-  // 25% 回撤熔斷與滯後重啟狀態機 (Hysteresis)
-  let isHalted = false;
-  let haltStabilized = false;
-  let needHaltReduceNextOpen = false;
-  let daysWithoutNewLow = 0;
+  // 全局峰值開倉暫停鎖（取代舊 25% 熔斷 HALT_REDUCE）：總淨值對永不重置的全局歷史最高淨值
+  // 回撤 > 25% 時，暫停一切新開倉（做多、補回、沽空）；回撤收窄回 < 15% 以內先解鎖。鎖定期間
+  // 減倉（高拋／狀態③減半）、破線清倉、平空照常執行——唔再喺地板上強制砍倉割肉。
+  let entryLocked = false;
   let partialTakenInLeg = false;
   // 回測實際高拋成交價（T 開盤價），供補回單 96% 折扣驗證——以實際成交為準，而非 verdict 的收市參考價
   let lastSellPriceExec: number | null = null;
@@ -1126,111 +1123,25 @@ export function runBacktestEngine(
       const verdict = verdicts[prevIdx];
       const prior20Low = prior20Lows[prevIdx];
 
-      if (prevBar.low >= prior20Low) {
-        daysWithoutNewLow += 1;
-      } else {
-        daysWithoutNewLow = 0;
-      }
-
       const signalDate = prevOverlay.date;
       const execDate = currBar.date;
       const hintBase = verdict.compactHint;
       const m50 = prevOverlay.mMid ?? prevOverlay.mMid50 ?? prevBar.close;
       const q50 = prevOverlay.qMid ?? prevOverlay.qMid50 ?? prevBar.close;
+
+      // 全局峰值開倉暫停鎖：以前一交易日收市回撤為準（與 T-1 決策時序一致）——回撤 > 25% 上鎖，
+      // 收窄回 < 15% 先解鎖（滯後區間避免反覆開關）。
+      if (!entryLocked && latestCloseDrawdown > 0.25) entryLocked = true;
+      else if (entryLocked && latestCloseDrawdown < 0.15) entryLocked = false;
+      // 死鎖防護：若系統已全數平倉（無多單、無空單），淨值凍結、回撤永遠唔會收窄，單靠
+      // 「回撤 < 15%」永遠解唔到鎖（實測：NVDA 2022-05-10 清倉後鎖死 4 年半、零交易，錯失
+      // 其後十倍升浪）。呢個狀態下鎖倉已無意義（無倉位可保護），直接解鎖，等下一個合規訊號
+      // （牛市買入／熊市沽空）再入場。鎖倉的本意係「唔好喺深虧時加倉」，唔係「清倉後永久停擺」。
+      if (entryLocked && longShares === 0 && shortShares === 0) entryLocked = false;
       const w50 = prevOverlay.wMid50 ?? prevBar.close;
       const isBullRegime = Boolean(verdict.reasons.isBullRegime ?? verdict.regime === 'BULL');
       const isBearRegime = !isBullRegime;
       const canAct = i - lastActionBarIndex >= 3;
-
-      // A. 觸發停機熔斷後 T 日開盤：僅在下跌浪或虧損部位時減半控險；上升浪大勢內之獲利核心多單堅決死抱不亂砍
-      if (needHaltReduceNextOpen && (longShares > 0 || shortShares > 0)) {
-        if (longShares > 0 && verdict.signal === 'FULL_CLEAR') {
-          needHaltReduceNextOpen = false;
-        } else if (longShares > 0 && (isBearRegime || todayOpen < avgLongCost)) {
-          const reduceShares = Math.max(1, Math.floor(longShares * 0.5));
-          const netExitPrice = todayOpen * (1 - FEE_RATE);
-          const pnlRatio = avgLongCost > 0 ? (netExitPrice - avgLongCost) / avgLongCost : 0;
-          cashPool += reduceShares * netExitPrice;
-          trades.push({ profit: pnlRatio });
-
-          longShares -= reduceShares;
-          if (longShares === 0) avgLongCost = 0;
-          needHaltReduceNextOpen = false;
-          lastActionBarIndex = i;
-          const profitPct = Number((pnlRatio * 100).toFixed(2));
-
-          tradeLogs.unshift({
-            date: execDate,
-            signalDate,
-            execDate,
-            puzzleHint: hintBase,
-            complianceTag: '✅ 精準執行',
-            type: 'HALT_REDUCE',
-            action: '🛑 熔斷停機・強制減半控險',
-            shares: reduceShares,
-            units: '回撤>25%減倉50%',
-            confidence: `熔斷狀態機觸發 (回撤 ${(latestRiskDrawdown * 100).toFixed(1)}%>25%)`,
-            price: todayOpen.toFixed(2),
-            totalHolding: longShares,
-            holdingType: longShares > 0 ? 'LONG' : 'EMPTY',
-            source: `T-1淨值回撤超過 25% 且虧損/轉熊，T開盤減半 50% 控險`,
-            profitPct,
-            profit: profitPct,
-            msg: `[${execDate}] 🛑 熔斷停機・強制減半控險 ${reduceShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
-          });
-        } else if (shortShares > 0) {
-          const coverShares = shortShares;
-          const grossCostPrice = todayOpen * (1 + FEE_RATE);
-          const pnlRatio =
-            shortEntryGross > 0 ? (shortEntryNetProceeds - grossCostPrice) / shortEntryGross : 0;
-          cashPool -= coverShares * grossCostPrice;
-          trades.push({ profit: pnlRatio });
-          shortShares = 0;
-          shortEntryGross = 0;
-          shortEntryNetProceeds = 0;
-          needHaltReduceNextOpen = false;
-          lastActionBarIndex = i;
-          const profitPct = Number((pnlRatio * 100).toFixed(2));
-
-          tradeLogs.unshift({
-            date: execDate,
-            signalDate,
-            execDate,
-            puzzleHint: hintBase,
-            complianceTag: '✅ 精準執行',
-            type: 'COVER_SHORT',
-            action: '💎 熔斷保護・空單平倉',
-            shares: coverShares,
-            units: '回撤>25%全數平空',
-            confidence: `熔斷狀態機平空控險`,
-            price: todayOpen.toFixed(2),
-            totalHolding: 0,
-            holdingType: 'EMPTY',
-            source: `T-1回撤超25%，T開盤強制平空控險`,
-            profitPct,
-            profit: profitPct,
-            msg: `[${execDate}] 💎 熔斷保護・空單平倉 ${coverShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
-          });
-        } else {
-          needHaltReduceNextOpen = false;
-        }
-      } else {
-        needHaltReduceNextOpen = false;
-      }
-
-      // B. 滯後重啟判定 (Hysteresis)
-      let justRestartedFromHalt = false;
-      if (isHalted) {
-        if (isBullRegime && daysWithoutNewLow >= 5) {
-          haltStabilized = true;
-        }
-        if (haltStabilized && verdict.signal === 'GOLDEN_BUY') {
-          isHalted = false;
-          haltStabilized = false;
-          justRestartedFromHalt = true;
-          riskPeakEquity = cashPool + longShares * prevBar.close - shortShares * prevBar.close;
-        }
-      }
 
       // C. 空單平倉 (收復月/季50上升浪大勢 OR 日線奇點買升穿平空 OR 收市重返週線／月線50結構止損平空)
       //     已取消舊 -8% 固定百分比硬止損（開盤價計，震盪市反覆掃損）：止損改由引擎端結構止損 verdict（COVER_SHORT + isStructuralStop）觸發，
@@ -1327,10 +1238,10 @@ export function runBacktestEngine(
       }
 
       // E. 上升浪高位止盈 45% (PARTIAL_PROFIT：日線>=88 奇點沽預警後，收市跌穿奇點 K 線最低位，保留 55% 核心底倉)
-      //     長牛護盾＋盈利鎖利：護盾開啟時（isLongBullShield：季 TFDR >= 50 且穩站季 50 線，或月 TFDR >= 55），
+      //     長牛護盾＋盈利鎖利：護盾開啟時（isLongBullShield：四態 S1 主升浪或 S2 牛市洗盤），
       //     必須浮盈 >= +8%（todayOpen >= avgCost * 1.08）先可以高拋鎖利；未達標跳過本次減倉（奇點武裝已由引擎
       //     喺 PARTIAL_PROFIT 觸發時清除，等下一個奇點頂再評估），徹底消滅慢牛股低賣高買內耗。
-      //     護盾關閉時（震盪／熊市）保命優先，破位即減倉，唔等盈利。
+      //     護盾關閉時（狀態③過渡／震盪／熊市）保命優先，破位即減倉，唔等盈利。
       if (
         longShares > 0 &&
         avgLongCost > 0 &&
@@ -1383,6 +1294,60 @@ export function runBacktestEngine(
         }
       }
 
+      // E2. 狀態③過渡警戒減半倉（一次性穿越觸發）：四態 S3（季 TFDR 50–60）期間，收市首次由上往下
+      //     跌穿月 50 線（crossedBelowM50：前日收市在線上、本日收市在線下），且當前多單倉位 > 40%
+      //     淨值時，執行一次減倉至 40% 上限。穿越條件本身只在穿越瞬間成立一次，絕不每日重複觸發。
+      //     與高拋鎖利（E）完全隔離：唔設 partialTakenInLeg、唔記錄 lastSellPrice（唔係高拋，補回
+      //     折扣唔適用）；亦唔受 canAct 操作間距限制（破位防守，唔可以因為三日前買過就拖住唔減），
+      //     同破線清倉（D）一樣係強制防守分支。減倉後若價錢再跌穿季 50 線，D 分支會清埋餘倉。
+      if (
+        longShares > 0 &&
+        avgLongCost > 0 &&
+        verdict.marketState === 'S3' &&
+        verdict.crossedBelowM50 === true
+      ) {
+        const equityNow = cashPool + longShares * todayOpen - shortShares * todayOpen;
+        const longValue = longShares * todayOpen;
+        const positionRatio = equityNow > 0 ? longValue / equityNow : 0;
+        if (positionRatio > 0.4) {
+          const targetLongValue = 0.4 * equityNow;
+          const sellShares = Math.max(0, Math.floor((longValue - targetLongValue) / todayOpen));
+          const orderValue = sellShares * todayOpen;
+
+          if (sellShares > 0 && orderValue >= minOrderValue) {
+            const netExitPrice = todayOpen * (1 - FEE_RATE);
+            const pnlRatio = (netExitPrice - avgLongCost) / avgLongCost;
+            cashPool += sellShares * netExitPrice;
+            trades.push({ profit: pnlRatio });
+
+            longShares -= sellShares;
+            if (longShares === 0) avgLongCost = 0;
+            lastActionBarIndex = i;
+            const profitPct = Number((pnlRatio * 100).toFixed(2));
+
+            tradeLogs.unshift({
+              date: execDate,
+              signalDate,
+              execDate,
+              puzzleHint: hintBase,
+              complianceTag: '✅ 精準執行',
+              type: 'HALVE',
+              action: '🛡️ 狀態③・跌破月50線減半倉至40%',
+              shares: sellShares,
+              units: `倉位 ${(positionRatio * 100).toFixed(0)}% → 40% 上限`,
+              confidence: `狀態③過渡帶｜${prevOverlay.qTfdr != null ? `季TFDR ${prevOverlay.qTfdr} 在 50–60` : '季TFDR 未累積・價位退化判定'}｜收市首次跌穿月50 $${m50.toFixed(2)}`,
+              price: todayOpen.toFixed(2),
+              totalHolding: longShares,
+              holdingType: longShares > 0 ? 'LONG' : 'EMPTY',
+              source: `狀態③過渡警戒期，收市首次由上往下跌穿月 50 線 $${m50.toFixed(2)}，持倉由 ${(positionRatio * 100).toFixed(0)}% 減至 40% 上限防守`,
+              profitPct,
+              profit: profitPct,
+              msg: `[${execDate}] 🛡️ 狀態③・跌破月50線減半倉至40% ${sellShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+            });
+          }
+        }
+      }
+
       // F0. 高拋補回單的 T 開盤折扣驗證：若今日本是補回單（GOLDEN_BUY 且有上次沽價），但 T 開盤價未低過
       //     上次沽價 ×96%，唔成交、留 pending 等下一個交易日（唔取消武裝）；轉入下跌浪即取消 pending。
       if (pendingBuyback != null && isBearRegime) pendingBuyback = null;
@@ -1399,13 +1364,14 @@ export function runBacktestEngine(
         pendingBuyback != null &&
         shortShares === 0 &&
         isBullRegime &&
-        (justRestartedFromHalt || canAct) &&
+        !entryLocked &&
+        canAct &&
         todayOpen > pendingBuyback.singularityHigh &&
         (buybackExpired || todayOpen < pendingBuyback.lastSellPrice * 0.96) &&
         (prevOverlay.wMid50 == null || todayOpen >= prevOverlay.wMid50);
       const suppressGoldenBuy =
         verdict.signal === 'GOLDEN_BUY' &&
-        (justRestartedFromHalt || canAct) &&
+        canAct &&
         isBuybackVerdict &&
         buybackRefPrice != null &&
         todayOpen >= buybackRefPrice * 0.96;
@@ -1428,14 +1394,21 @@ export function runBacktestEngine(
           ? buybackRefPrice
           : null;
 
-      // F. 上升浪低位重倉買入 80% (GOLDEN_BUY：收市升穿奇點最高位；補回單另須週線未穿 50 且成交價 < 上次沽價 ×96%，未滿足則延期而非取消)
+      // F. 上升浪低位買入 (GOLDEN_BUY：收市升穿奇點最高位；補回單另須週線未穿 50 且成交價 < 上次沽價 ×96%，未滿足則延期而非取消)
+      //     買入倉位跟四態大勢上限（S1/S2 80%，S3 30%），並受全局峰值開倉暫停鎖約束（鎖定期間唔開新倉）。
       if (
         shortShares === 0 &&
         isBullRegime &&
+        !entryLocked &&
         ((verdict.signal === 'GOLDEN_BUY' && !suppressGoldenBuy) || pendingBuybackReady) &&
-        (justRestartedFromHalt || canAct)
+        canAct
       ) {
-        const ratio = verdict.sizeRatio > 0 ? Math.min(1, verdict.sizeRatio) : 0.8;
+        // 四態上限雙重保障：引擎已按 marketState 設 sizeRatio，回測再以 verdict.maxBuyRatio 設上限
+        const stateCap = verdict.maxBuyRatio ?? 0.8;
+        const ratio = Math.min(
+          verdict.sizeRatio > 0 ? Math.min(1, verdict.sizeRatio) : 0.8,
+          stateCap
+        );
         const targetCash = cashPool * ratio;
         const shares = Math.floor(targetCash / (todayOpen * (1 + FEE_RATE)));
         const orderValue = shares * todayOpen;
@@ -1443,9 +1416,6 @@ export function runBacktestEngine(
         if (shares > 0 && orderValue >= minOrderValue) {
           const totalCost = orderValue * (1 + FEE_RATE);
           cashPool -= totalCost;
-          if (longShares === 0) {
-            riskPeakEquity = cashPool + shares * todayOpen;
-          }
           avgLongCost = (longShares * avgLongCost + totalCost) / (longShares + shares);
           longShares += shares;
           lastActionBarIndex = i;
@@ -1454,8 +1424,6 @@ export function runBacktestEngine(
           pendingBuyback = null;
           lastSellPriceExec = null;
           lastSellIndexExec = null;
-          isHalted = false;
-          haltStabilized = false;
 
           const pctLabel = Math.round(ratio * 100);
           const inBand = todayOpen <= Math.max(w50 * 1.15, prevBar.high * 1.05);
@@ -1489,10 +1457,12 @@ export function runBacktestEngine(
       }
 
       // G. 下跌浪順勢開空 35% (SHORT_ENTRY：跌穿月/季50之下 ＋ 反彈觸發奇點沽後收市跌穿奇點 K 線最低位)
+      //     受全局峰值開倉暫停鎖約束（鎖定期間唔開新空單）。
       if (
         longShares === 0 &&
         shortShares === 0 &&
         isBearRegime &&
+        !entryLocked &&
         verdict.signal === 'SHORT_ENTRY' &&
         canAct
       ) {
@@ -1532,25 +1502,14 @@ export function runBacktestEngine(
       }
     }
 
-    // 每日收盤更新歷史最高淨值與回撤狀態機（同步計入多單市值或空單負債）
+    // 每日收盤更新歷史最高淨值與回撤（同步計入多單市值或空單負債）；peakEquity 永不重置，
+    // 係全局峰值開倉暫停鎖的基準——總回撤以佢計，唔再有局部重置熔斷。
     const equity = cashPool + longShares * currBar.close - shortShares * currBar.close;
     if (equity > peakEquity) peakEquity = equity;
-    if (equity > riskPeakEquity) riskPeakEquity = equity;
 
     if (peakEquity > 0) {
       latestCloseDrawdown = (peakEquity - equity) / peakEquity;
       maxDrawdown = Math.max(maxDrawdown, latestCloseDrawdown * 100);
-    }
-
-    if (riskPeakEquity > 0) {
-      latestRiskDrawdown = (riskPeakEquity - equity) / riskPeakEquity;
-      if (!isHalted && latestRiskDrawdown > 0.25) {
-        isHalted = true;
-        haltStabilized = false;
-        if (longShares > 0 || shortShares > 0) {
-          needHaltReduceNextOpen = true;
-        }
-      }
     }
   }
 
