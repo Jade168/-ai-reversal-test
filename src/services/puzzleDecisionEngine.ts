@@ -142,6 +142,7 @@ export interface PuzzleVerdict {
   singularityDate?: string | null; // 觸發／武裝中的奇點 K 線日期
   lastSellPrice?: number | null; // 上次高拋成交參考價（收市價；回測會以實際 T 開盤成交價為準），供補回單 96% 折扣驗證
   isBuyback?: boolean; // 本次 GOLDEN_BUY 是否高拋後的補回單
+  isStructuralStop?: boolean; // 本次 COVER_SHORT 是否結構止損（收市重返週線／月線 50 中間線），而非奇點買升穿平空
   compactHint: string;
 }
 
@@ -767,7 +768,9 @@ export const SINGULARITY_BUY_TFDR = 25;
 export const SINGULARITY_SHORT_TFDR = 80;
 export const SINGULARITY_COVER_TFDR = 25;
 export const PARTIAL_PROFIT_RATIO = 0.45; // 高拋鎖利 45%，保留 55% 核心底倉
-export const BUYBACK_DISCOUNT = 0.96; // 高拋後補回單：成交價必須低於上次沽價 ×96%
+export const BUYBACK_DISCOUNT = 0.96; // 高拋後補回單：成交價必須低於上次沽價 ×96%（只限同波段 30 個交易日內）
+export const LAST_SELL_EXPIRY_BARS = 30; // lastSellPrice 過期：高拋後超過 30 個交易日，96% 折扣錨點作廢，下一輪買入視為全新入場
+export const SHORT_COOLDOWN_BARS = 15; // 空單止損平空後 15 個交易日內嚴禁重複開空（防連環止損冷卻）
 
 /** 跨交易日保存的奇點武裝狀態：必須由 buildFullPuzzleTimeline 按時間順序逐日傳入同一個 tracker，絕不能逐日重建。 */
 export interface SingularityTriggerState {
@@ -780,6 +783,9 @@ export interface SingularityTriggerState {
   coverHigh: number | null;
   coverDate: string | null;
   lastSellPrice: number | null;
+  lastSellIndex: number | null; // 高拋當日的 K 線索引（供 30 個交易日過期判斷）
+  shortOpen: boolean; // 時間軸模型中的空單在手狀態（SHORT_ENTRY 設 true，任何 COVER_SHORT／轉回上升浪設 false）
+  shortCooldownUntil: number | null; // 嚴禁開空直至該 K 線索引（含）：空單止損平空後設為止損日 + 15
   // 簇內極值 K 線的價位（賣出／沽空：簇內最高 high；買入／平空：簇內最低 low）
   sellBestHigh: number | null;
   buyBestLow: number | null;
@@ -798,6 +804,9 @@ export function createSingularityTriggerState(): SingularityTriggerState {
     coverHigh: null,
     coverDate: null,
     lastSellPrice: null,
+    lastSellIndex: null,
+    shortOpen: false,
+    shortCooldownUntil: null,
     sellBestHigh: null,
     buyBestLow: null,
     shortBestHigh: null,
@@ -821,17 +830,22 @@ function haHighOf(curr: OverlayPoint): number {
  *   → 100% 禁空只買：日 TFDR <= 25 觸發「奇點買」預警後武裝奇點最高位，收市升穿先 80% 重倉買入坐貨；
  *     日 TFDR >= 88 觸發「奇點沽」預警後武裝奇點最低位，收市跌穿先減倉 45%（留55%底倉）。
  *     高拋後的補回單另須週線未穿 50 中位（收市 ≥ wMid50）且成交價低於上次沽價 ×96%。
+ *     lastSellPrice 設有 30 個交易日過期：高拋後超過 30 日未補回，折扣錨點作廢，下一輪買入視為全新入場；
+ *     股價跌穿月/季 50 轉熊時亦會即時清除 lastSellPrice，重返 50 線之上即全新一輪。
  * - 下跌浪大勢 (isBearRegime): price < mMid50 && price < qMid50
  *   → 清倉禁買只空：立即清倉多單；日 TFDR >= 80 觸發「奇點沽」預警後武裝奇點最低位，收市跌穿先開立 35% 輕倉空單；
  *     日 TFDR <= 25 觸發「奇點買」預警後武裝奇點最高位，收市升穿先 100% 平空。
+ *     空單取消 -8% 硬止損，改為結構止損：收市重返週線／月線 50 中間線之上即平空止損，止損後 15 個交易日內嚴禁重複開空。
  * 注意：本函數係有狀態的——tracker 必須跨日共用。直接呼叫而不傳 tracker 時會用全新狀態，當日只會武裝、唔會扣扳機。
  */
 export function evaluatePuzzleVerdict(
   curr: OverlayPoint,
   prev: OverlayPoint,
   prior20Low: number,
-  tracker?: SingularityTriggerState
+  tracker?: SingularityTriggerState,
+  barIndex?: number
 ): PuzzleVerdict {
+  const idx = barIndex ?? -1; // K 線索引：buildFullPuzzleTimeline 傳入；唔傳時（-1）30 日過期與 15 日冷卻無法計算，一律沿用舊有保守行為
   const { close, low, haOpen, haClose, dTfdr, qMid50, mMid50, wMid50 } = curr;
   const m50Trend = curr.mMid ?? mMid50;
   const q50Trend = curr.qMid ?? qMid50;
@@ -918,6 +932,7 @@ export function evaluatePuzzleVerdict(
   let firedCoverDate: string | null = null;
   let buybackRefPrice: number | null = null;
   let isBuybackTrade = false;
+  let isStructuralStop = false;
 
   if (isBullRegime) {
     // 轉回上升浪：清除下跌浪的沽空武裝；多單的 lastSellPrice 保留作補回折扣參考
@@ -927,6 +942,21 @@ export function evaluatePuzzleVerdict(
     trigger.coverHigh = null;
     trigger.coverDate = null;
     trigger.coverBestLow = null;
+    // 重返上升浪即平空止損：當時有空單在手，回測會喺下一開盤平空；此後 15 個交易日內嚴禁重複開空（防震盪連環止損）
+    if (trigger.shortOpen) {
+      trigger.shortOpen = false;
+      if (idx >= 0) trigger.shortCooldownUntil = idx + SHORT_COOLDOWN_BARS;
+    }
+    // lastSellPrice 30 個交易日過期：同波段高拋低吸窗口已過，折扣錨點作廢，下一輪買入視為全新入場
+    if (
+      trigger.lastSellPrice != null &&
+      trigger.lastSellIndex != null &&
+      idx >= 0 &&
+      idx - trigger.lastSellIndex > LAST_SELL_EXPIRY_BARS
+    ) {
+      trigger.lastSellPrice = null;
+      trigger.lastSellIndex = null;
+    }
 
     // (1) 先檢查賣出扣扳機：收市跌穿早前已武裝的奇點最低位。
     //     必須用武裝前的價位檢查，唔可以用本日新低即時拉低佢，否則永遠觸發唔到。
@@ -934,6 +964,7 @@ export function evaluatePuzzleVerdict(
       firedSellLow = trigger.sellLow;
       firedSellDate = trigger.sellDate;
       trigger.lastSellPrice = close;
+      trigger.lastSellIndex = idx >= 0 ? idx : null;
       buybackRefPrice = close;
       trigger.sellLow = null;
       trigger.sellDate = null;
@@ -962,7 +993,10 @@ export function evaluatePuzzleVerdict(
         trigger.buyDate = null;
         trigger.buyBestLow = null;
         // 補回單已成交（以收市價作參考），清除 lastSellPrice，下一輪高拋先會重新設定
-        if (isBuyback) trigger.lastSellPrice = null;
+        if (isBuyback) {
+          trigger.lastSellPrice = null;
+          trigger.lastSellIndex = null;
+        }
       } else {
         // 高拋補回條件未滿足（週線穿 50 或未平過上次沽價 96%）：堅決唔買，保留武裝等下一個交易日
         signal = 'HOLD';
@@ -989,7 +1023,8 @@ export function evaluatePuzzleVerdict(
     }
   } else {
     // ═══ 下跌浪大勢 (清倉禁買・只空不買) ═══
-    // 轉入下跌浪：清除上升浪的武裝；全數清倉後補回折扣不再適用
+    // 轉入下跌浪：清除上升浪的武裝；全數清倉後補回折扣不再適用。
+    // 呢個清除同時就係「重返 50 線重置」：股價跌穿月/季 50 線嗰一刻錨點已經清零，日後重新升穿並站穩 50 線之上，買入即全新一輪，唔受舊沽價限制。
     trigger.sellLow = null;
     trigger.sellDate = null;
     trigger.sellBestHigh = null;
@@ -997,6 +1032,7 @@ export function evaluatePuzzleVerdict(
     trigger.buyDate = null;
     trigger.buyBestLow = null;
     trigger.lastSellPrice = null;
+    trigger.lastSellIndex = null;
 
     // (1) 先檢查平空扣扳機：收市升穿早前已武裝的奇點最高位
     if (trigger.coverHigh != null && close > trigger.coverHigh) {
@@ -1005,15 +1041,37 @@ export function evaluatePuzzleVerdict(
       trigger.coverHigh = null;
       trigger.coverDate = null;
       trigger.coverBestLow = null;
+      trigger.shortOpen = false;
       signal = 'COVER_SHORT';
       sizeRatio = 1.0;
-    } else if (trigger.shortLow != null && close < trigger.shortLow) {
-      // (2) 再檢查沽空扣扳機：收市跌穿早前已武裝的奇點最低位
+    } else if (
+      trigger.shortOpen &&
+      ((wMid50 != null && close >= wMid50) || (mMid50 != null && close >= mMid50))
+    ) {
+      // (1b) 結構止損平空：收市重返週線／月線 50 中間線之上，下跌浪論述失效（取代舊 -8% 硬止損，避免震盪洗盤掃損）
+      isStructuralStop = true;
+      trigger.shortOpen = false;
+      if (idx >= 0) trigger.shortCooldownUntil = idx + SHORT_COOLDOWN_BARS;
+      trigger.shortLow = null;
+      trigger.shortDate = null;
+      trigger.shortBestHigh = null;
+      trigger.coverHigh = null;
+      trigger.coverDate = null;
+      trigger.coverBestLow = null;
+      signal = 'COVER_SHORT';
+      sizeRatio = 1.0;
+    } else if (
+      trigger.shortLow != null &&
+      close < trigger.shortLow &&
+      (trigger.shortCooldownUntil == null || idx < 0 || idx > trigger.shortCooldownUntil)
+    ) {
+      // (2) 再檢查沽空扣扳機：收市跌穿早前已武裝的奇點最低位；止損冷卻期內嚴禁重複開空
       firedShortLow = trigger.shortLow;
       firedShortDate = trigger.shortDate;
       trigger.shortLow = null;
       trigger.shortDate = null;
       trigger.shortBestHigh = null;
+      trigger.shortOpen = true;
       signal = 'SHORT_ENTRY';
       sizeRatio = 0.35;
     } else {
@@ -1052,6 +1110,8 @@ export function evaluatePuzzleVerdict(
     compactHint += `｜升穿奇點高 $${firedBuyHigh.toFixed(2)}${isBuybackTrade ? '・補回單' : ''}`;
   } else if (signal === 'SHORT_ENTRY' && firedShortLow != null) {
     compactHint += `｜跌穿奇點低 $${firedShortLow.toFixed(2)}・沽空35%`;
+  } else if (signal === 'COVER_SHORT' && isStructuralStop) {
+    compactHint += `｜重返週線／月線50・結構止損平空`;
   } else if (signal === 'COVER_SHORT' && firedCoverHigh != null) {
     compactHint += `｜升穿奇點高 $${firedCoverHigh.toFixed(2)}・平空`;
   } else if (armedLow != null && isBullRegime) {
@@ -1116,6 +1176,7 @@ export function evaluatePuzzleVerdict(
       null,
     lastSellPrice: buybackRefPrice ?? trigger.lastSellPrice ?? null,
     isBuyback: isBuybackTrade,
+    isStructuralStop,
     compactHint
   };
 }
@@ -1383,7 +1444,7 @@ export function buildFullPuzzleTimeline(allDailyBars: OHLCBar[]): FullTimelineRe
     overlays[i] = point;
 
     const prevPoint = i > 0 ? overlays[i - 1] : point;
-    verdicts[i] = evaluatePuzzleVerdict(point, prevPoint, p20Low, singularityTracker);
+    verdicts[i] = evaluatePuzzleVerdict(point, prevPoint, p20Low, singularityTracker, i);
 
     if (i === n - 1) {
       const rsiCloses: number[] = [];

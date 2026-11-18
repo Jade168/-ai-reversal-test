@@ -11,7 +11,7 @@ import {
   MonthlyStrategyResult,
   ReversalAnchor
 } from '../types/quant';
-import { buildFullPuzzleTimeline, OHLCBar } from './puzzleDecisionEngine';
+import { buildFullPuzzleTimeline, LAST_SELL_EXPIRY_BARS, OHLCBar } from './puzzleDecisionEngine';
 
 export const QUANT_CONFIG = {
   coreNumber: 1836.15,
@@ -1105,6 +1105,8 @@ export function runBacktestEngine(
   let partialTakenInLeg = false;
   // 回測實際高拋成交價（T 開盤價），供補回單 96% 折扣驗證——以實際成交為準，而非 verdict 的收市參考價
   let lastSellPriceExec: number | null = null;
+  // 高拋成交當日的 K 線索引（供 30 個交易日過期判斷，與引擎端 lastSellIndex 一致，僅差 T 開盤一日）
+  let lastSellIndexExec: number | null = null;
   // 高拋補回單延期狀態：T 開盤價未低過上次沽價 ×96% 而未成交時保留，之後交易日再驗（轉入下跌浪即取消）
   let pendingBuyback: { singularityHigh: number; lastSellPrice: number; date: string } | null = null;
 
@@ -1230,15 +1232,12 @@ export function runBacktestEngine(
         }
       }
 
-      // C. 空單平倉 (收復月/季50上升浪大勢 OR 日線<=18轉陽升穿 OR 空單8%硬止損)
-      const shortStopHit =
-        shortShares > 0 &&
-        shortEntryGross > 0 &&
-        (todayOpen - shortEntryGross) / shortEntryGross >= 0.08;
+      // C. 空單平倉 (收復月/季50上升浪大勢 OR 日線奇點買升穿平空 OR 收市重返週線／月線50結構止損平空)
+      //     已取消舊 -8% 固定百分比硬止損（開盤價計，震盪市反覆掃損）：止損改由引擎端結構止損 verdict（COVER_SHORT + isStructuralStop）觸發，
+      //     止損後 15 個交易日內嚴禁重複開空（引擎端 shortCooldownUntil）。
       if (
         shortShares > 0 &&
-        (shortStopHit ||
-          isBullRegime ||
+        (isBullRegime ||
           verdict.signal === 'COVER_SHORT' ||
           verdict.signal === 'GOLDEN_BUY')
       ) {
@@ -1262,29 +1261,29 @@ export function runBacktestEngine(
           puzzleHint: hintBase,
           complianceTag: '✅ 精準執行',
           type: 'COVER_SHORT',
-          action: shortStopHit
-            ? '🛑 順勢引擎・空單8%止損平倉'
-            : isBullRegime
+          action: isBullRegime
             ? '💎 順勢引擎・收復50線禁空平倉'
+            : verdict.isStructuralStop
+            ? '🛑 順勢引擎・重返週線／月線50結構止損平空'
             : '💎 順勢引擎・奇點買升穿高位平空',
           shares: coverShares,
-          units: shortStopHit
-            ? '8%止損平空100%'
-            : isBullRegime
+          units: isBullRegime
             ? '升穿月/季50線禁空平倉100%'
+            : verdict.isStructuralStop
+            ? '重返週線／月線50止損平空100%'
             : '奇點買升穿奇點高平空100%',
           confidence: `月50:$${m50.toFixed(2)} / 季50:$${q50.toFixed(2)}｜日TFDR:${prevOverlay.dTfdr}`,
           price: todayOpen.toFixed(2),
           totalHolding: 0,
           holdingType: 'EMPTY',
-          source: shortStopHit
-            ? `觸及空單 8% 風控止損線，開盤全數平空`
-            : isBullRegime
+          source: isBullRegime
             ? `收復月/季 50 中間線重返上升浪（只買不空），開盤立即 100% 平空`
+            : verdict.isStructuralStop
+            ? `收市重返週線／月線 50 中間線之上，下跌浪論述失效，開盤全數平空止損（其後 15 個交易日內嚴禁重複開空）`
             : `下跌浪觸發奇點買 (日TFDR ${prevOverlay.dTfdr}≤25) 後收市升穿奇點 K 線最高位 $${(verdict.singularityHigh ?? prevBar.high).toFixed(2)}，空單 100% 平倉`,
           profitPct,
           profit: profitPct,
-          msg: `[${execDate}] ${isBullRegime ? '💎 順勢引擎・收復50線禁空平倉' : '💎 順勢引擎・奇點買升穿高位平空'} ${coverShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+          msg: `[${execDate}] ${isBullRegime ? '💎 順勢引擎・收復50線禁空平倉' : verdict.isStructuralStop ? '🛑 順勢引擎・結構止損平空' : '💎 順勢引擎・奇點買升穿高位平空'} ${coverShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
         });
       }
 
@@ -1301,6 +1300,7 @@ export function runBacktestEngine(
         partialTakenInLeg = false;
         // 全數清倉後，高拋補回折扣不再適用（下一輪買入係全新入場，唔係補回單）
         lastSellPriceExec = null;
+        lastSellIndexExec = null;
         pendingBuyback = null;
         lastActionBarIndex = i;
         const profitPct = Number((pnlRatio * 100).toFixed(2));
@@ -1349,8 +1349,9 @@ export function runBacktestEngine(
           if (longShares === 0) avgLongCost = 0;
           lastActionBarIndex = i;
           partialTakenInLeg = true;
-          // 記錄實際高拋成交價（T 開盤價），供其後補回單 96% 折扣驗證
+          // 記錄實際高拋成交價（T 開盤價）與成交日索引，供其後補回單 96% 折扣驗證與 30 日過期判斷
           lastSellPriceExec = todayOpen;
+          lastSellIndexExec = i;
           const profitPct = Number((pnlRatio * 100).toFixed(2));
           const lockPct = Math.round(ratio * 100);
           const keepPct = 100 - lockPct;
@@ -1386,13 +1387,16 @@ export function runBacktestEngine(
       const buybackRefPrice = lastSellPriceExec;
       const isBuybackVerdict =
         verdict.signal === 'GOLDEN_BUY' && verdict.isBuyback === true && buybackRefPrice != null;
+      // 高拋 30 個交易日過期：距離上次高拋成交已超過 30 日，96% 折扣錨點作廢，pending 補回單視為全新買入（與引擎端 lastSellPrice 過期規則一致）
+      const buybackExpired =
+        lastSellIndexExec != null && i - lastSellIndexExec > LAST_SELL_EXPIRY_BARS;
       const pendingBuybackReady =
         pendingBuyback != null &&
         shortShares === 0 &&
         isBullRegime &&
         (justRestartedFromHalt || canAct) &&
         todayOpen > pendingBuyback.singularityHigh &&
-        todayOpen < pendingBuyback.lastSellPrice * 0.96 &&
+        (buybackExpired || todayOpen < pendingBuyback.lastSellPrice * 0.96) &&
         (prevOverlay.wMid50 == null || todayOpen >= prevOverlay.wMid50);
       const suppressGoldenBuy =
         verdict.signal === 'GOLDEN_BUY' &&
@@ -1411,10 +1415,11 @@ export function runBacktestEngine(
         pendingBuybackReady && pendingBuyback
           ? pendingBuyback.singularityHigh
           : verdict.singularityHigh ?? prevBar.high;
+      // 已過期的 pending 補回單視為全新買入，唔再標示為補回單（否則 log 會錯誤寫成「開盤 < 沽價×96%」）
       const execBuybackRef =
-        pendingBuybackReady && pendingBuyback
+        pendingBuybackReady && pendingBuyback && !buybackExpired
           ? pendingBuyback.lastSellPrice
-          : isBuybackVerdict
+          : isBuybackVerdict && !buybackExpired
           ? buybackRefPrice
           : null;
 
@@ -1443,6 +1448,7 @@ export function runBacktestEngine(
           // 買入已成交（無論係全新買入定補回單），清除補回延期狀態同上次沽價參考
           pendingBuyback = null;
           lastSellPriceExec = null;
+          lastSellIndexExec = null;
           isHalted = false;
           haltStabilized = false;
 
