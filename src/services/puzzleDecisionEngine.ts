@@ -134,8 +134,14 @@ export interface PuzzleVerdict {
     isBearRegime?: boolean;
   };
   regime: 'BULL' | 'NEUTRAL' | 'BEAR';
-  sizeRatio: number; // 0 / 0.35 / 0.4 / 0.8 / 1.0
+  sizeRatio: number; // 0 / 0.35 / 0.45 / 0.8 / 1.0
   invalidationPrice: number | null;
+  // 奇點扣扳機價位（只作預警的奇點本身唔會直接觸發交易；以下價位先係扣扳機線）
+  singularityLow?: number | null; // 賣出／沽空用：奇點 K 線（及平均K線）最低位，收市跌穿先扣扳機
+  singularityHigh?: number | null; // 買入／平空用：奇點 K 線（及平均K線）最高位，收市升穿先扣扳機
+  singularityDate?: string | null; // 觸發／武裝中的奇點 K 線日期
+  lastSellPrice?: number | null; // 上次高拋成交參考價（收市價；回測會以實際 T 開盤成交價為準），供補回單 96% 折扣驗證
+  isBuyback?: boolean; // 本次 GOLDEN_BUY 是否高拋後的補回單
   compactHint: string;
 }
 
@@ -744,16 +750,87 @@ function getEffectiveBox50(state: IncrementalPeriodState): {
 }
 
 /**
+ * 奇點扣扳機紀律（最純粹實戰標準）：奇點信號只係預警，絕不即日跟單。
+ * - 賣出：日 TFDR ≥ 88 觸發上方紅色「奇點沽」預警後，武裝該奇點 K 線最低位；其後收市跌穿先高拋 45%（留 55% 底倉）。
+ * - 買入：上升浪內日 TFDR ≤ 25 觸發綠色「奇點買」預警後，武裝該奇點 K 線最高位；其後收市升穿先買入。
+ * - 沽空：下跌浪內日 TFDR ≥ 80 觸發「奇點沽」預警後，武裝奇點最低位；收市跌穿先開 35% 輕倉空單。
+ * - 平空：下跌浪內日 TFDR ≤ 25 觸發「奇點買」預警後，武裝奇點最高位；收市升穿先全數平空。
+ * 扣扳機一律用「收市價」穿破（唔用盤中最低／最高價），避免假突破；同一根 K 線唔可以又武裝又扣扳機，
+ * 因為奇點 K 線本身的收市價永遠唔會跌穿自己的最低位／升穿自己的最高位，預警與扣扳機之間至少相隔一日。
+ * 奇點簇價位：預警持續期間，「奇點 K 線」指簇內極值 K 線——賣出／沽空取最高價最高的 K 線（與主圖
+ * tfdrTurningPoints 取最高 high 的標記一致），其最低位就係扣扳機線；買入／平空取最低價最低的 K 線，
+ * 其最高位就係扣扳機線。預警中斷後再出現新預警，視為新一簇奇點，重新記錄。咁樣先食得盡強勢鈍化，
+ * 又唔會因為第一日預警的低位太遠而永遠觸發唔到。
+ */
+export const SINGULARITY_SELL_TFDR = 88;
+export const SINGULARITY_BUY_TFDR = 25;
+export const SINGULARITY_SHORT_TFDR = 80;
+export const SINGULARITY_COVER_TFDR = 25;
+export const PARTIAL_PROFIT_RATIO = 0.45; // 高拋鎖利 45%，保留 55% 核心底倉
+export const BUYBACK_DISCOUNT = 0.96; // 高拋後補回單：成交價必須低於上次沽價 ×96%
+
+/** 跨交易日保存的奇點武裝狀態：必須由 buildFullPuzzleTimeline 按時間順序逐日傳入同一個 tracker，絕不能逐日重建。 */
+export interface SingularityTriggerState {
+  sellLow: number | null;
+  sellDate: string | null;
+  buyHigh: number | null;
+  buyDate: string | null;
+  shortLow: number | null;
+  shortDate: string | null;
+  coverHigh: number | null;
+  coverDate: string | null;
+  lastSellPrice: number | null;
+  // 簇內極值 K 線的價位（賣出／沽空：簇內最高 high；買入／平空：簇內最低 low）
+  sellBestHigh: number | null;
+  buyBestLow: number | null;
+  shortBestHigh: number | null;
+  coverBestLow: number | null;
+}
+
+export function createSingularityTriggerState(): SingularityTriggerState {
+  return {
+    sellLow: null,
+    sellDate: null,
+    buyHigh: null,
+    buyDate: null,
+    shortLow: null,
+    shortDate: null,
+    coverHigh: null,
+    coverDate: null,
+    lastSellPrice: null,
+    sellBestHigh: null,
+    buyBestLow: null,
+    shortBestHigh: null,
+    coverBestLow: null
+  };
+}
+
+/** 奇點 K 線（及平均K線）最低位 = 原 K 線 low 與平均K線 open/close 三者最低。 */
+function haLowOf(curr: OverlayPoint): number {
+  return Math.min(curr.low, curr.haOpen, curr.haClose);
+}
+
+/** 奇點 K 線（及平均K線）最高位 = 原 K 線 high 與平均K線 open/close 三者最高。 */
+function haHighOf(curr: OverlayPoint): number {
+  return Math.max(curr.high, curr.haOpen, curr.haClose);
+}
+
+/**
  * 純順勢月/季 50 中間線分水嶺決策引擎：
  * - 上升浪大勢 (isBullRegime): price >= mMid50 || price >= qMid50（以月/季50生命中軸為準，早期樣本未滿則回退箱體50%）
- *   → 100% 禁空只買：日 TFDR <= 25 且日 HA 轉陽升穿前高 => 80% 重倉買入坐貨；日 TFDR >= 88 且日/週雙 HA 跌破前低 => 減倉 40%（留60%底倉）
+ *   → 100% 禁空只買：日 TFDR <= 25 觸發「奇點買」預警後武裝奇點最高位，收市升穿先 80% 重倉買入坐貨；
+ *     日 TFDR >= 88 觸發「奇點沽」預警後武裝奇點最低位，收市跌穿先減倉 45%（留55%底倉）。
+ *     高拋後的補回單另須週線未穿 50 中位（收市 ≥ wMid50）且成交價低於上次沽價 ×96%。
  * - 下跌浪大勢 (isBearRegime): price < mMid50 && price < qMid50
- *   → 清倉禁買只空：立即清倉多單；日 TFDR >= 80 且轉陰跌穿前低 => 開立 35% 輕倉空單；日 TFDR <= 18 且轉陽升穿或收復多頭 => 100% 平空
+ *   → 清倉禁買只空：立即清倉多單；日 TFDR >= 80 觸發「奇點沽」預警後武裝奇點最低位，收市跌穿先開立 35% 輕倉空單；
+ *     日 TFDR <= 25 觸發「奇點買」預警後武裝奇點最高位，收市升穿先 100% 平空。
+ * 注意：本函數係有狀態的——tracker 必須跨日共用。直接呼叫而不傳 tracker 時會用全新狀態，當日只會武裝、唔會扣扳機。
  */
 export function evaluatePuzzleVerdict(
   curr: OverlayPoint,
   prev: OverlayPoint,
-  prior20Low: number
+  prior20Low: number,
+  tracker?: SingularityTriggerState
 ): PuzzleVerdict {
   const { close, low, haOpen, haClose, dTfdr, qMid50, mMid50, wMid50 } = curr;
   const m50Trend = curr.mMid ?? mMid50;
@@ -828,36 +905,133 @@ export function evaluatePuzzleVerdict(
   let tfdrTurnUp = false;
   let invalidationPrice = fullClearLine;
 
+  // ── 奇點扣扳機狀態（由 buildFullPuzzleTimeline 逐日傳入共用 tracker；唔傳 tracker 時用全新狀態，當日只能武裝、唔會扣扳機）──
+  const trigger = tracker ?? createSingularityTriggerState();
+  // 本日扣扳機時記錄的已觸發價位（供 verdict 回傳；未觸發時回傳現正武裝中的價位）
+  let firedSellLow: number | null = null;
+  let firedBuyHigh: number | null = null;
+  let firedShortLow: number | null = null;
+  let firedCoverHigh: number | null = null;
+  let firedSellDate: string | null = null;
+  let firedBuyDate: string | null = null;
+  let firedShortDate: string | null = null;
+  let firedCoverDate: string | null = null;
+  let buybackRefPrice: number | null = null;
+  let isBuybackTrade = false;
+
   if (isBullRegime) {
-    // ═══ 上升浪大勢 (只買不空・100% 禁空) ═══
-    if (dTfdr >= 88 && dBreakDown && wBreakDown) {
-      // 高位止盈：日線 >= 88 極頂奇點 AND 日/週雙平均K跌破前低 → 減倉 40%，留 60% 核心底倉
+    // 轉回上升浪：清除下跌浪的沽空武裝；多單的 lastSellPrice 保留作補回折扣參考
+    trigger.shortLow = null;
+    trigger.shortDate = null;
+    trigger.shortBestHigh = null;
+    trigger.coverHigh = null;
+    trigger.coverDate = null;
+    trigger.coverBestLow = null;
+
+    // (1) 先檢查賣出扣扳機：收市跌穿早前已武裝的奇點最低位。
+    //     必須用武裝前的價位檢查，唔可以用本日新低即時拉低佢，否則永遠觸發唔到。
+    if (trigger.sellLow != null && close < trigger.sellLow) {
+      firedSellLow = trigger.sellLow;
+      firedSellDate = trigger.sellDate;
+      trigger.lastSellPrice = close;
+      buybackRefPrice = close;
+      trigger.sellLow = null;
+      trigger.sellDate = null;
+      trigger.sellBestHigh = null;
       signal = 'PARTIAL_PROFIT';
-      sizeRatio = 0.40;
-    } else if (dTfdr <= 25 && dHaBull && dBreakUp) {
-      // 低位扣扳機：日線 TFDR <= 25 (13/23 綠色地板帶) 且日 HA 轉陽升穿前高 → 80% 重倉買入坐貨
-      signal = 'GOLDEN_BUY';
-      sizeRatio = 0.80;
-      isPuzzleCross = true;
-      tfdrTurnUp = true;
-      invalidationPrice = Number(Math.min(fullClearLine, Math.min(prior20Low, low) * 0.96).toFixed(2));
+      sizeRatio = PARTIAL_PROFIT_RATIO;
+    } else if (trigger.buyHigh != null && close > trigger.buyHigh) {
+      // (2) 再檢查買入扣扳機：收市升穿早前已武裝的奇點最高位
+      firedBuyHigh = trigger.buyHigh;
+      firedBuyDate = trigger.buyDate;
+      const isBuyback = trigger.lastSellPrice != null;
+      const weeklyNotBroken = wMid50 == null ? true : close >= wMid50;
+      const discountOk =
+        !isBuyback ||
+        trigger.lastSellPrice == null ||
+        close < trigger.lastSellPrice * BUYBACK_DISCOUNT;
+      if (!isBuyback || (weeklyNotBroken && discountOk)) {
+        isBuybackTrade = isBuyback;
+        buybackRefPrice = trigger.lastSellPrice;
+        signal = 'GOLDEN_BUY';
+        sizeRatio = 0.80;
+        isPuzzleCross = true;
+        tfdrTurnUp = true;
+        invalidationPrice = Number(Math.min(fullClearLine, Math.min(prior20Low, low) * 0.96).toFixed(2));
+        trigger.buyHigh = null;
+        trigger.buyDate = null;
+        trigger.buyBestLow = null;
+        // 補回單已成交（以收市價作參考），清除 lastSellPrice，下一輪高拋先會重新設定
+        if (isBuyback) trigger.lastSellPrice = null;
+      } else {
+        // 高拋補回條件未滿足（週線穿 50 或未平過上次沽價 96%）：堅決唔買，保留武裝等下一個交易日
+        signal = 'HOLD';
+        sizeRatio = 0;
+      }
     } else {
-      // 大勢未轉熊 → 死抱核心倉位觀望
+      // (3) 無扣扳機：只做預警武裝／更新奇點簇極值 K 線（賣出：簇內最高 high 的 K 線；買入：簇內最低 low 的 K 線）
+      if (dTfdr >= SINGULARITY_SELL_TFDR) {
+        if (trigger.sellLow == null || curr.high > (trigger.sellBestHigh ?? -Infinity)) {
+          trigger.sellLow = haLowOf(curr);
+          trigger.sellBestHigh = curr.high;
+          trigger.sellDate = curr.date;
+        }
+      }
+      if (dTfdr <= SINGULARITY_BUY_TFDR) {
+        if (trigger.buyHigh == null || curr.low < (trigger.buyBestLow ?? Infinity)) {
+          trigger.buyHigh = haHighOf(curr);
+          trigger.buyBestLow = curr.low;
+          trigger.buyDate = curr.date;
+        }
+      }
       signal = 'HOLD';
       sizeRatio = 0;
     }
   } else {
     // ═══ 下跌浪大勢 (清倉禁買・只空不買) ═══
-    if (dTfdr <= 18 && dHaBull && dBreakUp) {
-      // 下跌浪極底反彈平空：日線 <= 18 且轉陽升穿 → 100% 平空
+    // 轉入下跌浪：清除上升浪的武裝；全數清倉後補回折扣不再適用
+    trigger.sellLow = null;
+    trigger.sellDate = null;
+    trigger.sellBestHigh = null;
+    trigger.buyHigh = null;
+    trigger.buyDate = null;
+    trigger.buyBestLow = null;
+    trigger.lastSellPrice = null;
+
+    // (1) 先檢查平空扣扳機：收市升穿早前已武裝的奇點最高位
+    if (trigger.coverHigh != null && close > trigger.coverHigh) {
+      firedCoverHigh = trigger.coverHigh;
+      firedCoverDate = trigger.coverDate;
+      trigger.coverHigh = null;
+      trigger.coverDate = null;
+      trigger.coverBestLow = null;
       signal = 'COVER_SHORT';
       sizeRatio = 1.0;
-    } else if (dTfdr >= 80 && !dHaBull && dBreakDown) {
-      // 下跌浪反彈沽空：日線 >= 80 上緣奇點且轉陰跌穿前低 → 開立 35% 輕倉空單
+    } else if (trigger.shortLow != null && close < trigger.shortLow) {
+      // (2) 再檢查沽空扣扳機：收市跌穿早前已武裝的奇點最低位
+      firedShortLow = trigger.shortLow;
+      firedShortDate = trigger.shortDate;
+      trigger.shortLow = null;
+      trigger.shortDate = null;
+      trigger.shortBestHigh = null;
       signal = 'SHORT_ENTRY';
       sizeRatio = 0.35;
     } else {
-      // 跌穿且不升穿月/季50中間線 → 立即 100% 清空多單，嚴禁任何做多抄底
+      // (3) 無扣扳機：只做預警武裝／更新奇點簇極值 K 線（沽空：簇內最高 high 的 K 線；平空：簇內最低 low 的 K 線）；其餘時間立即 100% 清空多單，嚴禁抄底
+      if (dTfdr >= SINGULARITY_SHORT_TFDR) {
+        if (trigger.shortLow == null || curr.high > (trigger.shortBestHigh ?? -Infinity)) {
+          trigger.shortLow = haLowOf(curr);
+          trigger.shortBestHigh = curr.high;
+          trigger.shortDate = curr.date;
+        }
+      }
+      if (dTfdr <= SINGULARITY_COVER_TFDR) {
+        if (trigger.coverHigh == null || curr.low < (trigger.coverBestLow ?? Infinity)) {
+          trigger.coverHigh = haHighOf(curr);
+          trigger.coverBestLow = curr.low;
+          trigger.coverDate = curr.date;
+        }
+      }
       signal = 'FULL_CLEAR';
       sizeRatio = 1.0;
     }
@@ -867,7 +1041,28 @@ export function evaluatePuzzleVerdict(
     ? '穩站月/季50之上・上升浪只買不空'
     : '跌穿月/季50之下・下跌浪禁買只空';
   const haTag = `日HA:${dBreakUp ? '升穿▲' : dBreakDown ? '跌穿▼' : dHaBull ? '陽' : '陰'}/週HA:${wBreakUp ? '升穿▲' : wBreakDown ? '跌穿▼' : curr.wHaBull ? '陽' : '陰'}`;
-  const compactHint = `${regimeBanner}｜月50:$${m50Trend.toFixed(2)} 季50:$${q50Trend.toFixed(2)}｜${haTag}｜日TFDR:${dTfdr}`;
+  let compactHint = `${regimeBanner}｜月50:$${m50Trend.toFixed(2)} 季50:$${q50Trend.toFixed(2)}｜${haTag}｜日TFDR:${dTfdr}`;
+
+  // 在 compactHint 標註本日扣扳機價位／現正武裝中的奇點價位，方便回測 log 與 UI 對數
+  const armedLow = firedSellLow ?? firedShortLow ?? trigger.sellLow ?? trigger.shortLow;
+  const armedHigh = firedBuyHigh ?? firedCoverHigh ?? trigger.buyHigh ?? trigger.coverHigh;
+  if (signal === 'PARTIAL_PROFIT' && firedSellLow != null) {
+    compactHint += `｜跌穿奇點低 $${firedSellLow.toFixed(2)}・高拋45%`;
+  } else if (signal === 'GOLDEN_BUY' && firedBuyHigh != null) {
+    compactHint += `｜升穿奇點高 $${firedBuyHigh.toFixed(2)}${isBuybackTrade ? '・補回單' : ''}`;
+  } else if (signal === 'SHORT_ENTRY' && firedShortLow != null) {
+    compactHint += `｜跌穿奇點低 $${firedShortLow.toFixed(2)}・沽空35%`;
+  } else if (signal === 'COVER_SHORT' && firedCoverHigh != null) {
+    compactHint += `｜升穿奇點高 $${firedCoverHigh.toFixed(2)}・平空`;
+  } else if (armedLow != null && isBullRegime) {
+    compactHint += `｜奇點沽已預警・跌穿 $${armedLow.toFixed(2)} 才賣`;
+  } else if (armedHigh != null && isBullRegime) {
+    compactHint += `｜奇點買已預警・升穿 $${armedHigh.toFixed(2)} 才買`;
+  } else if (armedLow != null && isBearRegime) {
+    compactHint += `｜奇點沽已預警・跌穿 $${armedLow.toFixed(2)} 才沽空`;
+  } else if (armedHigh != null && isBearRegime) {
+    compactHint += `｜奇點買已預警・升穿 $${armedHigh.toFixed(2)} 才平空`;
+  }
 
   return {
     isPuzzleCross,
@@ -907,6 +1102,20 @@ export function evaluatePuzzleVerdict(
     regime,
     sizeRatio,
     invalidationPrice,
+    singularityLow: firedSellLow ?? firedShortLow ?? trigger.sellLow ?? trigger.shortLow ?? null,
+    singularityHigh: firedBuyHigh ?? firedCoverHigh ?? trigger.buyHigh ?? trigger.coverHigh ?? null,
+    singularityDate:
+      firedSellDate ??
+      firedBuyDate ??
+      firedShortDate ??
+      firedCoverDate ??
+      trigger.sellDate ??
+      trigger.buyDate ??
+      trigger.shortDate ??
+      trigger.coverDate ??
+      null,
+    lastSellPrice: buybackRefPrice ?? trigger.lastSellPrice ?? null,
+    isBuyback: isBuybackTrade,
     compactHint
   };
 }
@@ -972,6 +1181,9 @@ export function buildFullPuzzleTimeline(allDailyBars: OHLCBar[]): FullTimelineRe
   const stateQ = createPeriodState(8, 1, 24, 12);
 
   const haD: { open: number; close: number; high: number; low: number; isBull: boolean }[] = new Array(n);
+  // 奇點扣扳機狀態：全條時間軸共用同一個 tracker，按時間順序逐日推進（預警武裝 → 其後交易日收市穿破先扣扳機）。
+  // 絕對唔可以每日起一個新 tracker，否則武裝永遠等唔到扣扳機。
+  const singularityTracker = createSingularityTriggerState();
   let lastHighIdx = 0;
   let lastLowIdx = 0;
   let prevHighInterval = 14;
@@ -1171,7 +1383,7 @@ export function buildFullPuzzleTimeline(allDailyBars: OHLCBar[]): FullTimelineRe
     overlays[i] = point;
 
     const prevPoint = i > 0 ? overlays[i - 1] : point;
-    verdicts[i] = evaluatePuzzleVerdict(point, prevPoint, p20Low);
+    verdicts[i] = evaluatePuzzleVerdict(point, prevPoint, p20Low, singularityTracker);
 
     if (i === n - 1) {
       const rsiCloses: number[] = [];
@@ -1506,13 +1718,13 @@ export function computePuzzleDecision(
   const regimeLabel = trendBannerLabel;
 
   const actionTitleMap: Record<PuzzleVerdict['signal'], string> = {
-    GOLDEN_BUY: '🔥 上升浪低位奇點轉陽・80% 重倉買入坐貨（只買不空）',
+    GOLDEN_BUY: '🔥 上升浪升穿奇點高・80% 重倉買入坐貨（只買不空）',
     ADD_POSITION: '🟢 上升浪低位加倉坐貨',
-    PARTIAL_PROFIT: '🟠 日線≥88極頂＋日週雙HA跌穿・減倉40%（保留60%核心底倉）',
+    PARTIAL_PROFIT: '🟠 奇點沽跌穿奇點低・減倉45%（保留55%核心底倉）',
     FULL_CLEAR: '🚨 跌穿月/季50中間線・100%清倉多單並嚴禁做多',
     HALT_REDUCE: '🛑 回撤熔斷控險・減半倉位',
-    SHORT_ENTRY: '🟣 下跌浪日線≥80反彈轉陰跌穿・開立35%輕倉空單',
-    COVER_SHORT: '💎 日線≤18轉陽升穿或收復50線・100%平空',
+    SHORT_ENTRY: '🟣 下跌浪奇點沽跌穿奇點低・開立35%輕倉空單',
+    COVER_SHORT: '💎 奇點買升穿奇點高或收復50線・100%平空',
     HOLD: isBullRegime
       ? '🛡️ 穩站月/季50之上・死抱核心多單不瞎折騰（100%禁空）'
       : '🚫 跌穿月/季50之下・空倉禁買靜待≥80反彈沽空訊號'
@@ -1580,16 +1792,26 @@ export function computePuzzleDecision(
 
   if (verdict.signal === 'GOLDEN_BUY') {
     reasons.push(
-      `穩站月/季50之上，日線TFDR回調至 ${dTfdr} (≤25) 且日HA轉陽升穿前高，重倉買入 80% 坐貨吃主升浪`
+      `穩站月/季50之上，收市升穿奇點最高位 $${verdict.singularityHigh?.toFixed(2) ?? '—'}（奇點買預警後扣扳機）${
+        verdict.isBuyback
+          ? `，高拋補回：週線未穿 50 且低於上次沽價 $${verdict.lastSellPrice?.toFixed(2) ?? '—'} 的 96%`
+          : ''
+      }，重倉買入 80% 坐貨吃主升浪`
     );
   } else if (verdict.signal === 'PARTIAL_PROFIT') {
-    reasons.push(`上升浪日線達 ${dTfdr} (≥88) 且日/週HA雙重跌破前低，減倉 40% 鎖利、保留 60% 核心底倉`);
+    reasons.push(
+      `奇點沽預警（日TFDR ${dTfdr} ≥88）後收市跌穿奇點 K 線最低位 $${verdict.singularityLow?.toFixed(2) ?? '—'}，減倉 45% 鎖利、保留 55% 核心底倉`
+    );
   } else if (verdict.signal === 'FULL_CLEAR') {
     reasons.push(`價格跌穿月50($${m50Line.toFixed(2)})與季50($${q50Line.toFixed(2)})雙分水嶺，立即 100% 清空多單並嚴禁抄底`);
   } else if (verdict.signal === 'SHORT_ENTRY') {
-    reasons.push(`下跌浪反彈日線達 ${dTfdr} (≥80) 且日HA轉陰跌穿前低，開立 35% 輕倉空單`);
+    reasons.push(
+      `下跌浪反彈觸發奇點沽（日TFDR ${dTfdr} ≥80）後收市跌穿奇點 K 線最低位 $${verdict.singularityLow?.toFixed(2) ?? '—'}，開立 35% 輕倉空單`
+    );
   } else if (verdict.signal === 'COVER_SHORT') {
-    reasons.push(`日TFDR(${dTfdr})≤18 且日HA升穿前高，空單 100% 平倉`);
+    reasons.push(
+      `下跌浪觸發奇點買後收市升穿奇點 K 線最高位 $${verdict.singularityHigh?.toFixed(2) ?? '—'}，空單 100% 平倉`
+    );
   }
 
   const keyPoints: string[] = [

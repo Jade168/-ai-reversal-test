@@ -1015,6 +1015,9 @@ export function calculateCosmicReversalSignal(klineData: RawKline[], currentPeri
 /**
  * ⚡ 統一拼圖量化回測引擎（季/月/週 50% 平衡切線 ＋ 動態奇點 ＋ T+1 開盤驗假破）
  * 強制使用 T-1 日凍結決策 + 時空提示單，於第 T 日開盤價 dailyData[i].open 驗假破成交，並扣除單邊 0.25% 綜合成本。
+ * 奇點扣扳機紀律（見 puzzleDecisionEngine.ts）：奇點信號只係預警，verdict 本身已經只會喺收市穿破奇點
+ * K 線高／低位嗰日先發出 GOLDEN_BUY / PARTIAL_PROFIT / SHORT_ENTRY / COVER_SHORT；回測喺 T 開盤執行，
+ * 補回單另須 T 開盤價低於實際上次高拋成交價 ×96%，未滿足就延期而非取消。
  */
 export function runBacktestEngine(
   modelData: ModelBar[],
@@ -1100,6 +1103,10 @@ export function runBacktestEngine(
   let needHaltReduceNextOpen = false;
   let daysWithoutNewLow = 0;
   let partialTakenInLeg = false;
+  // 回測實際高拋成交價（T 開盤價），供補回單 96% 折扣驗證——以實際成交為準，而非 verdict 的收市參考價
+  let lastSellPriceExec: number | null = null;
+  // 高拋補回單延期狀態：T 開盤價未低過上次沽價 ×96% 而未成交時保留，之後交易日再驗（轉入下跌浪即取消）
+  let pendingBuyback: { singularityHigh: number; lastSellPrice: number; date: string } | null = null;
 
   const trades: { profit: number }[] = [];
   const tradeLogs: TradeLog[] = [];
@@ -1259,13 +1266,13 @@ export function runBacktestEngine(
             ? '🛑 順勢引擎・空單8%止損平倉'
             : isBullRegime
             ? '💎 順勢引擎・收復50線禁空平倉'
-            : '💎 順勢引擎・18極底轉陽平空',
+            : '💎 順勢引擎・奇點買升穿高位平空',
           shares: coverShares,
           units: shortStopHit
             ? '8%止損平空100%'
             : isBullRegime
             ? '升穿月/季50線禁空平倉100%'
-            : '日<=18轉陽平空100%',
+            : '奇點買升穿奇點高平空100%',
           confidence: `月50:$${m50.toFixed(2)} / 季50:$${q50.toFixed(2)}｜日TFDR:${prevOverlay.dTfdr}`,
           price: todayOpen.toFixed(2),
           totalHolding: 0,
@@ -1274,10 +1281,10 @@ export function runBacktestEngine(
             ? `觸及空單 8% 風控止損線，開盤全數平空`
             : isBullRegime
             ? `收復月/季 50 中間線重返上升浪（只買不空），開盤立即 100% 平空`
-            : `日TFDR(${prevOverlay.dTfdr})≤18 且日HA轉陽升穿，空單 100% 止盈平倉`,
+            : `下跌浪觸發奇點買 (日TFDR ${prevOverlay.dTfdr}≤25) 後收市升穿奇點 K 線最高位 $${(verdict.singularityHigh ?? prevBar.high).toFixed(2)}，空單 100% 平倉`,
           profitPct,
           profit: profitPct,
-          msg: `[${execDate}] ${isBullRegime ? '💎 順勢引擎・收復50線禁空平倉' : '💎 順勢引擎・18極底轉陽平空'} ${coverShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+          msg: `[${execDate}] ${isBullRegime ? '💎 順勢引擎・收復50線禁空平倉' : '💎 順勢引擎・奇點買升穿高位平空'} ${coverShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
         });
       }
 
@@ -1292,6 +1299,9 @@ export function runBacktestEngine(
         longShares = 0;
         avgLongCost = 0;
         partialTakenInLeg = false;
+        // 全數清倉後，高拋補回折扣不再適用（下一輪買入係全新入場，唔係補回單）
+        lastSellPriceExec = null;
+        pendingBuyback = null;
         lastActionBarIndex = i;
         const profitPct = Number((pnlRatio * 100).toFixed(2));
 
@@ -1316,7 +1326,7 @@ export function runBacktestEngine(
         });
       }
 
-      // E. 上升浪高位止盈 40% (PARTIAL_PROFIT：日線>=88 極頂奇點 AND 日/週雙HA跌穿前低，保留 60% 核心底倉)
+      // E. 上升浪高位止盈 45% (PARTIAL_PROFIT：日線>=88 奇點沽預警後，收市跌穿奇點 K 線最低位，保留 55% 核心底倉)
       if (
         longShares > 0 &&
         avgLongCost > 0 &&
@@ -1325,7 +1335,7 @@ export function runBacktestEngine(
         !partialTakenInLeg &&
         canAct
       ) {
-        const ratio = verdict.sizeRatio > 0 ? Math.min(0.6, verdict.sizeRatio) : 0.4;
+        const ratio = verdict.sizeRatio > 0 ? Math.min(0.6, verdict.sizeRatio) : 0.45;
         const sellShares = Math.floor(longShares * ratio);
         const orderValue = sellShares * todayOpen;
 
@@ -1339,6 +1349,8 @@ export function runBacktestEngine(
           if (longShares === 0) avgLongCost = 0;
           lastActionBarIndex = i;
           partialTakenInLeg = true;
+          // 記錄實際高拋成交價（T 開盤價），供其後補回單 96% 折扣驗證
+          lastSellPriceExec = todayOpen;
           const profitPct = Number((pnlRatio * 100).toFixed(2));
           const lockPct = Math.round(ratio * 100);
           const keepPct = 100 - lockPct;
@@ -1350,26 +1362,67 @@ export function runBacktestEngine(
             puzzleHint: hintBase,
             complianceTag: '✅ 精準執行',
             type: 'SELL',
-            action: `🟠 順勢引擎・88極頂減倉${lockPct}%留${keepPct}%底倉`,
+            action: `🟠 順勢引擎・跌穿奇點低減倉${lockPct}%留${keepPct}%底倉`,
             shares: sellShares,
             units: `減倉${lockPct}%保留${keepPct}%核心底倉`,
-            confidence: `日TFDR ${prevOverlay.dTfdr}≥88＋日/週HA雙跌穿前低`,
+            confidence: `跌穿奇點低 $${(verdict.singularityLow ?? prevBar.low).toFixed(2)}｜日TFDR ${prevOverlay.dTfdr}≥88 奇點沽預警後扣扳機`,
             price: todayOpen.toFixed(2),
             totalHolding: longShares,
             holdingType: longShares > 0 ? 'LONG' : 'EMPTY',
-            source: `上升浪內日TFDR達到 ${prevOverlay.dTfdr} (≥88) 且日/週HA雙重跌穿前低，減倉 ${lockPct}% 鎖利並死抱 ${keepPct}% 核心底倉`,
+            source: `上升浪內日TFDR達到 ${prevOverlay.dTfdr} (≥88) 觸發奇點沽預警後，收市跌穿奇點 K 線最低位 $${(verdict.singularityLow ?? prevBar.low).toFixed(2)}，減倉 ${lockPct}% 鎖利並死抱 ${keepPct}% 核心底倉`,
             profitPct,
             profit: profitPct,
-            msg: `[${execDate}] 🟠 順勢引擎・88極頂減倉${lockPct}%留${keepPct}%底倉 ${sellShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+            msg: `[${execDate}] 🟠 順勢引擎・跌穿奇點低減倉${lockPct}%留${keepPct}%底倉 ${sellShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
           });
         }
       }
 
-      // F. 上升浪低位重倉買入 80% (GOLDEN_BUY：穩站月/季50之上 ＋ 日TFDR <= 25 ＋ 日HA轉陽升穿前高)
+      // F0. 高拋補回單的 T 開盤折扣驗證：若今日本是補回單（GOLDEN_BUY 且有上次沽價），但 T 開盤價未低過
+      //     上次沽價 ×96%，唔成交、留 pending 等下一個交易日（唔取消武裝）；轉入下跌浪即取消 pending。
+      if (pendingBuyback != null && isBearRegime) pendingBuyback = null;
+      // 補回折扣只可以用回測實際成交價（T 開盤價）做參考：verdict 的 lastSellPrice 只係收市參考價，
+      // 而且當時可能根本無倉可沽（例如 PARTIAL_PROFIT 訊號出現時 longShares 已經係 0），用佢做折扣會錯誤地
+      // 將全新買入當成補回單、無端端擋住入場。無實際高拋成交，就當全新買入。
+      const buybackRefPrice = lastSellPriceExec;
+      const isBuybackVerdict =
+        verdict.signal === 'GOLDEN_BUY' && verdict.isBuyback === true && buybackRefPrice != null;
+      const pendingBuybackReady =
+        pendingBuyback != null &&
+        shortShares === 0 &&
+        isBullRegime &&
+        (justRestartedFromHalt || canAct) &&
+        todayOpen > pendingBuyback.singularityHigh &&
+        todayOpen < pendingBuyback.lastSellPrice * 0.96 &&
+        (prevOverlay.wMid50 == null || todayOpen >= prevOverlay.wMid50);
+      const suppressGoldenBuy =
+        verdict.signal === 'GOLDEN_BUY' &&
+        (justRestartedFromHalt || canAct) &&
+        isBuybackVerdict &&
+        buybackRefPrice != null &&
+        todayOpen >= buybackRefPrice * 0.96;
+      if (suppressGoldenBuy && buybackRefPrice != null) {
+        pendingBuyback = {
+          singularityHigh: verdict.singularityHigh ?? prevBar.high,
+          lastSellPrice: buybackRefPrice,
+          date: signalDate
+        };
+      }
+      const execSingularityHigh =
+        pendingBuybackReady && pendingBuyback
+          ? pendingBuyback.singularityHigh
+          : verdict.singularityHigh ?? prevBar.high;
+      const execBuybackRef =
+        pendingBuybackReady && pendingBuyback
+          ? pendingBuyback.lastSellPrice
+          : isBuybackVerdict
+          ? buybackRefPrice
+          : null;
+
+      // F. 上升浪低位重倉買入 80% (GOLDEN_BUY：收市升穿奇點最高位；補回單另須週線未穿 50 且成交價 < 上次沽價 ×96%，未滿足則延期而非取消)
       if (
         shortShares === 0 &&
         isBullRegime &&
-        verdict.signal === 'GOLDEN_BUY' &&
+        ((verdict.signal === 'GOLDEN_BUY' && !suppressGoldenBuy) || pendingBuybackReady) &&
         (justRestartedFromHalt || canAct)
       ) {
         const ratio = verdict.sizeRatio > 0 ? Math.min(1, verdict.sizeRatio) : 0.8;
@@ -1387,6 +1440,9 @@ export function runBacktestEngine(
           longShares += shares;
           lastActionBarIndex = i;
           partialTakenInLeg = false;
+          // 買入已成交（無論係全新買入定補回單），清除補回延期狀態同上次沽價參考
+          pendingBuyback = null;
+          lastSellPriceExec = null;
           isHalted = false;
           haltStabilized = false;
 
@@ -1401,21 +1457,27 @@ export function runBacktestEngine(
             puzzleHint: hintBase,
             complianceTag,
             type: 'STRONG BUY',
-            action: `🔥 順勢引擎・上升浪極底重倉買入${pctLabel}%`,
+            action: execBuybackRef != null
+              ? `🔥 順勢引擎・高拋後補回買入${pctLabel}%`
+              : `🔥 順勢引擎・上升浪極底重倉買入${pctLabel}%`,
             shares,
             units: `現金池${pctLabel}%坐貨主升浪`,
-            confidence: `穩站月/季50之上｜日TFDR ${prevOverlay.dTfdr}≤25＋日HA轉陽升穿前高`,
+            confidence: execBuybackRef != null
+              ? `升穿奇點高 $${execSingularityHigh.toFixed(2)}｜補回單：開盤 $${todayOpen.toFixed(2)} < 上次沽價 $${execBuybackRef.toFixed(2)}×96% ($${(execBuybackRef * 0.96).toFixed(2)})｜週線未穿50`
+              : `穩站月/季50之上｜收市升穿奇點高 $${execSingularityHigh.toFixed(2)}`,
             price: todayOpen.toFixed(2),
             totalHolding: longShares,
             holdingType: 'LONG',
-            source: `上升浪大勢內 (收盤$${prevOverlay.close} ≥ 月50 $${m50.toFixed(2)} 或 季50 $${q50.toFixed(2)})，日TFDR=${prevOverlay.dTfdr} (≤25) 且日HA轉陽升穿前高，${pctLabel}%重倉買入坐貨`,
+            source: execBuybackRef != null
+              ? `高拋後補回：收市升穿奇點高 $${execSingularityHigh.toFixed(2)}，週線未穿 50 且開盤 $${todayOpen.toFixed(2)} 低於上次沽價 $${execBuybackRef.toFixed(2)} 的 96%，${pctLabel}%補回坐貨`
+              : `上升浪大勢內 (收盤$${prevOverlay.close} ≥ 月50 $${m50.toFixed(2)} 或 季50 $${q50.toFixed(2)})，收市升穿奇點高 $${execSingularityHigh.toFixed(2)}，${pctLabel}%重倉買入坐貨`,
             profitPct: null,
             msg: `[${execDate}] 🔥 順勢引擎・上升浪極底重倉買入${pctLabel}% ${shares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (現金池${pctLabel}%・含0.25%成本)`
           });
         }
       }
 
-      // G. 下跌浪順勢開空 35% (SHORT_ENTRY：跌穿月/季50之下 ＋ 反彈日TFDR >= 80 且轉陰跌穿前低)
+      // G. 下跌浪順勢開空 35% (SHORT_ENTRY：跌穿月/季50之下 ＋ 反彈觸發奇點沽後收市跌穿奇點 K 線最低位)
       if (
         longShares === 0 &&
         shortShares === 0 &&
@@ -1446,12 +1508,12 @@ export function runBacktestEngine(
             type: 'SHORT',
             action: `🟣 順勢引擎・下跌浪輕倉沽空${shortPct}%`,
             shares,
-            units: `下跌浪≥80轉陰沽空${shortPct}%`,
-            confidence: `破月50($${m50.toFixed(2)})/季50($${q50.toFixed(2)})｜日TFDR ${prevOverlay.dTfdr}≥80轉陰跌穿`,
+            units: `下跌浪奇點沽跌穿低位沽空${shortPct}%`,
+            confidence: `破月50($${m50.toFixed(2)})/季50($${q50.toFixed(2)})｜奇點沽跌穿奇點低 $${(verdict.singularityLow ?? prevBar.low).toFixed(2)}｜日TFDR ${prevOverlay.dTfdr}≥80`,
             price: todayOpen.toFixed(2),
             totalHolding: shortShares,
             holdingType: 'SHORT',
-            source: `跌穿月/季50中間線進入下跌浪，反彈日TFDR=${prevOverlay.dTfdr} (≥80) 且日HA轉陰跌穿前低，開立${shortPct}%輕倉順勢空單`,
+            source: `跌穿月/季50中間線進入下跌浪，反彈觸發奇點沽 (日TFDR=${prevOverlay.dTfdr} ≥80) 後收市跌穿奇點 K 線最低位 $${(verdict.singularityLow ?? prevBar.low).toFixed(2)}，開立${shortPct}%輕倉順勢空單`,
             profitPct: null,
             msg: `[${execDate}] 🟣 順勢引擎・下跌浪輕倉沽空${shortPct}% ${shares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本)`
           });

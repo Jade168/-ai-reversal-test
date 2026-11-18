@@ -442,6 +442,9 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
   // 1. 圖表顯示模式狀態：【傳統數律共振】⇄【TFDR 奇點通道】
   const [chartMode, setChartMode] = useState<'CLASSIC' | 'TFDR'>('CLASSIC');
 
+  // 奇點文字標籤顯示開關：只隱藏 TFDR 模式下「奇點買／奇點沽」細字標籤（小三角箭頭保留），K 線本身不受影響
+  const [showSingularityLabels, setShowSingularityLabels] = useState<boolean>(true);
+
   // Viewport / zoom / pan state
   const [viewRange, setViewRange] = useState<{ start: number; end: number } | null>(null);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
@@ -1180,25 +1183,28 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           ctx.lineWidth = 0.8;
           ctx.stroke();
 
-          const label = formatShortSignalLabel('HIGH', true);
-          ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
-          const tw = ctx.measureText(label).width;
-          const bw = tw + 10;
-          const bh = 17;
-          const bx = Math.max(margin.left + 2, Math.min(margin.left + plotW - bw - 2, x - bw / 2));
-          const by = Math.max(margin.top + 2, arrowTipY - 12 - bh);
+          // 奇點文字標籤開關：隱藏時只唔畫細字標籤盒，小三角箭頭保留作位置提示
+          if (showSingularityLabels) {
+            const label = formatShortSignalLabel('HIGH', true);
+            ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
+            const tw = ctx.measureText(label).width;
+            const bw = tw + 10;
+            const bh = 17;
+            const bx = Math.max(margin.left + 2, Math.min(margin.left + plotW - bw - 2, x - bw / 2));
+            const by = Math.max(margin.top + 2, arrowTipY - 12 - bh);
 
-          ctx.fillStyle = 'rgba(127, 29, 29, 0.92)';
-          ctx.strokeStyle = '#ef4444';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.roundRect(bx, by, bw, bh, 4);
-          ctx.fill();
-          ctx.stroke();
+            ctx.fillStyle = 'rgba(127, 29, 29, 0.92)';
+            ctx.strokeStyle = '#ef4444';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(bx, by, bw, bh, 4);
+            ctx.fill();
+            ctx.stroke();
 
-          ctx.fillStyle = '#fee2e2';
-          ctx.textAlign = 'center';
-          ctx.fillText(label, bx + bw / 2, by + 12);
+            ctx.fillStyle = '#fee2e2';
+            ctx.textAlign = 'center';
+            ctx.fillText(label, bx + bw / 2, by + 12);
+          }
         }
       });
 
@@ -1221,25 +1227,28 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           ctx.lineWidth = 0.8;
           ctx.stroke();
 
-          const label = formatShortSignalLabel('LOW', true);
-          ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
-          const tw = ctx.measureText(label).width;
-          const bw = tw + 10;
-          const bh = 17;
-          const bx = Math.max(margin.left + 2, Math.min(margin.left + plotW - bw - 2, x - bw / 2));
-          const by = Math.min(margin.top + plotH - bh - 2, arrowTipY + 12);
+          // 奇點文字標籤開關：隱藏時只唔畫細字標籤盒，小三角箭頭保留作位置提示
+          if (showSingularityLabels) {
+            const label = formatShortSignalLabel('LOW', true);
+            ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
+            const tw = ctx.measureText(label).width;
+            const bw = tw + 10;
+            const bh = 17;
+            const bx = Math.max(margin.left + 2, Math.min(margin.left + plotW - bw - 2, x - bw / 2));
+            const by = Math.min(margin.top + plotH - bh - 2, arrowTipY + 12);
 
-          ctx.fillStyle = 'rgba(6, 78, 59, 0.92)';
-          ctx.strokeStyle = '#10b981';
-          ctx.lineWidth = 1;
-          ctx.beginPath();
-          ctx.roundRect(bx, by, bw, bh, 4);
-          ctx.fill();
-          ctx.stroke();
+            ctx.fillStyle = 'rgba(6, 78, 59, 0.92)';
+            ctx.strokeStyle = '#10b981';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.roundRect(bx, by, bw, bh, 4);
+            ctx.fill();
+            ctx.stroke();
 
-          ctx.fillStyle = '#d1fae5';
-          ctx.textAlign = 'center';
-          ctx.fillText(label, bx + bw / 2, by + 12);
+            ctx.fillStyle = '#d1fae5';
+            ctx.textAlign = 'center';
+            ctx.fillText(label, bx + bw / 2, by + 12);
+          }
         }
       });
     }
@@ -1331,6 +1340,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     tfdrSeries,
     tfdrTurningPoints,
     chartMode,
+    showSingularityLabels,
     formatShortSignalLabel
   ]);
 
@@ -1760,6 +1770,14 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
             className="px-3 py-1 text-xs font-bold rounded bg-indigo-600 hover:bg-indigo-500 text-white shadow transition-colors"
           >
             {chartMode === 'CLASSIC' ? '🔄 切換 TFDR 奇點通道' : '🔄 切回 傳統數律圖'}
+          </button>
+
+          <button
+            onClick={() => setShowSingularityLabels(prev => !prev)}
+            className="px-2 py-1 text-xs font-bold rounded bg-[#222] hover:bg-[#333] text-gray-200 border border-[#444] transition"
+            title="隱藏／顯示主圖上「奇點買／奇點沽」細字標籤（只在 TFDR 奇點通道模式生效；小三角箭頭會保留）"
+          >
+            {`奇點標籤: ${showSingularityLabels ? '顯示' : '隱藏'}`}
           </button>
         </div>
       </div>
