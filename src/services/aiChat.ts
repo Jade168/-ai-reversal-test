@@ -326,9 +326,10 @@ export async function callExpertAi(
     const ma20 = modelData.slice(-20).reduce((sum, d) => sum + d.c, 0) / 20;
     const trend = ma5 > ma20 ? '短期向上 ↗' : '短期向下 ↘';
 
+    const tspReport = generateZeroTokenDiagnosis(context);
     marketContext = `
 【當前分析標的】${symbolInfo.symbol}
-
+${tspReport ? `\n${tspReport}\n` : ''}
 【價格位置分析】
 最新價格：${symbolInfo.latestPrice}
 歷史最高：${absoluteHigh.toFixed(2)} (距離當前 -${distanceFromHigh}%)

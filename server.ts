@@ -13,7 +13,83 @@ const isProduction = process.env.NODE_ENV === 'production';
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// ===================== 東方財富 K 線數據代理 =====================
+// ===================== Yahoo Finance + 東方財富 復權 K 線數據代理 =====================
+function toYahooSymbol(cleanSym: string, rawSymbol: string): string {
+  if (/^\d+$/.test(cleanSym)) {
+    if (cleanSym.length <= 5) {
+      // 港股代碼轉 Yahoo 格式：00700 -> 0700.HK
+      const hkNum = cleanSym.replace(/^0+/, '').padStart(4, '0');
+      return `${hkNum}.HK`;
+    }
+    if (cleanSym.startsWith('6')) return `${cleanSym}.SS`;
+    return `${cleanSym}.SZ`;
+  }
+  if (rawSymbol.startsWith('^')) return rawSymbol;
+  return cleanSym;
+}
+
+async function fetchYahooAdjKlines(
+  yahooSym: string,
+  klt: string,
+  timeoutMs: number = 9000
+): Promise<{ klines: string[]; name: string } | null> {
+  // 5min 不走 Yahoo 20y
+  if (klt === '1') return null;
+  const interval = klt === '103' ? '1mo' : klt === '102' ? '1wk' : '1d';
+  const range = '20y';
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+    yahooSym
+  )}?range=${range}&interval=${interval}&events=div,splits`;
+
+  try {
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (!resp.ok) return null;
+    const json: any = await resp.json();
+    const res = json?.chart?.result?.[0];
+    const ts: number[] = res?.timestamp || [];
+    const quote = res?.indicators?.quote?.[0];
+    const adjArr: (number | null)[] | undefined = res?.indicators?.adjclose?.[0]?.adjclose;
+    if (!ts.length || !quote) return null;
+
+    const klines: string[] = [];
+    for (let i = 0; i < ts.length; i++) {
+      const o = quote.open?.[i];
+      const h = quote.high?.[i];
+      const l = quote.low?.[i];
+      const c = quote.close?.[i];
+      const v = quote.volume?.[i] ?? 0;
+      const adj = adjArr?.[i];
+
+      if (c == null || o == null || h == null || l == null || c <= 0 || o <= 0) continue;
+
+      // 強制優先讀取復權收盤價 (adjclose)，並按 adjclose / close 同步等比例縮放 O/H/L
+      const effectiveClose = adj != null && Number.isFinite(adj) && adj > 0 ? adj : c;
+      const adjRatio = effectiveClose / c;
+      const adjOpen = o * adjRatio;
+      const adjHigh = h * adjRatio;
+      const adjLow = l * adjRatio;
+
+      if (![adjOpen, adjHigh, adjLow, effectiveClose].every(val => Number.isFinite(val) && val > 0)) {
+        continue;
+      }
+
+      const d = new Date(ts[i] * 1000).toISOString().slice(0, 10);
+      klines.push(
+        `${d},${adjOpen.toFixed(4)},${effectiveClose.toFixed(4)},${adjHigh.toFixed(4)},${adjLow.toFixed(4)},${Math.round(Number(v) || 0)}`
+      );
+    }
+
+    if (klines.length === 0) return null;
+    const name = res?.meta?.shortName || res?.meta?.symbol || yahooSym;
+    return { klines: klines.slice(-5000), name };
+  } catch {
+    return null;
+  }
+}
+
 app.get('/api/kline', async (req: Request, res: Response) => {
   try {
     const rawSymbol = String(req.query.symbol || 'TSLA').trim().toUpperCase();
@@ -24,6 +100,20 @@ app.get('/api/kline', async (req: Request, res: Response) => {
     else if (klt === 'daily' || klt === 'day' || klt === 'd') klt = '101';
     const cleanSym = rawSymbol.replace('.US', '').replace('.HK', '').replace('.N', '').replace('.O', '');
 
+    // 1. 優先讀取 Yahoo Finance 復權收盤價 (adjclose) 並等比縮放開高低（完全對齊富途前復權，杜絕 15x 未拆股天價）
+    const yahooSym = toYahooSymbol(cleanSym, rawSymbol);
+    const yahooData = await fetchYahooAdjKlines(yahooSym, klt, 9000);
+    if (yahooData && yahooData.klines.length > 0) {
+      res.json({
+        code: 0,
+        data: yahooData.klines,
+        name: yahooData.name,
+        source: 'yahoo-adjclose'
+      });
+      return;
+    }
+
+    // 2. 東方財富 fallback：嚴格只用 fqt=1 (前復權)，嚴禁使用 fqt=2 (後復權會把最新價放大數十倍)
     let secid = '';
     if (/^\d+$/.test(cleanSym)) {
       secid = `116.${cleanSym.padStart(5, '0')}`;
@@ -31,33 +121,29 @@ app.get('/api/kline', async (req: Request, res: Response) => {
       secid = `105.${cleanSym}`;
     }
 
-    const buildUrl = (id: string, fqt: number) =>
-      `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${id}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56&klt=${klt}&fqt=${fqt}&end=20500101&lmt=5000`;
-
-    const fetchWithFqtFallback = async (id: string, timeoutMs: number) => {
-      for (const fqt of [2, 1]) {
-        try {
-          const resp = await fetch(buildUrl(id, fqt), {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal: AbortSignal.timeout(timeoutMs)
-          });
-          const json = await resp.json();
-          if (json?.data?.klines && json.data.klines.length > 0) {
-            return json;
-          }
-        } catch {
-          continue;
+    const fetchForwardAdjusted = async (id: string, timeoutMs: number) => {
+      try {
+        const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${id}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56&klt=${klt}&fqt=1&end=20500101&lmt=5000`;
+        const resp = await fetch(url, {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          signal: AbortSignal.timeout(timeoutMs)
+        });
+        const json = await resp.json();
+        if (json?.data?.klines && json.data.klines.length > 0) {
+          return json;
         }
+      } catch {
+        return null;
       }
       return null;
     };
 
-    let data = await fetchWithFqtFallback(secid, 10000);
+    let data = await fetchForwardAdjusted(secid, 10000);
 
     if (!data?.data?.klines || data.data.klines.length === 0) {
       const suffixes = ['.N', '.O', '.A', '.K'];
       for (const suffix of suffixes) {
-        const tryData = await fetchWithFqtFallback(`105.${cleanSym}${suffix}`, 5000);
+        const tryData = await fetchForwardAdjusted(`105.${cleanSym}${suffix}`, 5000);
         if (tryData?.data?.klines && tryData.data.klines.length > 0) {
           data = tryData;
           break;
@@ -73,7 +159,8 @@ app.get('/api/kline', async (req: Request, res: Response) => {
     res.json({
       code: 0,
       data: data.data.klines,
-      name: data.data.name || rawSymbol
+      name: data.data.name || rawSymbol,
+      source: 'eastmoney-fqt1'
     });
   } catch (err: any) {
     console.error('K-line proxy error:', err);

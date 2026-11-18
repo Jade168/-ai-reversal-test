@@ -50,21 +50,19 @@ export async function fetchMarketData(
     console.warn('Backend proxy fetch failed, attempting direct EastMoney fetch:', err);
   }
 
-  // 3. 嘗試瀏覽器端直接抓取東方財富 (push2his)，擴充至 20 年 (~5000 根日線) 並優先請求後復權 (fqt=2)
+  // 3. 嘗試瀏覽器端直接抓取東方財富 (push2his)，擴充至 20 年 (~5000 根日線) 並強制使用前復權 (fqt=1)，嚴禁使用後復權 fqt=2
   try {
     let secid = /^\d+$/.test(cleanSym) ? `116.${cleanSym.padStart(5, '0')}` : `105.${cleanSym}`;
     const fetchDirectFqt = async (id: string) => {
-      for (const fqt of [2, 1]) {
-        try {
-          const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${id}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56&klt=${klt}&fqt=${fqt}&end=20500101&lmt=5000`;
-          const res = await fetch(url);
-          const d = await res.json();
-          if (d?.data?.klines && d.data.klines.length > 0) {
-            return d.data.klines;
-          }
-        } catch {
-          continue;
+      try {
+        const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${id}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56&klt=${klt}&fqt=1&end=20500101&lmt=5000`;
+        const res = await fetch(url);
+        const d = await res.json();
+        if (d?.data?.klines && d.data.klines.length > 0) {
+          return d.data.klines;
         }
+      } catch {
+        return null;
       }
       return null;
     };
@@ -211,10 +209,18 @@ function parseEastMoneyKlines(rawKlines: any[], cycle: string): RawKline[] {
         vol
       });
     } else if (k && typeof k === 'object') {
-      const open = Number(k.o !== undefined ? k.o : k.open) || 0;
-      const high = Number(k.h !== undefined ? k.h : k.high) || 0;
-      const low = Number(k.l !== undefined ? k.l : k.low) || 0;
-      const close = Number(k.c !== undefined ? k.c : k.close) || 0;
+      const rawOpen = Number(k.o !== undefined ? k.o : k.open) || 0;
+      const rawHigh = Number(k.h !== undefined ? k.h : k.high) || 0;
+      const rawLow = Number(k.l !== undefined ? k.l : k.low) || 0;
+      const rawClose = Number(k.c !== undefined ? k.c : k.close) || 0;
+      const adjClose = Number(k.adjclose !== undefined ? k.adjclose : k.adjClose);
+      const hasValidAdj = Number.isFinite(adjClose) && adjClose > 0 && rawClose > 0;
+      const factor = hasValidAdj ? adjClose / rawClose : 1;
+
+      const open = rawOpen * factor;
+      const high = rawHigh * factor;
+      const low = rawLow * factor;
+      const close = hasValidAdj ? adjClose : rawClose;
       const vol = Number(k.vol !== undefined ? k.vol : k.volume) || 0;
       const date = String(k.date || k.time || '');
       const timestamp = Number(k.timestamp) || (date ? Date.parse(date) : Date.now());

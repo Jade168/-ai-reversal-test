@@ -48,13 +48,14 @@ export function calculateKaufmanER(closes: number[], period: number = 14): numbe
  */
 export function evaluatePuzzleExpertSummary(puzzle: PuzzleState): LocalExpertSummary {
   const { Q, M, W, D } = puzzle.timeframes;
+  const tsp = puzzle.timeSpacePrompt;
 
   const regimeLabel =
     puzzle.regime === 'UPTREND_CHANNEL'
-      ? '月線大升通道 (只買不空)'
+      ? '大升通道（站在季/月50%切線之上・100%禁空）'
       : puzzle.regime === 'DOWNTREND_CHANNEL'
-      ? '月線大跌通道 (嚴禁做多・只空不買)'
-      : '月中線過渡震盪區 (多空觀望)';
+      ? '大跌通道（跌破季與月雙50%切線・只空不買）'
+      : '切線過渡區 (觀望)';
 
   const trendQuality =
     puzzle.ker >= 0.6
@@ -64,38 +65,39 @@ export function evaluatePuzzleExpertSummary(puzzle: PuzzleState): LocalExpertSum
       : `波段推進期 (KER ${puzzle.ker})`;
 
   const signalBadgeMap: Record<PuzzleState['signal'], string> = {
-    GOLDEN_BUY: `🔥【信心 ${puzzle.signalStrength}%・踩週中線奇點重倉補回 (${Math.round(puzzle.positionSizingHint * 100)}%)】`,
-    ADD_POSITION: `🟢【信心 ${puzzle.signalStrength}%・升浪奇點分批低吸 (${Math.round(puzzle.positionSizingHint * 100)}%)】`,
-    PARTIAL_PROFIT: `🟠【信心 ${puzzle.signalStrength}%・高位奇點鎖利減倉 (${Math.round(puzzle.positionSizingHint * 100)}%)】`,
-    FULL_CLEAR: `🚨【信心 ${puzzle.signalStrength}%・月線破位全數清倉】`,
+    GOLDEN_BUY: `🔥【信心 ${puzzle.signalStrength}%・黃金買點上穿週50%線 (${Math.round(puzzle.positionSizingHint * 100)}%)】`,
+    ADD_POSITION: `🟢【信心 ${puzzle.signalStrength}%・復甦重上週50%線 (${Math.round(puzzle.positionSizingHint * 100)}%)】`,
+    PARTIAL_PROFIT: `🟠【信心 ${puzzle.signalStrength}%・80+紅區HA轉陰鎖利60% (留40%底倉)】`,
+    FULL_CLEAR: `🚨【信心 ${puzzle.signalStrength}%・破季線50%下緣6%全數清倉】`,
     HALT_REDUCE: `🛑【回撤熔斷控險・強制減半持倉】`,
-    SHORT_ENTRY: `🟣【信心 ${puzzle.signalStrength}%・月線大跌通道反彈沽空 (${Math.round(puzzle.positionSizingHint * 100)}%)】`,
-    COVER_SHORT: `💎【信心 ${puzzle.signalStrength}%・熊市下方奇點全數平空】`,
+    SHORT_ENTRY: `🟣【信心 ${puzzle.signalStrength}%・雙破季月50%線＋85+輕倉沽空 (30%)】`,
+    COVER_SHORT: `💎【信心 ${puzzle.signalStrength}%・空單全數平倉】`,
     HOLD:
       puzzle.regime === 'UPTREND_CHANNEL'
         ? `🟢【信心 ${puzzle.signalStrength}%・大升通道安穩持倉】`
         : puzzle.regime === 'DOWNTREND_CHANNEL'
-        ? `🚨【信心 ${puzzle.signalStrength}%・月線破位禁買觀望】`
-        : `⚖️【信心 ${puzzle.signalStrength}%・過渡區觀望等待確認】`
+        ? `🚨【信心 ${puzzle.signalStrength}%・大跌通道嚴禁抄底】`
+        : `⚖️【信心 ${puzzle.signalStrength}%・過渡區觀望】`
   };
 
   const confidenceTag = signalBadgeMap[puzzle.signal];
   const reasonsSummary = puzzle.reasons.join('；');
   const riskText = puzzle.riskFlags.length > 0 ? puzzle.riskFlags.join('；') : '無異常結構風險';
 
-  const coreAction = `${reasonsSummary}。買入埋伏區 $${puzzle.levels.buyZone.low}–$${puzzle.levels.buyZone.high}，高拋目標區 $${puzzle.levels.takeProfitZone.low}–$${puzzle.levels.takeProfitZone.high}（以月/週 50 動能中軸守護底倉，不設牛市 -8% 固定割肉）。`;
+  const coreAction = `${tsp.actionTitle}。季50%切線 $${tsp.qMid50}｜月50%切線 $${tsp.mMid50}｜週50%切線 $${tsp.wMid50}（${tsp.singularityLabel}）。低吸埋伏 $${tsp.buyZone.low}–$${tsp.buyZone.high}，高拋警戒 $${tsp.takeProfitZone.low}–$${tsp.takeProfitZone.high}，清倉保護線 $${tsp.invalidationPrice}。`;
 
   const keyPointsBlock =
     puzzle.keyPoints && puzzle.keyPoints.length > 0
-      ? `\n• T+1 觀察重點：\n  - ${puzzle.keyPoints.join('\n  - ')}`
+      ? `\n• T+1 開盤觀察重點：\n  - ${puzzle.keyPoints.join('\n  - ')}`
       : '';
 
   const fullReport = [
-    `📊 【${puzzle.symbol} 拼圖量化引擎・最新單日預警】(${puzzle.schema} | ${puzzle.signalDate || puzzle.asOfDate})`,
+    `📊 【${puzzle.symbol} 50% 切線嵌套拼圖・時空提示單】(${puzzle.schema} | ${tsp.triggerDate})`,
     `${confidenceTag}`,
     `• 大局定性：${regimeLabel}｜${trendQuality}`,
-    `• 四維動能結構：季(動能${Q.mom}/TFDR ${Q.tfdr})｜月(動能${M.mom}/TFDR ${M.tfdr})｜週(動能${W.mom}/TFDR ${W.tfdr})｜日(動能${D.mom}/TFDR ${D.tfdr})`,
-    `• 關鍵座標：現價 $${puzzle.currentPrice}｜買入埋伏 $${puzzle.levels.buyZone.low}–$${puzzle.levels.buyZone.high}｜高拋目標 $${puzzle.levels.takeProfitZone.low}–$${puzzle.levels.takeProfitZone.high}｜保護線 $${puzzle.levels.invalidationPrice}`,
+    `• 三級 50% 平衡切線：季 Q50 $${tsp.qMid50}｜月 M50 $${tsp.mMid50}｜週 W50 $${tsp.wMid50}`,
+    `• 奇點軌道狀態：${tsp.singularityLabel}（季TFDR ${Q.tfdr} / 月TFDR ${M.tfdr} / 週TFDR ${W.tfdr} / 日TFDR ${D.tfdr}）`,
+    `• 關鍵座標：現價 $${puzzle.currentPrice}｜低吸 $${tsp.buyZone.low}–$${tsp.buyZone.high}｜高拋 $${tsp.takeProfitZone.low}–$${tsp.takeProfitZone.high}｜清倉保護 $${tsp.invalidationPrice}`,
     `• 觸發依據：${reasonsSummary}`,
     `• 風險標記：${riskText}${keyPointsBlock}`,
     `• 操盤指令：${coreAction}`
@@ -124,6 +126,7 @@ export function evaluateLocalExpertSummary(input: LocalAnalysisInput): LocalExpe
     return evaluatePuzzleExpertSummary(input.puzzle);
   }
   const todayStr = new Date().toISOString().slice(0, 10);
+  const invPrice = Number((input.monthlyMidline * 0.94).toFixed(2));
   const syntheticPuzzle: PuzzleState = {
     schema: 'puzzle/v2-strict',
     symbol: input.symbol,
@@ -132,11 +135,38 @@ export function evaluateLocalExpertSummary(input: LocalAnalysisInput): LocalExpe
     asOfIndex: Math.max(0, input.closes.length - 1),
     currentPrice: input.currentPrice,
     isPuzzleCross: false,
+    timeSpacePrompt: {
+      triggerDate: todayStr,
+      currentPrice: input.currentPrice,
+      qMid50: input.monthlyMidline,
+      mMid50: input.monthlyMidline,
+      wMid50: input.weeklyMidline,
+      qHigh: input.currentPrice,
+      qLow: input.monthlyMidline,
+      mHigh: input.currentPrice,
+      mLow: input.monthlyMidline,
+      wHigh: input.currentPrice,
+      wLow: input.weeklyMidline,
+      dTfdr: input.dailyTFDR,
+      singularityStatus:
+        input.dailyTFDR >= 80
+          ? 'UPPER_EXPANSION'
+          : input.dailyTFDR <= 20
+          ? 'LOWER_EXPANSION'
+          : 'SAFE_MID_ZONE',
+      singularityLabel: '安全雙線通道 (等待完整日線)',
+      regimeLabel: input.isMonthlyUptrend ? '大升通道(禁空)' : '大跌通道',
+      actionTitle: '⚖️ 沿50%切線持倉觀望',
+      buyZone: { low: input.band15, high: input.weeklyMidline },
+      takeProfitZone: { low: input.band90, high: input.band90 },
+      invalidationPrice: invPrice,
+      compactHint: `Q50:$${input.monthlyMidline}｜M50:$${input.monthlyMidline}｜W50:$${input.weeklyMidline}｜日TFDR:${input.dailyTFDR}`
+    },
     timeframes: {
-      Q: { bars: 0, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.monthlyMidline, prevMidline: input.monthlyMidline, atr: 0, tfdr: input.monthlyTFDR, rsi: 50, mom: Number(((50 + input.monthlyTFDR) / 2).toFixed(1)), sampleOK: false, isLastBarComplete: false },
-      M: { bars: 0, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.monthlyMidline, prevMidline: input.monthlyMidline, atr: 0, tfdr: input.monthlyTFDR, rsi: 50, mom: Number(((50 + input.monthlyTFDR) / 2).toFixed(1)), sampleOK: false, isLastBarComplete: false },
-      W: { bars: 0, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.weeklyMidline, prevMidline: input.weeklyMidline, atr: 0, tfdr: input.weeklyTFDR, rsi: 50, mom: Number(((50 + input.weeklyTFDR) / 2).toFixed(1)), sampleOK: false, isLastBarComplete: false },
-      D: { bars: input.closes.length, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.weeklyMidline, prevMidline: input.weeklyMidline, atr: 0, tfdr: input.dailyTFDR, rsi: 50, mom: Number(((50 + input.dailyTFDR) / 2).toFixed(1)), sampleOK: true, isLastBarComplete: true }
+      Q: { bars: 0, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.monthlyMidline, prevMidline: input.monthlyMidline, high: input.currentPrice, low: input.monthlyMidline, mid50: input.monthlyMidline, atr: 0, tfdr: input.monthlyTFDR, rsi: 50, mom: Number(((50 + input.monthlyTFDR) / 2).toFixed(1)), sampleOK: false, isLastBarComplete: false },
+      M: { bars: 0, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.monthlyMidline, prevMidline: input.monthlyMidline, high: input.currentPrice, low: input.monthlyMidline, mid50: input.monthlyMidline, atr: 0, tfdr: input.monthlyTFDR, rsi: 50, mom: Number(((50 + input.monthlyTFDR) / 2).toFixed(1)), sampleOK: false, isLastBarComplete: false },
+      W: { bars: 0, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.weeklyMidline, prevMidline: input.weeklyMidline, high: input.currentPrice, low: input.weeklyMidline, mid50: input.weeklyMidline, atr: 0, tfdr: input.weeklyTFDR, rsi: 50, mom: Number(((50 + input.weeklyTFDR) / 2).toFixed(1)), sampleOK: false, isLastBarComplete: false },
+      D: { bars: input.closes.length, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.weeklyMidline, prevMidline: input.weeklyMidline, high: input.currentPrice, low: input.weeklyMidline, mid50: input.currentPrice, atr: 0, tfdr: input.dailyTFDR, rsi: 50, mom: Number(((50 + input.dailyTFDR) / 2).toFixed(1)), sampleOK: true, isLastBarComplete: true }
     },
     regime: input.isMonthlyUptrend && input.currentPrice >= input.monthlyMidline ? 'UPTREND_CHANNEL' : 'DOWNTREND_CHANNEL',
     signal: 'HOLD',
@@ -145,12 +175,12 @@ export function evaluateLocalExpertSummary(input: LocalAnalysisInput): LocalExpe
     levels: {
       buyZone: { low: input.band15, high: input.weeklyMidline },
       takeProfitZone: { low: input.band90, high: input.band90 },
-      invalidationPrice: input.monthlyMidline
+      invalidationPrice: invPrice
     },
     ker: calculateKaufmanER(input.closes, 14),
     shortLock8dActive: false,
-    reasons: ['等待原生四維拼圖計算完成'],
-    keyPoints: ['等待原生四維拼圖計算完成'],
+    reasons: ['等待原生四週期 50% 切線計算完成'],
+    keyPoints: ['等待原生四週期 50% 切線計算完成'],
     riskFlags: [],
     provenance: { computedBy: 'computePuzzleDecision', llmGeneratedNumbers: [] }
   };

@@ -158,7 +158,7 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
         </div>
 
         <div className="text-[10px] text-center text-gray-500 mt-1.5">
-          T-1無未來函數決策｜T日開盤成交（單邊0.35%成本・&gt;25%回撤減半熔斷＋滯後重啟・單筆 ≥ 5% 本金）
+          T-1無未來函數決策｜T日開盤驗假破成交（單邊0.25%成本・&gt;25%回撤減半熔斷＋滯後重啟・單筆 ≥ 5% 本金）
         </div>
 
         {/* 整合於決策中樞底部的雙核回測交易紀錄 */}

@@ -3,172 +3,83 @@ import { ModelBar, RawKline } from '../types/quant';
 import { calculateDynamicReversals } from '../services/quantCalculations';
 import { calculateTFDRSeries } from '../services/tfdrIndicator';
 import {
-  buildFullPuzzleTimeline,
+  buildNestedPuzzlePiP,
+  NestedPuzzlePiPData,
   OHLCBar,
-  OverlayPoint,
-  PuzzleState,
-  PuzzleVerdict
+  PuzzleState
 } from '../services/puzzleDecisionEngine';
 import { ZoomIn, ZoomOut, RotateCcw, ChevronDown, ChevronUp } from 'lucide-react';
 
-interface OverlayEntry {
-  point: OverlayPoint;
-  verdict: PuzzleVerdict;
-}
-
-function buildStepAfterPath(
-  points: { x: number; y: number | null }[]
-): string {
-  let d = '';
-  let prevY: number | null = null;
-  for (let i = 0; i < points.length; i++) {
-    const { x, y } = points[i];
-    if (y == null || !Number.isFinite(y)) {
-      prevY = null;
-      continue;
-    }
-    if (prevY == null) {
-      d += `M ${x.toFixed(1)},${y.toFixed(1)}`;
-    } else {
-      d += ` H ${x.toFixed(1)} V ${y.toFixed(1)}`;
-    }
-    prevY = y;
-  }
-  return d;
-}
-
-// 透明膠片同框疊合拼圖（Step-After 階梯生命線 + 右側獨立 0-100 TFDR 副軸 + 派生金色交匯點 + 截至週期 Tooltip）
+// L1 季線白/淺藍半透明箱體 + 50% 虛線 ｜ L2 月線黑 K 棒 + 50% 橫槓 ｜ L3 週線綠 K 棒 + 50% 橫槓 ｜ L4 日線黃色 HA K 棒 + 金星買點
 const FourTimeframeOverlayPiP: React.FC<{
   puzzleState: PuzzleState;
-  overlayEntries: OverlayEntry[];
-}> = ({ puzzleState, overlayEntries }) => {
+  nestedData: NestedPuzzlePiPData | null;
+}> = ({ puzzleState, nestedData }) => {
   // 桌面預設展開、手機版預設收合以免遮擋主圖
   const [pipCollapsed, setPipCollapsed] = useState<boolean>(() =>
     typeof window !== 'undefined' ? window.innerWidth < 768 : false
   );
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
-  const slice = overlayEntries.slice(-90);
-
   const chartGeometry = useMemo(() => {
-    if (slice.length < 2) return null;
-    // 左側統一價格軸（嚴禁混入 0-100 動能數值）
-    const priceVals: number[] = [];
-    for (let i = 0; i < slice.length; i++) {
-      const pt = slice[i].point;
-      if (Number.isFinite(pt.close) && pt.close > 0) priceVals.push(pt.close);
-      if (pt.qMid != null && Number.isFinite(pt.qMid) && pt.qMid > 0) priceVals.push(pt.qMid);
-      if (pt.mMid != null && Number.isFinite(pt.mMid) && pt.mMid > 0) priceVals.push(pt.mMid);
-      if (pt.wMid != null && Number.isFinite(pt.wMid) && pt.wMid > 0) priceVals.push(pt.wMid);
-    }
-    if (priceVals.length === 0) return null;
+    if (!nestedData || nestedData.dCandles.length < 2) return null;
+    const { qBoxes, mCandles, wCandles, dCandles, minPrice, maxPrice } = nestedData;
+    const len = dCandles.length;
+    const padPrice = (maxPrice - minPrice) * 0.04 || 1;
+    const loP = minPrice - padPrice;
+    const hiP = maxPrice + padPrice;
+    const priceRange = Math.max(0.001, hiP - loP);
 
-    const minPrice = Math.min(...priceVals);
-    const maxPrice = Math.max(...priceVals);
-    const priceRange = Math.max(0.001, maxPrice - minPrice);
-
-    const w = 292;
-    const h = 118;
-    const padLeft = 2;
-    const padRight = 24; // 右側預留獨立 0-100 TFDR 副軸刻度空間
-    const plotW = w - padLeft - padRight;
+    const w = 344;
+    const h = 148;
+    const padLeft = 4;
+    const padRight = 4;
     const padTop = 6;
     const padBottom = 6;
-    const pricePlotH = h - padTop - padBottom;
+    const plotW = w - padLeft - padRight;
+    const plotH = h - padTop - padBottom;
+    const stepX = plotW / len;
 
-    const toX = (idx: number) => padLeft + (idx / (slice.length - 1)) * plotW;
+    const toCenterX = (idx: number) => padLeft + idx * stepX + stepX / 2;
+    const toLeftX = (idx: number) => padLeft + idx * stepX;
+    const toRightX = (idx: number) => padLeft + (idx + 1) * stepX;
     const toPriceY = (v: number) =>
-      padTop + (1 - (v - minPrice) / priceRange) * pricePlotH;
-    // 右側獨立 TFDR 0-100 副軸映射（底部 35% 高度區間，視覺清晰且不干擾左軸價格刻度）
-    const tfdrAxisTop = h - padBottom - pricePlotH * 0.36;
-    const tfdrAxisHeight = pricePlotH * 0.36;
-    const toTfdrY = (score: number) =>
-      h - padBottom - (Math.max(0, Math.min(100, score)) / 100) * tfdrAxisHeight;
-
-    const qStepPath = buildStepAfterPath(
-      slice.map((e, idx) => ({
-        x: toX(idx),
-        y: e.point.qMid != null ? toPriceY(e.point.qMid) : null
-      }))
-    );
-    const mStepPath = buildStepAfterPath(
-      slice.map((e, idx) => ({
-        x: toX(idx),
-        y: e.point.mMid != null ? toPriceY(e.point.mMid) : null
-      }))
-    );
-    const wStepPath = buildStepAfterPath(
-      slice.map((e, idx) => ({
-        x: toX(idx),
-        y: e.point.wMid != null ? toPriceY(e.point.wMid) : null
-      }))
-    );
-    const dPoints = slice
-      .map((e, idx) => `${toX(idx).toFixed(1)},${toPriceY(e.point.close).toFixed(1)}`)
-      .join(' ');
-
-    const barW = Math.max(1.4, (plotW / slice.length) * 0.65);
-    const tfdrBars = slice.map((e, idx) => {
-      const cx = toX(idx);
-      const score = e.point.dTfdr;
-      const barTop = toTfdrY(score);
-      const barH = Math.max(1, h - padBottom - barTop);
-      const fill = score <= 25 ? '#10b981' : score >= 86 ? '#ef4444' : '#64748b';
-      const fillOpacity = score <= 25 || score >= 86 ? 0.68 : 0.22;
-      return {
-        x: (cx - barW / 2).toFixed(1),
-        y: barTop.toFixed(1),
-        width: barW.toFixed(1),
-        height: barH.toFixed(1),
-        fill,
-        fillOpacity
-      };
-    });
-
-    const crosses = slice
-      .map((e, idx) =>
-        e.verdict.isPuzzleCross
-          ? {
-              cx: toX(idx).toFixed(1),
-              cy: toPriceY(e.point.close).toFixed(1),
-              date: e.point.date,
-              price: e.point.close
-            }
-          : null
-      )
-      .filter((c): c is { cx: string; cy: string; date: string; price: number } => c !== null);
+      padTop + (1 - (v - loP) / priceRange) * plotH;
 
     return {
       w,
       h,
       padLeft,
       plotW,
+      padTop,
       padBottom,
-      minPrice,
-      maxPrice,
-      qStepPath,
-      mStepPath,
-      wStepPath,
-      dPoints,
-      tfdrBars,
-      crosses,
-      tfdrAxisTop,
-      toX,
-      toPriceY,
-      toTfdrY
+      stepX,
+      len,
+      loP,
+      hiP,
+      qBoxes,
+      mCandles,
+      wCandles,
+      dCandles,
+      toCenterX,
+      toLeftX,
+      toRightX,
+      toPriceY
     };
-  }, [slice]);
+  }, [nestedData]);
 
-  const activeEntry =
-    hoverIdx != null && slice[hoverIdx]
-      ? slice[hoverIdx]
-      : slice.length > 0
-      ? slice[slice.length - 1]
+  const activeCandle =
+    nestedData && hoverIdx != null && nestedData.dCandles[hoverIdx]
+      ? nestedData.dCandles[hoverIdx]
+      : nestedData && nestedData.dCandles.length > 0
+      ? nestedData.dCandles[nestedData.dCandles.length - 1]
       : null;
+
+  const tsp = puzzleState.timeSpacePrompt;
 
   return (
     <div
-      className="absolute top-2 left-2 z-20 w-[308px] sm:w-[344px] max-w-[92vw] bg-slate-950/90 backdrop-blur-md border border-indigo-500/50 rounded-lg p-2 shadow-2xl select-none"
+      className="absolute top-2 left-2 z-20 w-[328px] sm:w-[392px] max-w-[94vw] bg-slate-950/92 backdrop-blur-md border border-indigo-500/50 rounded-lg p-2 shadow-2xl select-none"
       onMouseDown={(e) => e.stopPropagation()}
       onTouchStart={(e) => e.stopPropagation()}
       onWheel={(e) => e.stopPropagation()}
@@ -176,11 +87,11 @@ const FourTimeframeOverlayPiP: React.FC<{
       <div className="flex items-center justify-between gap-2 pb-1 mb-1.5 border-b border-slate-800">
         <div className="flex items-center gap-1.5 min-w-0">
           <span className="text-[10.5px] font-bold text-amber-400 truncate">
-            🧩 四維階梯生命線疊合拼圖
+            🧩 四週期 50% 切線嵌套拼圖 (近1年)
           </span>
           {puzzleState.isPuzzleCross && (
             <span className="px-1 py-0.2 rounded bg-amber-500/20 border border-amber-400/60 text-amber-300 text-[9px] font-bold shrink-0">
-              ● 交匯買點
+              ★ 黃金買點
             </span>
           )}
         </div>
@@ -188,7 +99,7 @@ const FourTimeframeOverlayPiP: React.FC<{
           type="button"
           onClick={() => setPipCollapsed(prev => !prev)}
           className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:bg-slate-700 flex items-center gap-0.5 shrink-0 transition"
-          title={pipCollapsed ? '展開四維階梯生命線疊合拼圖' : '收合四維階梯生命線疊合拼圖'}
+          title={pipCollapsed ? '展開四週期 50% 切線嵌套拼圖' : '收合四週期 50% 切線嵌套拼圖'}
         >
           {pipCollapsed ? (
             <>
@@ -204,13 +115,12 @@ const FourTimeframeOverlayPiP: React.FC<{
 
       {!pipCollapsed && (
         <>
-          {chartGeometry && activeEntry ? (
-            <div className="relative bg-slate-900/90 rounded border border-slate-800 p-1">
-              {/* 統一左軸價格刻度 & 當前懸停/最新標註 */}
+          {chartGeometry && activeCandle && nestedData ? (
+            <div className="relative bg-slate-900/95 rounded border border-slate-800 p-1">
               <div className="flex justify-between text-[8.5px] font-mono text-slate-400 px-0.5 mb-0.5">
-                <span>高 ${chartGeometry.maxPrice.toFixed(2)}</span>
-                <span className="text-slate-300">
-                  {activeEntry.point.date} · ${activeEntry.point.close.toFixed(2)}
+                <span>高 ${nestedData.maxPrice.toFixed(2)}</span>
+                <span className="text-slate-200">
+                  {activeCandle.date} · 收 ${activeCandle.close.toFixed(2)}
                 </span>
               </div>
 
@@ -226,183 +136,269 @@ const FourTimeframeOverlayPiP: React.FC<{
                     0,
                     Math.min(1, (relX - chartGeometry.padLeft) / Math.max(1, chartGeometry.plotW))
                   );
-                  const idx = Math.round(norm * (slice.length - 1));
+                  const idx = Math.round(norm * (chartGeometry.len - 1));
                   setHoverIdx(idx);
                 }}
                 onMouseLeave={() => setHoverIdx(null)}
               >
-                {/* 右側獨立 0-100 TFDR 副軸參考刻度 */}
-                <line
-                  x1={chartGeometry.padLeft + chartGeometry.plotW}
-                  y1={chartGeometry.tfdrAxisTop}
-                  x2={chartGeometry.padLeft + chartGeometry.plotW}
-                  y2={chartGeometry.h - chartGeometry.padBottom}
-                  stroke="#334155"
-                  strokeWidth="0.7"
-                />
-                <text
-                  x={chartGeometry.padLeft + chartGeometry.plotW + 2}
-                  y={chartGeometry.tfdrAxisTop + 4}
-                  fill="#94a3b8"
-                  fontSize="7"
-                  fontFamily="monospace"
-                >
-                  100
-                </text>
-                <text
-                  x={chartGeometry.padLeft + chartGeometry.plotW + 2}
-                  y={chartGeometry.toTfdrY(25) + 2}
-                  fill="#10b981"
-                  fontSize="7"
-                  fontFamily="monospace"
-                >
-                  25
-                </text>
-                <text
-                  x={chartGeometry.padLeft + chartGeometry.plotW + 2}
-                  y={chartGeometry.h - chartGeometry.padBottom}
-                  fill="#64748b"
-                  fontSize="7"
-                  fontFamily="monospace"
-                >
-                  0
-                </text>
+                {/* L1 季線半透明方框（交替白 / 淺藍），嚴格貼合每季真實 [qLow, qHigh] + 50% 水平虛線 */}
+                {chartGeometry.qBoxes.map((qb) => {
+                  const x1 = chartGeometry.toLeftX(qb.startIdx);
+                  const x2 = chartGeometry.toRightX(qb.endIdx);
+                  const yTop = chartGeometry.toPriceY(qb.high);
+                  const yBot = chartGeometry.toPriceY(qb.low);
+                  const yMid50 = chartGeometry.toPriceY(qb.mid50);
+                  const boxH = Math.max(2, yBot - yTop);
+                  const fill = qb.isAltColor
+                    ? 'rgba(56, 189, 248, 0.20)'
+                    : 'rgba(255, 255, 255, 0.16)';
+                  const stroke = qb.isAltColor
+                    ? 'rgba(125, 211, 252, 0.45)'
+                    : 'rgba(255, 255, 255, 0.35)';
+                  return (
+                    <g key={`q-${qb.key}`}>
+                      <rect
+                        x={x1}
+                        y={yTop}
+                        width={Math.max(2, x2 - x1)}
+                        height={boxH}
+                        fill={fill}
+                        stroke={stroke}
+                        strokeWidth="0.7"
+                      />
+                      <line
+                        x1={x1}
+                        y1={yMid50}
+                        x2={x2}
+                        y2={yMid50}
+                        stroke="#e2e8f0"
+                        strokeWidth="1"
+                        strokeDasharray="3,2"
+                        opacity="0.85"
+                      />
+                    </g>
+                  );
+                })}
 
-                {/* L5 底部 TFDR 0-100 副軸柱狀圖 */}
-                {chartGeometry.tfdrBars.map((b, idx) => (
-                  <rect
-                    key={idx}
-                    x={b.x}
-                    y={b.y}
-                    width={b.width}
-                    height={b.height}
-                    fill={b.fill}
-                    fillOpacity={b.fillOpacity}
-                    rx="0.6"
-                  />
-                ))}
+                {/* L2 月線黑色 K 棒 + 50% 橫槓 */}
+                {chartGeometry.mCandles.map((mc) => {
+                  const x1 = chartGeometry.toLeftX(mc.startIdx);
+                  const x2 = chartGeometry.toRightX(mc.endIdx);
+                  const spanW = Math.max(4, x2 - x1);
+                  const cx = (x1 + x2) / 2;
+                  const bodyW = Math.max(3, spanW * 0.58);
+                  const yHigh = chartGeometry.toPriceY(mc.high);
+                  const yLow = chartGeometry.toPriceY(mc.low);
+                  const yOpen = chartGeometry.toPriceY(mc.open);
+                  const yClose = chartGeometry.toPriceY(mc.close);
+                  const yMid50 = chartGeometry.toPriceY(mc.mid50);
+                  const bodyTop = Math.min(yOpen, yClose);
+                  const bodyH = Math.max(2, Math.abs(yClose - yOpen));
+                  return (
+                    <g key={`m-${mc.key}`}>
+                      <line
+                        x1={cx}
+                        y1={yHigh}
+                        x2={cx}
+                        y2={yLow}
+                        stroke="#64748b"
+                        strokeWidth="1"
+                      />
+                      <rect
+                        x={cx - bodyW / 2}
+                        y={bodyTop}
+                        width={bodyW}
+                        height={bodyH}
+                        fill="rgba(9, 9, 11, 0.85)"
+                        stroke="#94a3b8"
+                        strokeWidth="0.75"
+                      />
+                      <line
+                        x1={cx - bodyW / 2 - 1}
+                        y1={yMid50}
+                        x2={cx + bodyW / 2 + 1}
+                        y2={yMid50}
+                        stroke="#f8fafc"
+                        strokeWidth="1.15"
+                      />
+                    </g>
+                  );
+                })}
 
-                {/* L1 季線生命線：step-after 粗紫實線 */}
-                {chartGeometry.qStepPath && (
-                  <path
-                    fill="none"
-                    stroke="#a855f7"
-                    strokeWidth="2"
-                    opacity="0.78"
-                    d={chartGeometry.qStepPath}
-                  />
-                )}
+                {/* L3 週線綠色 K 棒 + 50% 橫槓 */}
+                {chartGeometry.wCandles.map((wc) => {
+                  const x1 = chartGeometry.toLeftX(wc.startIdx);
+                  const x2 = chartGeometry.toRightX(wc.endIdx);
+                  const spanW = Math.max(2, x2 - x1);
+                  const cx = (x1 + x2) / 2;
+                  const bodyW = Math.max(1.8, spanW * 0.64);
+                  const yHigh = chartGeometry.toPriceY(wc.high);
+                  const yLow = chartGeometry.toPriceY(wc.low);
+                  const yOpen = chartGeometry.toPriceY(wc.open);
+                  const yClose = chartGeometry.toPriceY(wc.close);
+                  const yMid50 = chartGeometry.toPriceY(wc.mid50);
+                  const bodyTop = Math.min(yOpen, yClose);
+                  const bodyH = Math.max(1.5, Math.abs(yClose - yOpen));
+                  return (
+                    <g key={`w-${wc.key}`}>
+                      <line
+                        x1={cx}
+                        y1={yHigh}
+                        x2={cx}
+                        y2={yLow}
+                        stroke="rgba(52, 211, 153, 0.72)"
+                        strokeWidth="0.75"
+                      />
+                      <rect
+                        x={cx - bodyW / 2}
+                        y={bodyTop}
+                        width={bodyW}
+                        height={bodyH}
+                        fill="rgba(16, 185, 129, 0.42)"
+                        stroke="rgba(52, 211, 153, 0.82)"
+                        strokeWidth="0.55"
+                      />
+                      <line
+                        x1={cx - bodyW / 2 - 0.8}
+                        y1={yMid50}
+                        x2={cx + bodyW / 2 + 0.8}
+                        y2={yMid50}
+                        stroke="#6ee7b7"
+                        strokeWidth="1.05"
+                      />
+                    </g>
+                  );
+                })}
 
-                {/* L2 月線生命線：step-after 粗黃實線 */}
-                {chartGeometry.mStepPath && (
-                  <path
-                    fill="none"
-                    stroke="#f59e0b"
-                    strokeWidth="1.8"
-                    opacity="0.85"
-                    d={chartGeometry.mStepPath}
-                  />
-                )}
+                {/* L4 最前景：日線黃色 HA K 棒 + 黃金星 ★ 交匯買點 */}
+                {chartGeometry.dCandles.map((dc, idx) => {
+                  const cx = chartGeometry.toCenterX(idx);
+                  const bodyW = Math.max(1, chartGeometry.stepX * 0.72);
+                  const yHigh = chartGeometry.toPriceY(dc.high);
+                  const yLow = chartGeometry.toPriceY(dc.low);
+                  const yHaOpen = chartGeometry.toPriceY(dc.haOpen);
+                  const yHaClose = chartGeometry.toPriceY(dc.haClose);
+                  const bodyTop = Math.min(yHaOpen, yHaClose);
+                  const bodyH = Math.max(1.2, Math.abs(yHaClose - yHaOpen));
+                  const fill = dc.isHaBull ? '#facc15' : '#422006';
+                  const stroke = dc.isHaBull ? '#fef08a' : '#ca8a04';
+                  return (
+                    <g key={`d-${dc.date}`}>
+                      <line
+                        x1={cx}
+                        y1={yHigh}
+                        x2={cx}
+                        y2={yLow}
+                        stroke={dc.isHaBull ? '#fde047' : '#a16207'}
+                        strokeWidth="0.65"
+                      />
+                      <rect
+                        x={cx - bodyW / 2}
+                        y={bodyTop}
+                        width={bodyW}
+                        height={bodyH}
+                        fill={fill}
+                        stroke={stroke}
+                        strokeWidth="0.4"
+                      />
+                    </g>
+                  );
+                })}
 
-                {/* L3 週線生命線：step-after 藍色虛線 */}
-                {chartGeometry.wStepPath && (
-                  <path
-                    fill="none"
-                    stroke="#38bdf8"
-                    strokeWidth="1.2"
-                    strokeDasharray="3,2"
-                    d={chartGeometry.wStepPath}
-                  />
-                )}
-
-                {/* L4 日線走勢線：白色細實線 */}
-                <polyline
-                  fill="none"
-                  stroke="#ffffff"
-                  strokeWidth="1.5"
-                  points={chartGeometry.dPoints}
-                />
+                {/* 金色星形標記：上穿週線 50% 切線之 GOLDEN_BUY 交匯點 */}
+                {chartGeometry.dCandles
+                  .filter(dc => dc.isGoldenStar)
+                  .map(dc => {
+                    const cx = chartGeometry.toCenterX(dc.idx);
+                    const cy = chartGeometry.toPriceY(dc.low) + 7;
+                    return (
+                      <g key={`star-${dc.date}`}>
+                        <circle cx={cx} cy={cy - 2} r="5.5" fill="#fbbf24" opacity="0.25" />
+                        <text
+                          x={cx}
+                          y={cy + 1.5}
+                          textAnchor="middle"
+                          fill="#fbbf24"
+                          stroke="#78350f"
+                          strokeWidth="0.35"
+                          fontSize="10"
+                          fontWeight="bold"
+                        >
+                          ★
+                        </text>
+                      </g>
+                    );
+                  })}
 
                 {/* 懸停垂直指示線 */}
-                {hoverIdx != null && slice[hoverIdx] && (
+                {hoverIdx != null && chartGeometry.dCandles[hoverIdx] && (
                   <line
-                    x1={chartGeometry.toX(hoverIdx)}
-                    y1={4}
-                    x2={chartGeometry.toX(hoverIdx)}
+                    x1={chartGeometry.toCenterX(hoverIdx)}
+                    y1={chartGeometry.padTop}
+                    x2={chartGeometry.toCenterX(hoverIdx)}
                     y2={chartGeometry.h - chartGeometry.padBottom}
                     stroke="#94a3b8"
                     strokeWidth="0.8"
                     strokeDasharray="2,2"
                   />
                 )}
-
-                {/* L6 派生金色交匯圓點 PUZZLE_CROSS */}
-                {chartGeometry.crosses.map((c, idx) => (
-                  <g key={idx}>
-                    <circle cx={c.cx} cy={c.cy} r="6" fill="#fbbf24" opacity="0.28" />
-                    <circle cx={c.cx} cy={c.cy} r="3.5" fill="#fbbf24" stroke="#ffffff" strokeWidth="0.7" />
-                  </g>
-                ))}
               </svg>
 
-              {/* 已完結週期截斷標註 Tooltip（「截至 2026-Q3」） */}
+              {/* 三層 50% 平衡切線即時數值註腳 */}
               <div className="mt-1 px-1 py-0.5 rounded bg-slate-950/90 border border-slate-800/80 text-[8.5px] font-mono text-slate-300 space-y-0.5">
                 <div className="flex justify-between">
-                  <span>低 ${chartGeometry.minPrice.toFixed(2)}</span>
-                  <span className="text-slate-400">
-                    日TFDR {activeEntry.point.dTfdr}｜交匯點 {chartGeometry.crosses.length} 枚
+                  <span>低 ${nestedData.minPrice.toFixed(2)}</span>
+                  <span className="text-amber-300">
+                    日TFDR {activeCandle.dTfdr}｜金星買點 {nestedData.starCount} 枚
                   </span>
                 </div>
-                <div className="flex flex-wrap gap-x-2 text-slate-300">
-                  <span className="text-purple-300">
-                    季:{activeEntry.point.qMid != null ? `$${activeEntry.point.qMid}` : '不足'}
-                    {activeEntry.point.qPeriodEnd ? `(截至 ${activeEntry.point.qPeriodEnd})` : ''}
+                <div className="flex flex-wrap gap-x-2">
+                  <span className="text-sky-200">
+                    季50%:${(activeCandle.qMid50 ?? tsp.qMid50).toFixed(2)}
                   </span>
-                  <span className="text-amber-300">
-                    月:{activeEntry.point.mMid != null ? `$${activeEntry.point.mMid}` : '不足'}
-                    {activeEntry.point.mPeriodEnd ? `(截至 ${activeEntry.point.mPeriodEnd})` : ''}
+                  <span className="text-slate-200">
+                    月50%:${(activeCandle.mMid50 ?? tsp.mMid50).toFixed(2)}
                   </span>
-                  <span className="text-sky-300">
-                    週:{activeEntry.point.wMid != null ? `$${activeEntry.point.wMid}` : '不足'}
-                    {activeEntry.point.wPeriodEnd ? `(截至 ${activeEntry.point.wPeriodEnd})` : ''}
+                  <span className="text-emerald-300">
+                    週50%:${(activeCandle.wMid50 ?? tsp.wMid50).toFixed(2)}
                   </span>
                 </div>
               </div>
             </div>
           ) : (
             <div className="bg-slate-900/90 p-2 rounded border border-slate-800 text-[10px] text-slate-400">
-              四維生命線疊合數據累積中...
+              一年期嵌套 50% 切線數據累積中...
             </div>
           )}
 
           {/* 圖層色碼對照與關鍵價位 */}
           <div className="mt-1 flex flex-wrap items-center justify-between gap-x-2 text-[9px] text-slate-300">
             <span className="flex items-center gap-1">
-              <span className="w-2.5 h-0.5 bg-[#a855f7] inline-block" /> 季階梯
+              <span className="w-2.5 h-2 bg-sky-400/30 border border-sky-300/60 inline-block" /> 季箱50%
             </span>
             <span className="flex items-center gap-1">
-              <span className="w-2.5 h-0.5 bg-[#f59e0b] inline-block" /> 月階梯
+              <span className="w-2 h-2.5 bg-zinc-950 border border-slate-400 inline-block" /> 月黑K
             </span>
             <span className="flex items-center gap-1">
-              <span className="w-2.5 h-0.5 border-b border-dashed border-[#38bdf8] inline-block" /> 週階梯
+              <span className="w-2 h-2.5 bg-emerald-500/45 border border-emerald-400 inline-block" /> 週綠K
             </span>
             <span className="flex items-center gap-1">
-              <span className="w-2.5 h-0.5 bg-white inline-block" /> 日
+              <span className="w-2 h-2.5 bg-yellow-400 inline-block" /> 日黃HA
             </span>
             <span className="flex items-center gap-1 text-amber-300 font-semibold">
-              <span className="w-2 h-2 rounded-full bg-[#fbbf24] inline-block" /> 交匯買點
+              ★ 黃金買點
             </span>
           </div>
 
           <div className="mt-1 pt-1 border-t border-slate-800 text-[9.5px] text-slate-300 flex justify-between font-mono">
             <span>
-              低吸:<b className="text-emerald-400">${puzzleState.levels.buyZone.low}</b>
+              低吸:<b className="text-emerald-400">${tsp.buyZone.low}</b>
             </span>
             <span>
-              高拋:<b className="text-amber-400">${puzzleState.levels.takeProfitZone.low}</b>
+              高拋:<b className="text-amber-400">${tsp.takeProfitZone.low}</b>
             </span>
             <span>
-              止損:<b className="text-red-400">${puzzleState.levels.invalidationPrice}</b>
+              清倉:<b className="text-red-400">${tsp.invalidationPrice}</b>
             </span>
           </div>
         </>
@@ -492,10 +488,10 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     return data;
   }, [data, isReplay, replayIndex]);
 
-  // 從完整日線（fallback 至 activeData）構建無未來函數階梯疊合序列與派生 PuzzleVerdict
-  const overlayEntries = useMemo<OverlayEntry[]>(() => {
+  // 從完整日線（fallback 至 activeData）構建無未來函數一年期 (~252日) L1~L4 嵌套 50% 平衡切線拼圖
+  const nestedPiPData = useMemo<NestedPuzzlePiPData | null>(() => {
     const base: RawKline[] = dailyKlines.length > 0 ? dailyKlines : activeData;
-    if (!base.length) return [];
+    if (!base.length) return null;
     const replayCutoff =
       isReplay && activeData.length > 0 ? (activeData[activeData.length - 1].date || '').slice(0, 10) : null;
     const ohlc: OHLCBar[] = base
@@ -517,17 +513,8 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       )
       .sort((a, b) => a.date.localeCompare(b.date));
 
-    if (!ohlc.length) return [];
-    const timeline = buildFullPuzzleTimeline(ohlc);
-    const startIdx = Math.max(0, timeline.overlays.length - 90);
-    const entries: OverlayEntry[] = [];
-    for (let i = startIdx; i < timeline.overlays.length; i++) {
-      entries.push({
-        point: timeline.overlays[i],
-        verdict: timeline.verdicts[i]
-      });
-    }
-    return entries;
+    if (ohlc.length < 2) return null;
+    return buildNestedPuzzlePiP(ohlc, 252);
   }, [dailyKlines, activeData, isReplay]);
 
   // Reset or adjust viewRange on data changes (預設顯示最近約 35%，保留過往歷史供向左平移查看)
@@ -660,8 +647,12 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
 
     const lastTfdr = tfdrSeries.length > 0 ? tfdrSeries[tfdrSeries.length - 1] : null;
     const isLatestInView = endIdx === activeData.length - 1;
-    const showClassicTfdrTop = Boolean(chartMode === 'CLASSIC' && isLatestInView && lastTfdr && lastTfdr.score > 80);
-    const showClassicTfdrBottom = Boolean(chartMode === 'CLASSIC' && isLatestInView && lastTfdr && lastTfdr.score < 30);
+    const activeTfdrScore =
+      (isLatestInView && lastTfdr ? lastTfdr.score : visibleTfdr[visibleTfdr.length - 1]?.score) ?? 50;
+    const expandTopBands = activeTfdrScore >= 80;
+    const expandBottomBands = activeTfdrScore <= 20;
+    const showClassicTfdrTop = Boolean(chartMode === 'CLASSIC' && isLatestInView && lastTfdr && lastTfdr.score >= 80);
+    const showClassicTfdrBottom = Boolean(chartMode === 'CLASSIC' && isLatestInView && lastTfdr && lastTfdr.score <= 20);
 
     if (chartMode === 'CLASSIC') {
       // CLASSIC 模式：納入核心線、支撐阻力與臨界單線
@@ -681,11 +672,13 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
         minPrice = Math.min(minPrice, lastTfdr.band15);
       }
     } else {
-      // TFDR 模式：納入可視區 band95 / band10 上下 6 軌通道極值
+      // TFDR 動態展開模式：平常安全中區只納 band85/band15 兩條邊界線，進入 >=80 / <=20 才展開 band95 / band10 極值
       visibleTfdr.forEach((pt, idx) => {
         if (startIdx + idx >= 14 || visibleTfdr.length <= 14) {
-          if (pt.band95 > 0) maxPrice = Math.max(maxPrice, pt.band95);
-          if (pt.band10 > 0) minPrice = Math.min(minPrice, pt.band10);
+          const topExt = expandTopBands ? pt.band95 : pt.band85;
+          const botExt = expandBottomBands ? pt.band10 : pt.band15;
+          if (topExt > 0) maxPrice = Math.max(maxPrice, topExt);
+          if (botExt > 0) minPrice = Math.min(minPrice, botExt);
         }
       });
     }
@@ -771,40 +764,44 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       ctx.stroke();
       ctx.setLineDash([]);
     } else if (visibleTfdr.length > 0) {
-      // TFDR 模式：(a) 隱藏繁雜均線 (b) 繪製上下各 3 條動態波動曲線 + 半透明帶狀陰影
+      // TFDR 動態展開奇點軌道：
+      // - 安全中區 (20 < score < 80)：極簡雙邊界線（僅頂部 85 壓力線 + 底部 15 支撐線）
+      // - 衝入 >= 80 紅色高危區：動態展開頂部 3 條紅軌 (85 / 90 / 95) + 紅帶陰影，底部維持單線
+      // - 跌入 <= 20 綠色奇點區：動態展開底部 3 條綠軌 (20/25 / 15 / 10) + 綠帶陰影，頂部維持單線
       ctx.save();
 
-      // 1. 紅色危險天花板帶半透明陰影 (band85 ~ band95)
-      ctx.beginPath();
-      visibleTfdr.forEach((pt, i) => {
-        const x = getX(i);
-        const y = getY(pt.band95);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      for (let i = visibleTfdr.length - 1; i >= 0; i--) {
-        ctx.lineTo(getX(i), getY(visibleTfdr[i].band85));
+      if (expandTopBands) {
+        ctx.beginPath();
+        visibleTfdr.forEach((pt, i) => {
+          const x = getX(i);
+          const y = getY(pt.band95);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        for (let i = visibleTfdr.length - 1; i >= 0; i--) {
+          ctx.lineTo(getX(i), getY(visibleTfdr[i].band85));
+        }
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.10)';
+        ctx.fill();
       }
-      ctx.closePath();
-      ctx.fillStyle = 'rgba(239, 68, 68, 0.08)';
-      ctx.fill();
 
-      // 2. 綠色抄底地板帶半透明陰影 (band25 ~ band10)
-      ctx.beginPath();
-      visibleTfdr.forEach((pt, i) => {
-        const x = getX(i);
-        const y = getY(pt.band25);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      for (let i = visibleTfdr.length - 1; i >= 0; i--) {
-        ctx.lineTo(getX(i), getY(visibleTfdr[i].band10));
+      if (expandBottomBands) {
+        ctx.beginPath();
+        visibleTfdr.forEach((pt, i) => {
+          const x = getX(i);
+          const y = getY(pt.band25);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        for (let i = visibleTfdr.length - 1; i >= 0; i--) {
+          ctx.lineTo(getX(i), getY(visibleTfdr[i].band10));
+        }
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(34, 197, 94, 0.10)';
+        ctx.fill();
       }
-      ctx.closePath();
-      ctx.fillStyle = 'rgba(34, 197, 94, 0.08)';
-      ctx.fill();
 
-      // 輔助繪製單條動態曲線
       const drawDynamicCurve = (
         extractor: (pt: (typeof visibleTfdr)[number]) => number,
         color: string,
@@ -824,18 +821,22 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
         ctx.stroke();
       };
 
-      // 上方三條紅色動態曲線
-      drawDynamicCurve(pt => pt.band95, '#ef4444', 1.5, []);      // 95 極度危險頂 (深紅實線)
-      drawDynamicCurve(pt => pt.band90, '#f87171', 1.2, [5, 4]);  // 90 奇點逃頂線 (亮紅虛線)
-      drawDynamicCurve(pt => pt.band85, '#fca5a5', 1.0, [2, 3]);  // 85 加速預警線 (淺紅點線)
+      // 上方軌道：平常只畫單線 85 邊界；>=80 時動態展開 90 / 95 紅軌
+      drawDynamicCurve(pt => pt.band85, '#fca5a5', expandTopBands ? 1.1 : 1.4, [3, 3]);
+      if (expandTopBands) {
+        drawDynamicCurve(pt => pt.band90, '#f87171', 1.3, [5, 4]);
+        drawDynamicCurve(pt => pt.band95, '#ef4444', 1.6, []);
+      }
 
-      // 下方三條綠色動態曲線
-      drawDynamicCurve(pt => pt.band25, '#86efac', 1.0, [2, 3]);  // 25 觀察支撐線 (淺綠點線)
-      drawDynamicCurve(pt => pt.band15, '#4ade80', 1.2, [5, 4]);  // 15 奇點抄底線 (亮綠虛線)
-      drawDynamicCurve(pt => pt.band10, '#22c55e', 1.5, []);      // 10 極度恐慌底 (深綠實線)
+      // 下方軌道：平常只畫單線 15 邊界；<=20 時動態展開 20/25 / 10 綠軌
+      drawDynamicCurve(pt => pt.band15, '#4ade80', expandBottomBands ? 1.2 : 1.4, [4, 3]);
+      if (expandBottomBands) {
+        drawDynamicCurve(pt => pt.band25, '#86efac', 1.1, [2, 3]);
+        drawDynamicCurve(pt => pt.band10, '#22c55e', 1.6, []);
+      }
       ctx.setLineDash([]);
 
-      // 右側末端 6 軌標註（自適應防重疊間距）
+      // 右側末端標註（根據目前是否處於動態展開狀態顯示）
       const rightMostTfdr = visibleTfdr[visibleTfdr.length - 1];
       if (rightMostTfdr) {
         const drawEndTag = (yCenter: number, text: string, color: string, bg: string) => {
@@ -859,23 +860,27 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           ctx.fillText(text, bx + bw / 2, by + 9.5);
         };
 
-        // 頂部 3 標籤從上往下防重疊排列
-        const y95 = getY(rightMostTfdr.band95);
-        const y90 = Math.max(y95 + 14, getY(rightMostTfdr.band90));
-        const y85 = Math.max(y90 + 14, getY(rightMostTfdr.band85));
+        if (expandTopBands) {
+          const y95 = getY(rightMostTfdr.band95);
+          const y90 = Math.max(y95 + 14, getY(rightMostTfdr.band90));
+          const y85 = Math.max(y90 + 14, getY(rightMostTfdr.band85));
+          drawEndTag(y95, '95 極頂', '#ef4444', 'rgba(69, 10, 10, 0.88)');
+          drawEndTag(y90, '90 危險', '#f87171', 'rgba(69, 10, 10, 0.84)');
+          drawEndTag(y85, '85 警戒', '#fca5a5', 'rgba(69, 10, 10, 0.78)');
+        } else {
+          drawEndTag(getY(rightMostTfdr.band85), '85 壓力邊界', '#fca5a5', 'rgba(69, 10, 10, 0.72)');
+        }
 
-        drawEndTag(y95, '95 極頂', '#ef4444', 'rgba(69, 10, 10, 0.85)');
-        drawEndTag(y90, '90 危險', '#f87171', 'rgba(69, 10, 10, 0.82)');
-        drawEndTag(y85, '85 警戒', '#fca5a5', 'rgba(69, 10, 10, 0.78)');
-
-        // 底部 3 標籤從下往上防重疊排列
-        const y10 = getY(rightMostTfdr.band10);
-        const y15 = Math.min(y10 - 14, getY(rightMostTfdr.band15));
-        const y25 = Math.min(y15 - 14, getY(rightMostTfdr.band25));
-
-        drawEndTag(y25, '25 觀察', '#86efac', 'rgba(5, 46, 22, 0.78)');
-        drawEndTag(y15, '15 黃金底', '#4ade80', 'rgba(5, 46, 22, 0.82)');
-        drawEndTag(y10, '10 極底', '#22c55e', 'rgba(5, 46, 22, 0.85)');
+        if (expandBottomBands) {
+          const y10 = getY(rightMostTfdr.band10);
+          const y15 = Math.min(y10 - 14, getY(rightMostTfdr.band15));
+          const y25 = Math.min(y15 - 14, getY(rightMostTfdr.band25));
+          drawEndTag(y25, '20 警戒', '#86efac', 'rgba(5, 46, 22, 0.78)');
+          drawEndTag(y15, '15 黃金底', '#4ade80', 'rgba(5, 46, 22, 0.84)');
+          drawEndTag(y10, '10 極底', '#22c55e', 'rgba(5, 46, 22, 0.88)');
+        } else {
+          drawEndTag(getY(rightMostTfdr.band15), '15 支撐邊界', '#4ade80', 'rgba(5, 46, 22, 0.72)');
+        }
       }
       ctx.restore();
     }
@@ -1613,7 +1618,11 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
         <div className="text-xs text-gray-300 font-medium">
           {chartMode === 'CLASSIC'
             ? '目前顯示：1836.15 數律共振 + 強支強阻'
-            : '目前顯示：TFDR 6 軌動態奇點通道 (95/90/85 頂帶 · 25/15/10 底帶)'}
+            : puzzleState?.timeSpacePrompt.singularityStatus === 'UPPER_EXPANSION'
+            ? '目前顯示：TFDR 動態奇點軌道 ⚠️ 上方三線展開 (85/90/95 警戒)'
+            : puzzleState?.timeSpacePrompt.singularityStatus === 'LOWER_EXPANSION'
+            ? '目前顯示：TFDR 動態奇點軌道 🟢 下方三線展開 (20/15/10 黃金底)'
+            : '目前顯示：TFDR 動態奇點軌道 (安全中區雙線邊界：85 壓力 · 15 支撐)'}
         </div>
         <div className="flex items-center gap-2">
           {/* Zoom controls */}
@@ -1680,23 +1689,14 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
             </>
           ) : (
             <>
-              <span className="flex items-center gap-1 text-[#ef4444] font-bold">
-                <span className="w-3 h-0.5 inline-block bg-[#ef4444]"></span> 95極頂
-              </span>
-              <span className="flex items-center gap-1 text-[#f87171]">
-                <span className="w-3 h-0.5 inline-block border-b border-dashed border-[#f87171]"></span> 90危險
-              </span>
               <span className="flex items-center gap-1 text-[#fca5a5]">
-                <span className="w-3 h-0.5 inline-block border-b border-dotted border-[#fca5a5]"></span> 85警戒
-              </span>
-              <span className="flex items-center gap-1 text-[#86efac]">
-                <span className="w-3 h-0.5 inline-block border-b border-dotted border-[#86efac]"></span> 25觀察
+                <span className="w-3 h-0.5 inline-block border-b border-dotted border-[#fca5a5]"></span> 85壓力邊界
               </span>
               <span className="flex items-center gap-1 text-[#4ade80]">
-                <span className="w-3 h-0.5 inline-block border-b border-dashed border-[#4ade80]"></span> 15黃金底
+                <span className="w-3 h-0.5 inline-block border-b border-dashed border-[#4ade80]"></span> 15支撐邊界
               </span>
-              <span className="flex items-center gap-1 text-[#22c55e] font-bold">
-                <span className="w-3 h-0.5 inline-block bg-[#22c55e]"></span> 10極底
+              <span className="text-slate-400 text-[10px]">
+                (進入 ≥80 / ≤20 動態展開三線奇點帶)
               </span>
               <span className="text-[#10b981]">▲ 奇點買</span>
               <span className="text-[#ef4444]">▼ 奇點沽</span>
@@ -1724,9 +1724,9 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       >
         <canvas ref={canvasRef} className="w-full h-full block" />
 
-        {/* 左上角：透明膠片四維生命線同框疊合拼圖 (SVG Overlay Canvas) */}
+        {/* 左上角：一年期四週期 50% 平衡切線嵌套拼圖 (SVG Overlay Canvas) */}
         {puzzleState && (
-          <FourTimeframeOverlayPiP puzzleState={puzzleState} overlayEntries={overlayEntries} />
+          <FourTimeframeOverlayPiP puzzleState={puzzleState} nestedData={nestedPiPData} />
         )}
 
         {/* Loading Overlay */}

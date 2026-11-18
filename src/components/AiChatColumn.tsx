@@ -96,16 +96,16 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
         </span>
       </div>
 
-      {/* 單卡置頂覆蓋模式：只顯示最新交易日 (dailyData.length - 1) 拼圖關鍵位與開盤觀察重點 */}
+      {/* 單卡置頂覆蓋模式：只顯示最新交易日 (dailyData.length - 1) 50% 切線時空提示單 */}
       {latestPuzzle && (
         <div className="mb-1.5 p-2.5 rounded-md bg-slate-900/95 border border-indigo-500/50 text-xs shrink-0 shadow">
           <div className="flex items-center justify-between gap-2 pb-1.5 mb-1.5 border-b border-slate-800">
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className="font-bold text-amber-300">
-                🎯 {latestPuzzle.symbol} 最新單日預警
+                🎯 {latestPuzzle.symbol} 時空提示單
               </span>
               <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
-                {latestPuzzle.signalDate} · ${latestPuzzle.currentPrice}
+                {latestPuzzle.timeSpacePrompt.triggerDate} · ${latestPuzzle.currentPrice}
               </span>
             </div>
             <span
@@ -120,48 +120,59 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
               {latestPuzzle.regime === 'UPTREND_CHANNEL'
                 ? '大升通道(禁空)'
                 : latestPuzzle.regime === 'DOWNTREND_CHANNEL'
-                ? '大跌通道(雙破48)'
-                : '中軸過渡區'}{' '}
+                ? '大跌通道(雙破50%)'
+                : '切線過渡區'}{' '}
               · {signalLabelMap[latestPuzzle.signal]}
             </span>
           </div>
 
-          <div className="mb-1.5 px-2 py-1 rounded bg-slate-950/80 border border-slate-800 font-mono text-[10px] text-cyan-300 flex flex-wrap items-center justify-between gap-1">
-            <span>
-              月動能 {latestPuzzle.timeframes.M.mom} ({latestPuzzle.timeframes.M.mom >= 50 ? '>50' : latestPuzzle.timeframes.M.mom < 48 ? '<48破軸' : '48-50'})
+          <div className="mb-1.5 px-2 py-1 rounded bg-slate-950/85 border border-slate-800 font-mono text-[10px] flex flex-wrap items-center justify-between gap-1">
+            <span className="text-sky-300">
+              季50%: <b>${latestPuzzle.timeSpacePrompt.qMid50}</b>
             </span>
-            <span>
-              週動能 {latestPuzzle.timeframes.W.mom} ({latestPuzzle.timeframes.W.mom >= 50 ? '未穿50' : latestPuzzle.timeframes.W.mom < 48 ? '<48破軸' : '45-50'})
+            <span className="text-slate-200">
+              月50%: <b>${latestPuzzle.timeSpacePrompt.mMid50}</b>
             </span>
-            <span>
-              日動能 {latestPuzzle.timeframes.D.mom} ({latestPuzzle.timeframes.D.mom <= 24 ? '下方奇點' : latestPuzzle.timeframes.D.mom >= 85 ? '上方奇點' : '中性'})
+            <span className="text-emerald-300">
+              週50%: <b>${latestPuzzle.timeSpacePrompt.wMid50}</b>
+            </span>
+            <span
+              className={
+                latestPuzzle.timeSpacePrompt.singularityStatus === 'UPPER_EXPANSION'
+                  ? 'text-red-400 font-bold'
+                  : latestPuzzle.timeSpacePrompt.singularityStatus === 'LOWER_EXPANSION'
+                  ? 'text-emerald-400 font-bold'
+                  : 'text-cyan-300'
+              }
+            >
+              {latestPuzzle.timeSpacePrompt.singularityLabel}
             </span>
           </div>
 
           <div className="grid grid-cols-3 gap-1 mb-1.5 text-[10.5px]">
             <div className="p-1.5 rounded bg-emerald-950/40 border border-emerald-700/40">
-              <div className="text-emerald-400 text-[9.5px]">🟢 買入埋伏區</div>
+              <div className="text-emerald-400 text-[9.5px]">🟢 低吸埋伏區</div>
               <div className="font-mono font-bold text-white">
-                ${latestPuzzle.levels.buyZone.low}–${latestPuzzle.levels.buyZone.high}
+                ${latestPuzzle.timeSpacePrompt.buyZone.low}–${latestPuzzle.timeSpacePrompt.buyZone.high}
               </div>
             </div>
             <div className="p-1.5 rounded bg-red-950/40 border border-red-700/40">
-              <div className="text-red-400 text-[9.5px]">🔴 高拋目標區</div>
+              <div className="text-red-400 text-[9.5px]">🔴 高拋警戒區</div>
               <div className="font-mono font-bold text-white">
-                ${latestPuzzle.levels.takeProfitZone.low}–${latestPuzzle.levels.takeProfitZone.high}
+                ${latestPuzzle.timeSpacePrompt.takeProfitZone.low}–${latestPuzzle.timeSpacePrompt.takeProfitZone.high}
               </div>
             </div>
             <div className="p-1.5 rounded bg-amber-950/40 border border-amber-700/40">
-              <div className="text-amber-400 text-[9.5px]">🛑 失效止損價</div>
+              <div className="text-amber-400 text-[9.5px]">🛑 清倉失效價</div>
               <div className="font-mono font-bold text-white">
-                ${latestPuzzle.levels.invalidationPrice}
+                ${latestPuzzle.timeSpacePrompt.invalidationPrice}
               </div>
             </div>
           </div>
 
           <div className="text-[10.5px] text-slate-300 space-y-0.5 leading-snug">
             <div className="text-indigo-300 font-bold text-[10px]">
-              👁️ T+1 開盤觀察重點（僅顯示最新交易日）：
+              👁️ T+1 開盤驗假破觀察重點（僅顯示最新交易日）：
             </div>
             {latestPuzzle.keyPoints.map((pt, i) => (
               <div key={i} className="text-slate-300">
