@@ -9,8 +9,12 @@ export interface OHLCBar {
 export interface TimeframeFeature {
   bars: number;
   haBull: boolean;
+  haHigh: number;
+  prevHaHigh: number;
   haLow: number;
   prevHaLow: number;
+  haBreakUp: boolean;
+  haBreakDown: boolean;
   midline: number;
   prevMidline: number;
   high: number;
@@ -36,6 +40,12 @@ export interface OverlayPoint {
   dTfdr: number;
   dTfdrLow3?: number;
   dTfdrLow5?: number;
+  dTfdrLow6?: number;
+  dTfdrHigh3?: number;
+  dTfdrHigh6?: number;
+  dHaBull?: boolean;
+  dHaBreakUp?: boolean;
+  dHaBreakDown?: boolean;
   ha5High?: number;
   prevWTfdr?: number | null;
   // 已完結週期階梯生命線（未完結為 null）
@@ -55,10 +65,30 @@ export interface OverlayPoint {
   qTfdr: number | null;
   mTfdr: number | null;
   wTfdr: number | null;
+  qHaBull?: boolean;
+  mHaBull?: boolean;
+  wHaBull?: boolean;
+  qHaBreakUp?: boolean;
+  qHaBreakDown?: boolean;
+  mHaBreakUp?: boolean;
+  mHaBreakDown?: boolean;
+  wHaBreakUp?: boolean;
+  wHaBreakDown?: boolean;
+  isMonthlyBreakDown?: boolean;
+  isMonthlyBreakUp?: boolean;
+  currMHaHigh?: number | null;
+  currMHaLow?: number | null;
+  prevMHaHigh?: number | null;
+  prevMHaLow?: number | null;
   qPeriodEnd: string | null;
   mPeriodEnd: string | null;
   wPeriodEnd: string | null;
 }
+
+export type ConductionScenario =
+  | 'SCENARIO_A_BEAR_CEILING'
+  | 'SCENARIO_B_BULL_FLOOR'
+  | 'TRANSITION';
 
 export interface PuzzleVerdict {
   isPuzzleCross: boolean;
@@ -71,11 +101,20 @@ export interface PuzzleVerdict {
     | 'SHORT_ENTRY'
     | 'COVER_SHORT'
     | 'HOLD';
+  conductionScenario: ConductionScenario;
+  reverseToShort?: boolean;
+  reverseShortRatio?: number;
   reasons: {
     touchW: boolean;
     regimeOK: boolean;
     tfdrTurnUp: boolean;
     haTwoUp: boolean;
+    dBreakUp?: boolean;
+    dBreakDown?: boolean;
+    wBreakUp?: boolean;
+    wBreakDown?: boolean;
+    dTfdrLow6?: number;
+    dTfdrHigh6?: number;
     ha5Stand?: boolean;
     wTfdrUp?: boolean;
     bullShieldActive?: boolean;
@@ -83,9 +122,19 @@ export interface PuzzleVerdict {
     aboveQ50?: boolean;
     aboveM50?: boolean;
     aboveW50?: boolean;
+    mqStrongFloor?: boolean;
+    mqWeakCeiling?: boolean;
+    haBreakUpMQ?: boolean;
+    haBreakDownMQ?: boolean;
+    isMonthlyBreakDown?: boolean;
+    isMonthlyBreakUp?: boolean;
+    justMonthlyBreakDown?: boolean;
+    inDiscountZone?: boolean;
+    isBullRegime?: boolean;
+    isBearRegime?: boolean;
   };
   regime: 'BULL' | 'NEUTRAL' | 'BEAR';
-  sizeRatio: number; // 0 / 0.3 / 0.4 / 0.6 / 1.0
+  sizeRatio: number; // 0 / 0.35 / 0.4 / 0.8 / 1.0
   invalidationPrice: number | null;
   compactHint: string;
 }
@@ -96,6 +145,8 @@ export interface TimeSpacePrompt {
   qMid50: number;
   mMid50: number;
   wMid50: number;
+  q50Line: number;
+  m50Line: number;
   qHigh: number;
   qLow: number;
   mHigh: number;
@@ -103,6 +154,29 @@ export interface TimeSpacePrompt {
   wHigh: number;
   wLow: number;
   dTfdr: number;
+  wTfdr: number;
+  mTfdr: number;
+  qTfdr: number;
+  dBreakUp: boolean;
+  dBreakDown: boolean;
+  wBreakUp: boolean;
+  wBreakDown: boolean;
+  dTfdrLow6: number;
+  dTfdrHigh6: number;
+  distTo13: number;
+  distTo23: number;
+  distTo85: number;
+  distTo95: number;
+  isMonthlyBreakDown: boolean;
+  isMonthlyBreakUp: boolean;
+  monthlyHaStatusLabel: string;
+  inDiscountZone: boolean;
+  isBullRegime: boolean;
+  isBearRegime: boolean;
+  trendBannerLabel: string;
+  conductionScenario: ConductionScenario;
+  conductionLabel: string;
+  haDirectionSummary: string;
   singularityStatus: 'UPPER_EXPANSION' | 'LOWER_EXPANSION' | 'SAFE_MID_ZONE';
   singularityLabel: string;
   regimeLabel: string;
@@ -321,7 +395,7 @@ export function resampleByCalendarUTC(
 
 interface IncrementalPeriodState {
   bars: (OHLCBar & { key: string })[];
-  ha: { open: number; close: number; low: number; isBull: boolean }[];
+  ha: { open: number; close: number; high: number; low: number; isBull: boolean }[];
   midPeriod: number;
   minCompleteBars: number;
   minSampleOK: number;
@@ -342,8 +416,12 @@ interface IncrementalPeriodState {
     rsi: number;
     mom: number;
     haBull: boolean;
+    haHigh: number;
+    prevHaHigh: number;
     haLow: number;
     prevHaLow: number;
+    haBreakUp: boolean;
+    haBreakDown: boolean;
     periodEnd: string | null;
     sampleOK: boolean;
     band90: number;
@@ -380,8 +458,12 @@ function createPeriodState(
       rsi: 50,
       mom: 50,
       haBull: false,
+      haHigh: 0,
+      prevHaHigh: 0,
       haLow: 0,
       prevHaLow: 0,
+      haBreakUp: false,
+      haBreakDown: false,
       periodEnd: null,
       sampleOK: false,
       band90: 0,
@@ -396,8 +478,10 @@ function sealPeriodBar(state: IncrementalPeriodState, bar: OHLCBar & { key: stri
   const haClose = (bar.open + bar.high + bar.low + bar.close) / 4;
   const haOpen =
     n === 0 ? (bar.open + bar.close) / 2 : (state.ha[n - 1].open + state.ha[n - 1].close) / 2;
+  const haHi = Math.max(bar.high, haOpen, haClose);
   const haLo = Math.min(bar.low, haOpen, haClose);
-  state.ha.push({ open: haOpen, close: haClose, low: haLo, isBull: haClose > haOpen });
+  const isBull = haClose > haOpen;
+  state.ha.push({ open: haOpen, close: haClose, high: haHi, low: haLo, isBull });
 
   const compLen = state.bars.length;
   const midStart = Math.max(0, compLen - state.midPeriod);
@@ -464,6 +548,11 @@ function sealPeriodBar(state: IncrementalPeriodState, bar: OHLCBar & { key: stri
   const prevTfdr = state.snapshot.tfdr;
   const barMid50 = Number(((bar.high + bar.low) / 2).toFixed(2));
 
+  const currHa = state.ha[compLen - 1];
+  const prevHa = compLen > 1 ? state.ha[compLen - 2] : currHa;
+  const haBreakUp = compLen > 1 && currHa.high > prevHa.high && currHa.isBull;
+  const haBreakDown = compLen > 1 && currHa.low < prevHa.low && !currHa.isBull;
+
   state.snapshot = {
     count: compLen,
     midline: hasEnough ? midlineVal : null,
@@ -476,9 +565,13 @@ function sealPeriodBar(state: IncrementalPeriodState, bar: OHLCBar & { key: stri
     prevTfdr: hasEnough ? prevTfdr ?? tfdr : null,
     rsi,
     mom,
-    haBull: state.ha[compLen - 1].isBull,
-    haLow: state.ha[compLen - 1].low,
-    prevHaLow: compLen > 1 ? state.ha[compLen - 2].low : state.ha[compLen - 1].low,
+    haBull: currHa.isBull,
+    haHigh: Number(currHa.high.toFixed(2)),
+    prevHaHigh: Number(prevHa.high.toFixed(2)),
+    haLow: Number(currHa.low.toFixed(2)),
+    prevHaLow: Number(prevHa.low.toFixed(2)),
+    haBreakUp,
+    haBreakDown,
     periodEnd: hasEnough ? bar.key : null,
     sampleOK,
     band90,
@@ -526,6 +619,97 @@ function advancePeriodState(
 }
 
 /**
+ * 嚴格截斷至當日 (無未來函數) 的即時週期能量與原生平均 K 線破梯方向（融合已完結柱 + 當期截至今日累積結構）
+ * 並同步計算當月 vs 前月高低破位：
+ * - isMonthlyBreakDown: curr_HA.high < prev_HA.high && curr_HA.low < prev_HA.low
+ * - isMonthlyBreakUp:   curr_HA.high > prev_HA.high && curr_HA.low >= prev_HA.low
+ */
+function getLivePeriodTelemetry(
+  state: IncrementalPeriodState,
+  isWeekly: boolean
+): {
+  tfdr: number | null;
+  haBull: boolean;
+  haBreakUp: boolean;
+  haBreakDown: boolean;
+  isPeriodHighLowBreakDown: boolean;
+  isPeriodHighLowBreakUp: boolean;
+  currHaHigh: number | null;
+  currHaLow: number | null;
+  prevHaHigh: number | null;
+  prevHaLow: number | null;
+} {
+  const snap = state.snapshot;
+  const active = state.active;
+  if (!active || state.ha.length === 0 || state.sealedLastKey === active.key) {
+    const len = state.ha.length;
+    const currHa = len > 0 ? state.ha[len - 1] : null;
+    const prevHa = len > 1 ? state.ha[len - 2] : null;
+    const isPeriodHighLowBreakDown = Boolean(
+      currHa && prevHa && currHa.high < prevHa.high && currHa.low < prevHa.low
+    );
+    const isPeriodHighLowBreakUp = Boolean(
+      currHa && prevHa && currHa.high > prevHa.high && currHa.low >= prevHa.low
+    );
+    return {
+      tfdr: snap.tfdr,
+      haBull: snap.haBull,
+      haBreakUp: snap.haBreakUp,
+      haBreakDown: snap.haBreakDown,
+      isPeriodHighLowBreakDown,
+      isPeriodHighLowBreakUp,
+      currHaHigh: currHa ? Number(currHa.high.toFixed(2)) : null,
+      currHaLow: currHa ? Number(currHa.low.toFixed(2)) : null,
+      prevHaHigh: prevHa ? Number(prevHa.high.toFixed(2)) : null,
+      prevHaLow: prevHa ? Number(prevHa.low.toFixed(2)) : null
+    };
+  }
+
+  const lastSealedHa = state.ha[state.ha.length - 1];
+  const liveHaClose = (active.open + active.high + active.low + active.close) / 4;
+  const liveHaOpen = (lastSealedHa.open + lastSealedHa.close) / 2;
+  const liveHaHigh = Math.max(active.high, liveHaOpen, liveHaClose);
+  const liveHaLow = Math.min(active.low, liveHaOpen, liveHaClose);
+  const liveHaBull = liveHaClose > liveHaOpen;
+
+  const liveHaBreakUp = liveHaHigh > lastSealedHa.high && liveHaBull;
+  const liveHaBreakDown = liveHaLow < lastSealedHa.low && !liveHaBull;
+  const isPeriodHighLowBreakDown = liveHaHigh < lastSealedHa.high && liveHaLow < lastSealedHa.low;
+  const isPeriodHighLowBreakUp = liveHaHigh > lastSealedHa.high && liveHaLow >= lastSealedHa.low;
+
+  let liveTfdr = snap.tfdr;
+  if (snap.midline != null && snap.atr > 0) {
+    let raw = 50 + ((active.close - snap.midline) / (snap.atr * 2.2)) * 22;
+    if (isWeekly) {
+      const compLen = state.bars.length;
+      const recStart = Math.max(0, compLen - 13);
+      let maxC = -Infinity;
+      let minC = Infinity;
+      for (let i = recStart; i < compLen; i++) {
+        if (state.bars[i].close > maxC) maxC = state.bars[i].close;
+        if (state.bars[i].close < minC) minC = state.bars[i].close;
+      }
+      if (active.close >= maxC) raw = Math.max(raw, 86);
+      if (active.close <= minC || active.low <= snap.band15) raw = Math.min(raw, 14);
+    }
+    liveTfdr = Math.max(0, Math.min(100, Math.round(raw)));
+  }
+
+  return {
+    tfdr: liveTfdr,
+    haBull: liveHaBull,
+    haBreakUp: liveHaBreakUp,
+    haBreakDown: liveHaBreakDown,
+    isPeriodHighLowBreakDown,
+    isPeriodHighLowBreakUp,
+    currHaHigh: Number(liveHaHigh.toFixed(2)),
+    currHaLow: Number(liveHaLow.toFixed(2)),
+    prevHaHigh: Number(lastSealedHa.high.toFixed(2)),
+    prevHaLow: Number(lastSealedHa.low.toFixed(2))
+  };
+}
+
+/**
  * 取得截至當日 (無未來函數) 的「最近已完成或已成形當期」真實 High / Low 與 50% 平衡切線
  * - 若當期剛開局（例如週線第1日、月線前4日、季線前10日），沿用最近已完成週期箱體防止極窄開盤雜訊；
  * - 一旦當期累計交易日達標，直接採用當期截至今日之真實 High / Low，確保與嵌套拼圖 K 棒 100% 視覺同步。
@@ -560,7 +744,11 @@ function getEffectiveBox50(state: IncrementalPeriodState): {
 }
 
 /**
- * 純函數：季/月/週 50% 平衡切線嵌套拼圖核心決策（封死半山腰接飛刀與牛市誤沽空）
+ * 純順勢月/季 50 中間線分水嶺決策引擎：
+ * - 上升浪大勢 (isBullRegime): price >= mMid50 || price >= qMid50（以月/季50生命中軸為準，早期樣本未滿則回退箱體50%）
+ *   → 100% 禁空只買：日 TFDR <= 25 且日 HA 轉陽升穿前高 => 80% 重倉買入坐貨；日 TFDR >= 88 且日/週雙 HA 跌破前低 => 減倉 40%（留60%底倉）
+ * - 下跌浪大勢 (isBearRegime): price < mMid50 && price < qMid50
+ *   → 清倉禁買只空：立即清倉多單；日 TFDR >= 80 且轉陰跌穿前低 => 開立 35% 輕倉空單；日 TFDR <= 18 且轉陽升穿或收復多頭 => 100% 平空
  */
 export function evaluatePuzzleVerdict(
   curr: OverlayPoint,
@@ -568,20 +756,28 @@ export function evaluatePuzzleVerdict(
   prior20Low: number
 ): PuzzleVerdict {
   const { close, low, haOpen, haClose, dTfdr, qMid50, mMid50, wMid50 } = curr;
+  const m50Trend = curr.mMid ?? mMid50;
+  const q50Trend = curr.qMid ?? qMid50;
 
-  // 若 50% 平衡切線尚未成形或無週/月基本樣本，嚴格觀望
+  // 若月/季 50 中間線尚未成形，嚴格觀望
   if (
-    qMid50 == null ||
-    mMid50 == null ||
-    wMid50 == null ||
-    !Number.isFinite(qMid50) ||
-    !Number.isFinite(mMid50) ||
-    !Number.isFinite(wMid50)
+    m50Trend == null ||
+    q50Trend == null ||
+    !Number.isFinite(m50Trend) ||
+    !Number.isFinite(q50Trend)
   ) {
     return {
       isPuzzleCross: false,
       signal: 'HOLD',
-      reasons: { touchW: false, regimeOK: false, tfdrTurnUp: false, haTwoUp: false },
+      conductionScenario: 'TRANSITION',
+      reasons: {
+        touchW: false,
+        regimeOK: false,
+        tfdrTurnUp: false,
+        haTwoUp: false,
+        isBullRegime: false,
+        isBearRegime: false
+      },
       regime: 'NEUTRAL',
       sizeRatio: 0,
       invalidationPrice: null,
@@ -589,100 +785,128 @@ export function evaluatePuzzleVerdict(
     };
   }
 
-  const aboveQ50 = close >= qMid50;
-  const aboveM50 = close >= mMid50;
-  const aboveW50 = close >= wMid50;
-  const belowBoth50 = !aboveQ50 && !aboveM50;
+  const aboveQ50 = close >= q50Trend;
+  const aboveM50 = close >= m50Trend;
+  const aboveW50 = wMid50 != null ? close >= wMid50 : true;
+  const isBullRegime = aboveM50 || aboveQ50;
+  const isBearRegime = !isBullRegime; // close < m50Trend && close < q50Trend
 
-  // 鐵律 1：大局牛熊隔離（只要站在季線 50% 或月線 50% 之上，一律鎖定大升通道、100% 禁空）
-  const isMacroBull = aboveQ50 || aboveM50;
-  const regime: PuzzleVerdict['regime'] = isMacroBull ? 'BULL' : 'BEAR';
+  const dHaBull = haClose > haOpen;
+  const dHaTurnedBull = dHaBull && haClose > prev.haClose;
+  const haTwoUp = dHaTurnedBull && prev.haClose >= prev.haOpen;
 
-  // 清倉止損保護線：季線 50% 切線下方 6% (qMid50 * 0.94)
-  const fullClearLine = Number((qMid50 * 0.94).toFixed(2));
+  const dBreakUp = Boolean(curr.dHaBreakUp);
+  const dBreakDown = Boolean(curr.dHaBreakDown);
+  const wBreakUp = Boolean(curr.wHaBreakUp);
+  const wBreakDown = Boolean(curr.wHaBreakDown);
+  const qHaBull = Boolean(curr.qHaBull);
+  const mHaBull = Boolean(curr.mHaBull);
+  const qHaUp = Boolean(curr.qHaBreakUp);
+  const mHaUp = Boolean(curr.mHaBreakUp);
+  const qHaDown = Boolean(curr.qHaBreakDown);
+  const mHaDown = Boolean(curr.mHaBreakDown);
 
-  // 鐵律 2：黃金買點 (GOLDEN_BUY)
-  // - 處於大升通道 (站在 qMid50 或 mMid50 之上)
-  // - 價格曾回踩進入月/週 50% 切線下半部貼水區 (discount zone) 並觸及日線 TFDR 15/20 綠色低位區 (dTfdrLow5 <= 25)
-  // - 日線 HA 黃色 K 棒轉陽 (haClose > haOpen) 且向上穿過/站上週線 50% 切線 (防半山腰接飛刀)
-  const prevWMid50 = prev.wMid50 ?? wMid50;
-  const touchedDiscount =
-    low <= wMid50 * 1.005 ||
-    prev.low <= prevWMid50 * 1.005 ||
-    close <= mMid50 * 1.01 ||
-    prev.close <= prevWMid50;
-  const tfdrLowWindow = curr.dTfdrLow5 ?? curr.dTfdrLow3 ?? Math.min(dTfdr, prev.dTfdr);
-  const touchedGreenZone = dTfdr <= 25 || prev.dTfdr <= 25 || tfdrLowWindow <= 25;
-  const tfdrTurnUp = touchedGreenZone && dTfdr > prev.dTfdr && dTfdr <= 65;
+  const dTfdrLow6 = curr.dTfdrLow6 ?? curr.dTfdrLow5 ?? Math.min(dTfdr, prev.dTfdr);
+  const dTfdrHigh6 = curr.dTfdrHigh6 ?? curr.dTfdrHigh3 ?? Math.max(dTfdr, prev.dTfdr);
 
-  const crossedUpW50 =
-    aboveW50 && (prev.close < prevWMid50 || prev.low <= prevWMid50 * 1.005);
-  const haTurnedBull = haClose > haOpen && haClose > prev.haClose;
-  const haTwoUp = haTurnedBull && prev.haClose >= prev.haOpen;
-  const holdAbovePrior20Low = close > prior20Low * 0.995;
+  const prevWMid50 = prev.wMid50 ?? wMid50 ?? close;
+  const touchW =
+    wMid50 != null &&
+    aboveW50 &&
+    (prev.close < prevWMid50 || prev.low <= prevWMid50 * 1.005) &&
+    close > prior20Low * 0.995;
 
-  const touchW = touchedDiscount && crossedUpW50 && holdAbovePrior20Low;
-  const regimeOK = isMacroBull;
-  const isPuzzleCross = regimeOK && touchW && tfdrTurnUp && haTurnedBull;
-
-  // 鐵律 3：高位分段鎖利 (PARTIAL_PROFIT) 與破線全清 (FULL_CLEAR)
-  // - 收盤跌破季線 50% 切線 6% (qMid50 * 0.94) -> 100% FULL_CLEAR
-  // - 衝入上方 80/85/90 紅色警戒區 (dTfdr >= 80 或前日 >= 85) 且日線 HA 轉陰跌破前一日低點 -> 鎖利 60%，留 40% 底倉
-  const hitRedZone = dTfdr >= 80 || prev.dTfdr >= 85;
-  const haBearBreakPrevLow = haClose < haOpen && low < prev.low;
-
-  // 鐵律 4：空頭趨勢沽空 (SHORT_ENTRY) 與平空 (COVER_SHORT)
-  // - 只有當現價同時跌破季線 50% 與月線 50%（確認大跌通道）且日線衝至上方 85+ 紅區轉陰 -> 30% 輕倉沽空
-  // - 當回踩至下方 <= 20 綠區轉陽，或收復大升通道 (aboveQ50 || aboveM50) -> 全數平空
-  const shortTrigger =
-    belowBoth50 &&
-    (dTfdr >= 85 || prev.dTfdr >= 85) &&
-    haClose < haOpen &&
-    tfdrLowWindow > 20;
-  const coverShortTrigger =
-    isMacroBull || (dTfdr <= 20 && haClose > haOpen) || (tfdrLowWindow <= 20 && haTurnedBull);
+  const fullClearLine = Number(Math.max(0.01, Math.min(m50Trend, q50Trend)).toFixed(2));
+  const conductionScenario: ConductionScenario = isBullRegime
+    ? 'SCENARIO_B_BULL_FLOOR'
+    : 'SCENARIO_A_BEAR_CEILING';
+  const regime: PuzzleVerdict['regime'] = isBullRegime ? 'BULL' : 'BEAR';
 
   let signal: PuzzleVerdict['signal'] = 'HOLD';
   let sizeRatio = 0;
+  let isPuzzleCross = false;
+  let tfdrTurnUp = false;
+  let invalidationPrice = fullClearLine;
 
-  if (close < fullClearLine) {
-    signal = 'FULL_CLEAR';
-    sizeRatio = 1.0;
-  } else if (isPuzzleCross) {
-    signal = aboveQ50 && aboveM50 ? 'GOLDEN_BUY' : 'ADD_POSITION';
-    sizeRatio = aboveQ50 && aboveM50 ? 0.6 : 0.4;
-  } else if (hitRedZone && haBearBreakPrevLow) {
-    signal = 'PARTIAL_PROFIT';
-    sizeRatio = 0.6; // 鎖定 60% 利潤，保留 40% 核心底倉
-  } else if (shortTrigger) {
-    signal = 'SHORT_ENTRY';
-    sizeRatio = 0.3; // 熊市輕倉 30%
-  } else if (coverShortTrigger && belowBoth50) {
-    signal = 'COVER_SHORT';
-    sizeRatio = 1.0;
+  if (isBullRegime) {
+    // ═══ 上升浪大勢 (只買不空・100% 禁空) ═══
+    if (dTfdr >= 88 && dBreakDown && wBreakDown) {
+      // 高位止盈：日線 >= 88 極頂奇點 AND 日/週雙平均K跌破前低 → 減倉 40%，留 60% 核心底倉
+      signal = 'PARTIAL_PROFIT';
+      sizeRatio = 0.40;
+    } else if (dTfdr <= 25 && dHaBull && dBreakUp) {
+      // 低位扣扳機：日線 TFDR <= 25 (13/23 綠色地板帶) 且日 HA 轉陽升穿前高 → 80% 重倉買入坐貨
+      signal = 'GOLDEN_BUY';
+      sizeRatio = 0.80;
+      isPuzzleCross = true;
+      tfdrTurnUp = true;
+      invalidationPrice = Number(Math.min(fullClearLine, Math.min(prior20Low, low) * 0.96).toFixed(2));
+    } else {
+      // 大勢未轉熊 → 死抱核心倉位觀望
+      signal = 'HOLD';
+      sizeRatio = 0;
+    }
+  } else {
+    // ═══ 下跌浪大勢 (清倉禁買・只空不買) ═══
+    if (dTfdr <= 18 && dHaBull && dBreakUp) {
+      // 下跌浪極底反彈平空：日線 <= 18 且轉陽升穿 → 100% 平空
+      signal = 'COVER_SHORT';
+      sizeRatio = 1.0;
+    } else if (dTfdr >= 80 && !dHaBull && dBreakDown) {
+      // 下跌浪反彈沽空：日線 >= 80 上緣奇點且轉陰跌穿前低 → 開立 35% 輕倉空單
+      signal = 'SHORT_ENTRY';
+      sizeRatio = 0.35;
+    } else {
+      // 跌穿且不升穿月/季50中間線 → 立即 100% 清空多單，嚴禁任何做多抄底
+      signal = 'FULL_CLEAR';
+      sizeRatio = 1.0;
+    }
   }
 
-  const compactHint = `Q50:$${qMid50.toFixed(2)}｜M50:$${mMid50.toFixed(2)}｜W50:$${wMid50.toFixed(2)}｜日TFDR:${dTfdr}｜止損:$${fullClearLine.toFixed(2)}`;
+  const regimeBanner = isBullRegime
+    ? '穩站月/季50之上・上升浪只買不空'
+    : '跌穿月/季50之下・下跌浪禁買只空';
+  const haTag = `日HA:${dBreakUp ? '升穿▲' : dBreakDown ? '跌穿▼' : dHaBull ? '陽' : '陰'}/週HA:${wBreakUp ? '升穿▲' : wBreakDown ? '跌穿▼' : curr.wHaBull ? '陽' : '陰'}`;
+  const compactHint = `${regimeBanner}｜月50:$${m50Trend.toFixed(2)} 季50:$${q50Trend.toFixed(2)}｜${haTag}｜日TFDR:${dTfdr}`;
 
   return {
     isPuzzleCross,
     signal,
+    conductionScenario,
+    reverseToShort: false,
+    reverseShortRatio: 0,
     reasons: {
       touchW,
-      regimeOK,
+      regimeOK: isBullRegime,
       tfdrTurnUp,
       haTwoUp,
+      dBreakUp,
+      dBreakDown,
+      wBreakUp,
+      wBreakDown,
+      dTfdrLow6,
+      dTfdrHigh6,
       ha5Stand: curr.ha5High == null || close >= curr.ha5High,
       wTfdrUp: curr.wTfdr == null ? true : curr.wTfdr >= (curr.prevWTfdr ?? curr.wTfdr),
-      bullShieldActive: aboveQ50,
-      belowBoth50,
+      bullShieldActive: isBullRegime,
+      belowBoth50: isBearRegime,
       aboveQ50,
       aboveM50,
-      aboveW50
+      aboveW50,
+      mqStrongFloor: isBullRegime,
+      mqWeakCeiling: isBearRegime,
+      haBreakUpMQ: qHaUp || mHaUp || (mHaBull && qHaBull),
+      haBreakDownMQ: qHaDown || mHaDown || (!mHaBull && !qHaBull),
+      isMonthlyBreakDown: Boolean(curr.isMonthlyBreakDown),
+      isMonthlyBreakUp: Boolean(curr.isMonthlyBreakUp),
+      justMonthlyBreakDown: Boolean(curr.isMonthlyBreakDown) && !Boolean(prev.isMonthlyBreakDown),
+      inDiscountZone: true,
+      isBullRegime,
+      isBearRegime
     },
     regime,
     sizeRatio,
-    invalidationPrice: fullClearLine,
+    invalidationPrice,
     compactHint
   };
 }
@@ -747,7 +971,11 @@ export function buildFullPuzzleTimeline(allDailyBars: OHLCBar[]): FullTimelineRe
   const stateM = createPeriodState(12, 2, 12, 5);
   const stateQ = createPeriodState(8, 1, 24, 12);
 
-  const haD: { open: number; close: number; low: number; isBull: boolean }[] = new Array(n);
+  const haD: { open: number; close: number; high: number; low: number; isBull: boolean }[] = new Array(n);
+  let lastHighIdx = 0;
+  let lastLowIdx = 0;
+  let prevHighInterval = 14;
+  let prevLowInterval = 14;
   let lastDAtSnapshot = {
     midline: 0,
     prevMidline: 0,
@@ -782,8 +1010,13 @@ export function buildFullPuzzleTimeline(allDailyBars: OHLCBar[]): FullTimelineRe
     const dHaClose = (bar.open + bar.high + bar.low + bar.close) / 4;
     const dHaOpen =
       i === 0 ? (bar.open + bar.close) / 2 : (haD[i - 1].open + haD[i - 1].close) / 2;
+    const dHaHi = Math.max(bar.high, dHaOpen, dHaClose);
     const dHaLo = Math.min(bar.low, dHaOpen, dHaClose);
-    haD[i] = { open: dHaOpen, close: dHaClose, low: dHaLo, isBull: dHaClose > dHaOpen };
+    const dHaBull = dHaClose > dHaOpen;
+    haD[i] = { open: dHaOpen, close: dHaClose, high: dHaHi, low: dHaLo, isBull: dHaBull };
+
+    const dHaBreakUp = i > 0 && dHaHi > haD[i - 1].high && dHaBull;
+    const dHaBreakDown = i > 0 && dHaLo < haD[i - 1].low && !dHaBull;
 
     const dMidStart = Math.max(0, i + 1 - 20);
     let dMidSum = 0;
@@ -815,25 +1048,59 @@ export function buildFullPuzzleTimeline(allDailyBars: OHLCBar[]): FullTimelineRe
 
     let maxC = -Infinity;
     let minC = Infinity;
-    for (let j = atrStart; j <= i; j++) {
+    for (let j = Math.max(0, i - 14); j < i; j++) {
       const c = sorted[j].close;
       if (c > maxC) maxC = c;
       if (c < minC) minC = c;
     }
     const band15 = Number((dMidline - dAtr * 3.1).toFixed(2));
-    let dTfdr = 50 + ((bar.close - dMidline) / (dAtr * 2.2)) * 22;
-    if (bar.close >= maxC) dTfdr = Math.max(dTfdr, 86);
-    if (bar.close <= minC || bar.low <= band15) dTfdr = Math.min(dTfdr, 14);
-    dTfdr = Math.max(0, Math.min(100, Math.round(dTfdr)));
+    const v1 = i >= 1 ? bar.close - sorted[i - 1].close : 0;
+    const v0 = i >= 2 ? sorted[i - 1].close - sorted[i - 2].close : v1;
+    const accel = v1 - v0;
+
+    let dTfdrRaw = 50 + ((bar.close - dMidline) / (dAtr * 2.0)) * 20;
+    if (i >= 14 && bar.close >= maxC) {
+      const interval = Math.max(1, i - lastHighIdx);
+      const compression = Math.min(2.5, prevHighInterval / interval);
+      if (dTfdrRaw >= 72) {
+        dTfdrRaw = Math.max(dTfdrRaw, Math.min(94, 72 + compression * 8.5));
+        if (dTfdrRaw >= 84 && compression >= 2.0 && interval <= 4 && accel < 0 && v1 > 0) {
+          dTfdrRaw = Math.max(dTfdrRaw, 95);
+        }
+      }
+      prevHighInterval = interval;
+      lastHighIdx = i;
+    }
+    if (i >= 14 && (bar.close <= minC || bar.low <= band15)) {
+      const interval = Math.max(1, i - lastLowIdx);
+      const compression = Math.min(2.5, prevLowInterval / interval);
+      if (dTfdrRaw <= 32 || bar.low <= band15) {
+        dTfdrRaw = Math.min(dTfdrRaw, Math.max(2, 28 - compression * 10));
+        if ((dTfdrRaw <= 24 || bar.low <= band15) && interval <= 4 && accel > 0 && v1 < 0) {
+          dTfdrRaw = Math.min(dTfdrRaw, 12);
+        }
+      }
+      prevLowInterval = interval;
+      lastLowIdx = i;
+    }
+    const dTfdr = Math.max(0, Math.min(100, Math.round(dTfdrRaw)));
 
     const prevDTfdr = i > 0 ? overlays[i - 1].dTfdr : dTfdr;
     let dTfdrLow3 = dTfdr;
+    let dTfdrHigh3 = dTfdr;
     for (let j = Math.max(0, i - 3); j < i; j++) {
       if (overlays[j].dTfdr < dTfdrLow3) dTfdrLow3 = overlays[j].dTfdr;
+      if (overlays[j].dTfdr > dTfdrHigh3) dTfdrHigh3 = overlays[j].dTfdr;
     }
     let dTfdrLow5 = dTfdrLow3;
     for (let j = Math.max(0, i - 5); j < Math.max(0, i - 3); j++) {
       if (overlays[j].dTfdr < dTfdrLow5) dTfdrLow5 = overlays[j].dTfdr;
+    }
+    let dTfdrLow6 = dTfdr;
+    let dTfdrHigh6 = dTfdr;
+    for (let j = Math.max(0, i - 5); j < i; j++) {
+      if (overlays[j].dTfdr < dTfdrLow6) dTfdrLow6 = overlays[j].dTfdr;
+      if (overlays[j].dTfdr > dTfdrHigh6) dTfdrHigh6 = overlays[j].dTfdr;
     }
 
     const ha5Start = Math.max(0, i - 4);
@@ -843,7 +1110,10 @@ export function buildFullPuzzleTimeline(allDailyBars: OHLCBar[]): FullTimelineRe
     }
     const ha5High = Number((ha5Sum / (i - ha5Start + 1)).toFixed(4));
 
-    const qTfdrEffective = stateQ.snapshot.sampleOK ? stateQ.snapshot.tfdr : null;
+    const liveQ = getLivePeriodTelemetry(stateQ, false);
+    const liveM = getLivePeriodTelemetry(stateM, false);
+    const liveW = getLivePeriodTelemetry(stateW, true);
+    const qTfdrEffective = stateQ.snapshot.sampleOK ? liveQ.tfdr : null;
 
     const point: OverlayPoint = {
       date: bar.date,
@@ -856,8 +1126,14 @@ export function buildFullPuzzleTimeline(allDailyBars: OHLCBar[]): FullTimelineRe
       dTfdr,
       dTfdrLow3,
       dTfdrLow5,
+      dTfdrLow6,
+      dTfdrHigh3,
+      dTfdrHigh6,
+      dHaBull,
+      dHaBreakUp,
+      dHaBreakDown,
       ha5High,
-      prevWTfdr: stateW.snapshot.prevTfdr,
+      prevWTfdr: i > 0 ? overlays[i - 1].wTfdr : stateW.snapshot.prevTfdr,
       qMid: stateQ.snapshot.midline ?? qBox50.mid50,
       mMid: stateM.snapshot.midline ?? mBox50.mid50,
       wMid: stateW.snapshot.midline ?? wBox50.mid50,
@@ -871,8 +1147,23 @@ export function buildFullPuzzleTimeline(allDailyBars: OHLCBar[]): FullTimelineRe
       wHigh: wBox50.high,
       wLow: wBox50.low,
       qTfdr: qTfdrEffective,
-      mTfdr: stateM.snapshot.tfdr,
-      wTfdr: stateW.snapshot.tfdr,
+      mTfdr: liveM.tfdr,
+      wTfdr: liveW.tfdr,
+      qHaBull: liveQ.haBull,
+      mHaBull: liveM.haBull,
+      wHaBull: liveW.haBull,
+      qHaBreakUp: liveQ.haBreakUp,
+      qHaBreakDown: liveQ.haBreakDown,
+      mHaBreakUp: liveM.haBreakUp,
+      mHaBreakDown: liveM.haBreakDown,
+      wHaBreakUp: liveW.haBreakUp,
+      wHaBreakDown: liveW.haBreakDown,
+      isMonthlyBreakDown: liveM.isPeriodHighLowBreakDown,
+      isMonthlyBreakUp: liveM.isPeriodHighLowBreakUp,
+      currMHaHigh: liveM.currHaHigh,
+      currMHaLow: liveM.currHaLow,
+      prevMHaHigh: liveM.prevHaHigh,
+      prevMHaLow: liveM.prevHaLow,
       qPeriodEnd: stateQ.snapshot.periodEnd,
       mPeriodEnd: stateM.snapshot.periodEnd,
       wPeriodEnd: stateW.snapshot.periodEnd
@@ -904,21 +1195,27 @@ export function buildFullPuzzleTimeline(allDailyBars: OHLCBar[]): FullTimelineRe
 
   const toFeature = (
     s: IncrementalPeriodState,
-    isLastComplete: boolean
+    isLastComplete: boolean,
+    isWeekly: boolean
   ): TimeframeFeature => {
     const box = getEffectiveBox50(s);
+    const live = getLivePeriodTelemetry(s, isWeekly);
     return {
       bars: s.snapshot.count,
-      haBull: s.snapshot.haBull,
+      haBull: live.haBull,
+      haHigh: s.snapshot.haHigh,
+      prevHaHigh: s.snapshot.prevHaHigh,
       haLow: s.snapshot.haLow,
       prevHaLow: s.snapshot.prevHaLow,
+      haBreakUp: live.haBreakUp,
+      haBreakDown: live.haBreakDown,
       midline: box.mid50 ?? s.snapshot.midline ?? 0,
       prevMidline: s.snapshot.prevMidline ?? 0,
       high: box.high ?? 0,
       low: box.low ?? 0,
       mid50: box.mid50 ?? 0,
       atr: s.snapshot.atr,
-      tfdr: s.snapshot.tfdr ?? 50,
+      tfdr: live.tfdr ?? s.snapshot.tfdr ?? 50,
       prevTfdr: s.snapshot.prevTfdr ?? 50,
       rsi: s.snapshot.rsi,
       mom: s.snapshot.mom,
@@ -928,11 +1225,17 @@ export function buildFullPuzzleTimeline(allDailyBars: OHLCBar[]): FullTimelineRe
   };
 
   const lastBarMeta = n > 0 ? getCalendarMeta(sorted[n - 1].date) : null;
+  const dCurrHaHigh = n > 0 ? haD[n - 1].high : 0;
+  const dPrevHaHigh = n > 1 ? haD[n - 2].high : dCurrHaHigh;
   const latestD: TimeframeFeature = {
     bars: n,
     haBull: n > 0 ? haD[n - 1].isBull : false,
+    haHigh: Number(dCurrHaHigh.toFixed(2)),
+    prevHaHigh: Number(dPrevHaHigh.toFixed(2)),
     haLow: n > 0 ? haD[n - 1].low : 0,
     prevHaLow: n > 1 ? haD[n - 2].low : n > 0 ? haD[0].low : 0,
+    haBreakUp: n > 1 && haD[n - 1].high > haD[n - 2].high && haD[n - 1].isBull,
+    haBreakDown: n > 1 && haD[n - 1].low < haD[n - 2].low && !haD[n - 1].isBull,
     midline: lastDAtSnapshot.midline,
     prevMidline: lastDAtSnapshot.prevMidline,
     high: lastDAtSnapshot.high,
@@ -952,9 +1255,9 @@ export function buildFullPuzzleTimeline(allDailyBars: OHLCBar[]): FullTimelineRe
     overlays,
     verdicts,
     prior20Lows,
-    latestQ: toFeature(stateQ, Boolean(lastBarMeta?.isQuarterEnd)),
-    latestM: toFeature(stateM, Boolean(lastBarMeta?.isMonthEnd)),
-    latestW: toFeature(stateW, Boolean(lastBarMeta?.isWeekEnd)),
+    latestQ: toFeature(stateQ, Boolean(lastBarMeta?.isQuarterEnd), false),
+    latestM: toFeature(stateM, Boolean(lastBarMeta?.isMonthEnd), false),
+    latestW: toFeature(stateW, Boolean(lastBarMeta?.isWeekEnd), true),
     latestD
   };
 }
@@ -1115,6 +1418,8 @@ export function computePuzzleDecision(
   const qMid50 = currOverlay.qMid50 ?? currOverlay.close;
   const mMid50 = currOverlay.mMid50 ?? currOverlay.close;
   const wMid50 = currOverlay.wMid50 ?? currOverlay.close;
+  const q50Line = currOverlay.qMid ?? qMid50;
+  const m50Line = currOverlay.mMid ?? mMid50;
   const qHigh = currOverlay.qHigh ?? currBar.high;
   const qLow = currOverlay.qLow ?? currBar.low;
   const mHigh = currOverlay.mHigh ?? currBar.high;
@@ -1122,19 +1427,24 @@ export function computePuzzleDecision(
   const wHigh = currOverlay.wHigh ?? currBar.high;
   const wLow = currOverlay.wLow ?? currBar.low;
 
+  const isBullRegime = Boolean(verdict.reasons.isBullRegime ?? verdict.regime === 'BULL');
+  const isBearRegime = !isBullRegime;
+  const trendBannerLabel = isBullRegime
+    ? '穩站月/季50之上・上升浪只買不空'
+    : '跌穿月/季50之下・下跌浪禁買只空';
+
   const tol = Math.max(currOverlay.close * 0.005, featD.atr * 0.8);
-  const invalidationPrice = verdict.invalidationPrice ?? Number((qMid50 * 0.94).toFixed(2));
+  const invalidationPrice = verdict.invalidationPrice ?? Number(Math.min(m50Line, q50Line).toFixed(2));
 
   const buyAnchor = verdict.isPuzzleCross
     ? currOverlay.close
-    : regime === 'UPTREND_CHANNEL'
-    ? Math.min(wMid50, mMid50)
+    : isBullRegime
+    ? Math.max(m50Line, q50Line * 0.98)
     : currOverlay.close;
-  const rawBuyHigh = Math.max(buyAnchor, wMid50 * 1.005);
-  const rawBuyLow =
-    regime === 'UPTREND_CHANNEL'
-      ? Math.min(rawBuyHigh, Math.max(invalidationPrice, Math.min(wLow, buyAnchor - tol * 0.6)))
-      : Math.min(rawBuyHigh, Math.max(0.01, Math.min(wLow, currOverlay.close) - tol * 0.5));
+  const rawBuyHigh = Math.max(buyAnchor, Math.min(wMid50 * 1.005, currOverlay.close * 1.02));
+  const rawBuyLow = isBullRegime
+    ? Math.min(rawBuyHigh, Math.max(invalidationPrice, Math.min(wLow, buyAnchor - tol * 0.8)))
+    : Math.min(rawBuyHigh, Math.max(0.01, Math.min(wLow, currOverlay.close) - tol * 0.5));
   const buyZone = {
     low: Number(Math.min(rawBuyLow, rawBuyHigh).toFixed(2)),
     high: Number(Math.max(rawBuyLow, rawBuyHigh).toFixed(2))
@@ -1143,7 +1453,7 @@ export function computePuzzleDecision(
     currOverlay.close,
     wHigh,
     mHigh,
-    featD.tfdr >= 80 ? currOverlay.close : wMid50 + tol * 2.2
+    featD.tfdr >= 88 ? currOverlay.close : wMid50 + tol * 2.2
   );
   const takeProfitZone = {
     low: Number((takeProfitAnchor - tol * 0.5).toFixed(2)),
@@ -1151,29 +1461,61 @@ export function computePuzzleDecision(
   };
 
   const dTfdr = currOverlay.dTfdr;
-  const singularityStatus: TimeSpacePrompt['singularityStatus'] =
-    dTfdr >= 80 ? 'UPPER_EXPANSION' : dTfdr <= 20 ? 'LOWER_EXPANSION' : 'SAFE_MID_ZONE';
-  const singularityLabel =
-    singularityStatus === 'UPPER_EXPANSION'
-      ? `上方三線展開 (日TFDR ${dTfdr} ≥ 80 · 85/90/95警戒)`
-      : singularityStatus === 'LOWER_EXPANSION'
-      ? `下方三線展開 (日TFDR ${dTfdr} ≤ 20 · 20/15/10奇點底)`
-      : `安全雙線通道 (日TFDR ${dTfdr} · 僅顯示85壓力與15支撐)`;
+  const wTfdr = currOverlay.wTfdr ?? featW.tfdr;
+  const mTfdr = currOverlay.mTfdr ?? featM.tfdr;
+  const qTfdr = currOverlay.qTfdr ?? featQ.tfdr;
+  const dTfdrLow6 = currOverlay.dTfdrLow6 ?? dTfdr;
+  const dTfdrHigh6 = currOverlay.dTfdrHigh6 ?? dTfdr;
+  const dBreakUp = featD.haBreakUp;
+  const dBreakDown = featD.haBreakDown;
+  const wBreakUp = featW.haBreakUp;
+  const wBreakDown = featW.haBreakDown;
+  const isMonthlyBreakDown = Boolean(currOverlay.isMonthlyBreakDown);
+  const isMonthlyBreakUp = Boolean(currOverlay.isMonthlyBreakUp);
+  const inDiscountZone = isBullRegime;
+  const monthlyHaStatusLabel = trendBannerLabel;
+  const distTo13 = Math.max(0, dTfdr - 13);
+  const distTo23 = Math.max(0, dTfdr - 23);
+  const distTo85 = Math.max(0, 88 - dTfdr);
+  const distTo95 = Math.max(0, 95 - dTfdr);
+  const conductionScenario = verdict.conductionScenario;
 
-  const regimeLabel =
-    regime === 'UPTREND_CHANNEL'
-      ? '大升通道（站在季/月50%切線之上・100%禁空）'
-      : '大跌通道（跌破季與月雙重50%切線・允許輕倉順勢沽空）';
+  const singularityStatus: TimeSpacePrompt['singularityStatus'] =
+    dTfdr >= 88 || (isBearRegime && dTfdr >= 80)
+      ? 'UPPER_EXPANSION'
+      : dTfdr <= 25
+      ? 'LOWER_EXPANSION'
+      : 'SAFE_MID_ZONE';
+  const singularityLabel =
+    dTfdr >= 88
+      ? `極頂警戒帶 (日TFDR ${dTfdr} ≥ 88)`
+      : isBearRegime && dTfdr >= 80
+      ? `下跌浪反彈上緣沽空帶 (日TFDR ${dTfdr} ≥ 80)`
+      : dTfdr <= 18
+      ? `極致地板奇點 (日TFDR ${dTfdr} ≤ 18)`
+      : dTfdr <= 25
+      ? `13/25 綠色地板觸發帶 (日TFDR ${dTfdr} ≤ 25)`
+      : `濾噪區 (日TFDR ${dTfdr} · 距25底+${Math.max(0, dTfdr - 25)} / 距88頂-${distTo85})`;
+
+  const conductionLabel = trendBannerLabel;
+
+  const fmtHaArrow = (lbl: string, f: TimeframeFeature) =>
+    f.haBreakUp ? `${lbl}:升穿前高▲` : f.haBreakDown ? `${lbl}:跌穿前低▼` : f.haBull ? `${lbl}:陽` : `${lbl}:陰`;
+  const haDirectionSummary = `${fmtHaArrow('日', featD)}｜${fmtHaArrow('週', featW)}｜月50:$${m50Line.toFixed(2)}/季50:$${q50Line.toFixed(2)}`;
+
+  const regimeLabel = trendBannerLabel;
 
   const actionTitleMap: Record<PuzzleVerdict['signal'], string> = {
-    GOLDEN_BUY: '🔥 黃金買入（回踩50%切線＋日綠底轉陽上穿週50線）',
-    ADD_POSITION: '🟢 復甦低吸（重上週50線・分批建倉40%）',
-    PARTIAL_PROFIT: '🟠 高位鎖利 60%（進入80+紅區且HA陰線破前低・留40%底倉）',
-    FULL_CLEAR: '🚨 破季線50%下緣6%・強制全數清倉',
+    GOLDEN_BUY: '🔥 上升浪低位奇點轉陽・80% 重倉買入坐貨（只買不空）',
+    ADD_POSITION: '🟢 上升浪低位加倉坐貨',
+    PARTIAL_PROFIT: '🟠 日線≥88極頂＋日週雙HA跌穿・減倉40%（保留60%核心底倉）',
+    FULL_CLEAR: '🚨 跌穿月/季50中間線・100%清倉多單並嚴禁做多',
     HALT_REDUCE: '🛑 回撤熔斷控險・減半倉位',
-    SHORT_ENTRY: '🟣 順勢輕空 30%（雙破季月50線＋日TFDR≥85轉陰）',
-    COVER_SHORT: '💎 空單全數平倉（底部奇點或收復50%切線）',
-    HOLD: regime === 'UPTREND_CHANNEL' ? '⚖️ 沿50%切線持倉觀望' : '⚠️ 空頭觀望等待反彈至85+'
+    SHORT_ENTRY: '🟣 下跌浪日線≥80反彈轉陰跌穿・開立35%輕倉空單',
+    COVER_SHORT: '💎 日線≤18轉陽升穿或收復50線・100%平空',
+    HOLD: isBullRegime
+      ? '🛡️ 穩站月/季50之上・死抱核心多單不瞎折騰（100%禁空）'
+      : '🚫 跌穿月/季50之下・空倉禁買靜待≥80反彈沽空訊號'
   };
 
   const timeSpacePrompt: TimeSpacePrompt = {
@@ -1182,6 +1524,8 @@ export function computePuzzleDecision(
     qMid50: Number(qMid50.toFixed(2)),
     mMid50: Number(mMid50.toFixed(2)),
     wMid50: Number(wMid50.toFixed(2)),
+    q50Line: Number(q50Line.toFixed(2)),
+    m50Line: Number(m50Line.toFixed(2)),
     qHigh: Number(qHigh.toFixed(2)),
     qLow: Number(qLow.toFixed(2)),
     mHigh: Number(mHigh.toFixed(2)),
@@ -1189,6 +1533,29 @@ export function computePuzzleDecision(
     wHigh: Number(wHigh.toFixed(2)),
     wLow: Number(wLow.toFixed(2)),
     dTfdr,
+    wTfdr,
+    mTfdr,
+    qTfdr,
+    dBreakUp,
+    dBreakDown,
+    wBreakUp,
+    wBreakDown,
+    dTfdrLow6,
+    dTfdrHigh6,
+    distTo13,
+    distTo23,
+    distTo85,
+    distTo95,
+    isMonthlyBreakDown,
+    isMonthlyBreakUp,
+    monthlyHaStatusLabel,
+    inDiscountZone,
+    isBullRegime,
+    isBearRegime,
+    trendBannerLabel,
+    conductionScenario,
+    conductionLabel,
+    haDirectionSummary,
     singularityStatus,
     singularityLabel,
     regimeLabel,
@@ -1196,60 +1563,54 @@ export function computePuzzleDecision(
     buyZone,
     takeProfitZone,
     invalidationPrice,
-    compactHint: `Q50:$${qMid50.toFixed(2)}｜M50:$${mMid50.toFixed(2)}｜W50:$${wMid50.toFixed(2)}｜${singularityStatus === 'UPPER_EXPANSION' ? '上紅展開' : singularityStatus === 'LOWER_EXPANSION' ? '下綠展開' : '雙線安全'}(TFDR ${dTfdr})｜止損:$${invalidationPrice.toFixed(2)}`
+    compactHint: `${trendBannerLabel}｜月50:$${m50Line.toFixed(2)} 季50:$${q50Line.toFixed(2)}｜${haDirectionSummary}｜日TFDR:${dTfdr}`
   };
 
   const reasons: string[] = [
-    `三級50%平衡切線：季Q50 $${qMid50.toFixed(2)} (${currOverlay.close >= qMid50 ? '上方' : '下方'}) / 月M50 $${mMid50.toFixed(2)} (${currOverlay.close >= mMid50 ? '上方' : '下方'}) / 週W50 $${wMid50.toFixed(2)} (${currOverlay.close >= wMid50 ? '上方' : '下方'})`,
-    `奇點軌道狀態：${singularityLabel}`
+    `大勢定性：${trendBannerLabel}（現價 $${currOverlay.close} vs 月50 $${m50Line.toFixed(2)} / 季50 $${q50Line.toFixed(2)}）`,
+    `日/週平均K破梯：${haDirectionSummary}`,
+    `奇點數值：日TFDR ${dTfdr}（近6日區間 ${dTfdrLow6}~${dTfdrHigh6}）`
   ];
 
   const riskFlags: string[] = [];
-  if (!featQ.sampleOK) riskFlags.push(`季線累積 ${featQ.bars} 根(<24)，維持嚴格 50% 箱體約束`);
+  if (isBearRegime) riskFlags.push('跌穿月/季50之下(清倉禁買)');
+  if (!featQ.sampleOK) riskFlags.push(`季線累積 ${featQ.bars} 根(<24)`);
   if (!featW.sampleOK) riskFlags.push(`週線累積 ${featW.bars} 根(<20)`);
-  if (!featM.sampleOK) riskFlags.push(`月線累積 ${featM.bars} 根(<12)`);
-  if (ker < 0.3) riskFlags.push(`KER(${ker})偏低，震盪區嚴防追高`);
+  if (ker < 0.3) riskFlags.push(`KER(${ker})偏低`);
 
-  if (verdict.isPuzzleCross) {
+  if (verdict.signal === 'GOLDEN_BUY') {
     reasons.push(
-      `T日預警觸發 ${verdict.signal}：回踩50%貼水區＋日綠底轉強＋HA黃燭翻陽上穿週50%線 ($${wMid50.toFixed(2)})，建議配置 ${Math.round(verdict.sizeRatio * 100)}%`
-    );
-  } else if (verdict.signal === 'FULL_CLEAR') {
-    reasons.push(
-      `跌穿季線50%保護下緣 6% ($${currOverlay.close} < $${invalidationPrice})，大升通道破壞・100% 全清避險`
+      `穩站月/季50之上，日線TFDR回調至 ${dTfdr} (≤25) 且日HA轉陽升穿前高，重倉買入 80% 坐貨吃主升浪`
     );
   } else if (verdict.signal === 'PARTIAL_PROFIT') {
-    reasons.push(
-      `日線衝入 80+ 紅色警戒區 (TFDR ${dTfdr}) 且 HA 轉陰破前低，分段鎖定 60% 利潤・保留 40% 核心底倉`
-    );
+    reasons.push(`上升浪日線達 ${dTfdr} (≥88) 且日/週HA雙重跌破前低，減倉 40% 鎖利、保留 60% 核心底倉`);
+  } else if (verdict.signal === 'FULL_CLEAR') {
+    reasons.push(`價格跌穿月50($${m50Line.toFixed(2)})與季50($${q50Line.toFixed(2)})雙分水嶺，立即 100% 清空多單並嚴禁抄底`);
   } else if (verdict.signal === 'SHORT_ENTRY') {
-    reasons.push(
-      `現價跌破季線50%($${qMid50.toFixed(2)})與月線50%($${mMid50.toFixed(2)})雙線，且日TFDR(${dTfdr}>=85)反彈衰竭轉陰，輕倉 30% 沽空`
-    );
-  } else {
-    reasons.push(
-      `${regime === 'UPTREND_CHANNEL' ? '大升通道禁空護盤' : '大跌通道觀望'}，待 T+1 開盤不跌破失效線 $${invalidationPrice} 再依切線訊號行動`
-    );
+    reasons.push(`下跌浪反彈日線達 ${dTfdr} (≥80) 且日HA轉陰跌穿前低，開立 35% 輕倉空單`);
+  } else if (verdict.signal === 'COVER_SHORT') {
+    reasons.push(`日TFDR(${dTfdr})≤18 且日HA升穿前高，空單 100% 平倉`);
   }
 
   const keyPoints: string[] = [
-    `季50%切線 $${qMid50.toFixed(2)} [${qLow.toFixed(2)}~${qHigh.toFixed(2)}]｜月50% $${mMid50.toFixed(2)}｜週50% $${wMid50.toFixed(2)}`,
-    `奇點軌道：${singularityLabel}`,
-    `大升通道條件[站在Q50或M50之上：${verdict.reasons.regimeOK ? '✅ 禁空' : '❌ 雙破空頭'}]｜週50回踩上穿[${verdict.reasons.touchW ? '✅' : '⏳'}]｜綠底TFDR[${verdict.reasons.tfdrTurnUp ? '✅' : '⏳'}]`,
-    `T+1 開盤驗假破：若開盤跌破失效保護線 $${invalidationPrice.toFixed(2)} 則放棄開倉並保護底倉`
+    trendBannerLabel,
+    `${haDirectionSummary}｜日TFDR ${dTfdr}`
   ];
 
-  const signalStrength = verdict.isPuzzleCross
-    ? verdict.signal === 'GOLDEN_BUY'
+  const signalStrength =
+    verdict.signal === 'GOLDEN_BUY'
+      ? dTfdr <= 13
+        ? 95
+        : 88
+      : verdict.signal === 'FULL_CLEAR'
       ? 92
-      : 84
-    : verdict.signal === 'FULL_CLEAR'
-    ? 92
-    : verdict.signal === 'PARTIAL_PROFIT'
-    ? 85
-    : verdict.signal === 'SHORT_ENTRY'
-    ? 78
-    : 50;
+      : verdict.signal === 'PARTIAL_PROFIT'
+      ? 86
+      : verdict.signal === 'SHORT_ENTRY'
+      ? 82
+      : verdict.signal === 'COVER_SHORT'
+      ? 85
+      : 50;
 
   return {
     schema: 'puzzle/v2-strict',
@@ -1277,7 +1638,7 @@ export function computePuzzleDecision(
       invalidationPrice
     },
     ker,
-    shortLock8dActive: regime === 'UPTREND_CHANNEL',
+    shortLock8dActive: isBullRegime,
     reasons,
     keyPoints,
     riskFlags,

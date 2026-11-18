@@ -1099,6 +1099,7 @@ export function runBacktestEngine(
   let haltStabilized = false;
   let needHaltReduceNextOpen = false;
   let daysWithoutNewLow = 0;
+  let partialTakenInLeg = false;
 
   const trades: { profit: number }[] = [];
   const tradeLogs: TradeLog[] = [];
@@ -1125,15 +1126,18 @@ export function runBacktestEngine(
       const signalDate = prevOverlay.date;
       const execDate = currBar.date;
       const hintBase = verdict.compactHint;
-      const q50 = prevOverlay.qMid50 ?? prevBar.close;
-      const m50 = prevOverlay.mMid50 ?? prevBar.close;
+      const m50 = prevOverlay.mMid ?? prevOverlay.mMid50 ?? prevBar.close;
+      const q50 = prevOverlay.qMid ?? prevOverlay.qMid50 ?? prevBar.close;
       const w50 = prevOverlay.wMid50 ?? prevBar.close;
-      const invPrice = verdict.invalidationPrice ?? Number((q50 * 0.94).toFixed(2));
+      const isBullRegime = Boolean(verdict.reasons.isBullRegime ?? verdict.regime === 'BULL');
+      const isBearRegime = !isBullRegime;
       const canAct = i - lastActionBarIndex >= 3;
 
-      // A. 觸發停機熔斷後 T 日開盤：立即將存量持倉減半 (50%) 控險
+      // A. 觸發停機熔斷後 T 日開盤：僅在下跌浪或虧損部位時減半控險；上升浪大勢內之獲利核心多單堅決死抱不亂砍
       if (needHaltReduceNextOpen && (longShares > 0 || shortShares > 0)) {
-        if (longShares > 0) {
+        if (longShares > 0 && verdict.signal === 'FULL_CLEAR') {
+          needHaltReduceNextOpen = false;
+        } else if (longShares > 0 && (isBearRegime || todayOpen < avgLongCost)) {
           const reduceShares = Math.max(1, Math.floor(longShares * 0.5));
           const netExitPrice = todayOpen * (1 - FEE_RATE);
           const pnlRatio = avgLongCost > 0 ? (netExitPrice - avgLongCost) / avgLongCost : 0;
@@ -1160,7 +1164,7 @@ export function runBacktestEngine(
             price: todayOpen.toFixed(2),
             totalHolding: longShares,
             holdingType: longShares > 0 ? 'LONG' : 'EMPTY',
-            source: `T-1淨值回撤超過 25% 啟動熔斷，T開盤減半 50% 防止拖垮淨值`,
+            source: `T-1淨值回撤超過 25% 且虧損/轉熊，T開盤減半 50% 控險`,
             profitPct,
             profit: profitPct,
             msg: `[${execDate}] 🛑 熔斷停機・強制減半控險 ${reduceShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
@@ -1198,6 +1202,8 @@ export function runBacktestEngine(
             profit: profitPct,
             msg: `[${execDate}] 💎 熔斷保護・空單平倉 ${coverShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
           });
+        } else {
+          needHaltReduceNextOpen = false;
         }
       } else {
         needHaltReduceNextOpen = false;
@@ -1206,22 +1212,10 @@ export function runBacktestEngine(
       // B. 滯後重啟判定 (Hysteresis)
       let justRestartedFromHalt = false;
       if (isHalted) {
-        let high126 = 0;
-        for (let k = Math.max(0, prevIdx - 125); k <= prevIdx; k++) {
-          if (sorted[k].high > high126) high126 = sorted[k].high;
-        }
-        const assetDD126 = high126 > 0 ? (high126 - prevBar.close) / high126 : 0;
-        const recovered =
-          latestRiskDrawdown < 0.15 ||
-          (longShares === 0 &&
-            shortShares === 0 &&
-            assetDD126 < 0.15 &&
-            (prevBar.close >= q50 || prevBar.close >= m50));
-
-        if (recovered && daysWithoutNewLow >= 5) {
+        if (isBullRegime && daysWithoutNewLow >= 5) {
           haltStabilized = true;
         }
-        if (haltStabilized && verdict.isPuzzleCross) {
+        if (haltStabilized && verdict.signal === 'GOLDEN_BUY') {
           isHalted = false;
           haltStabilized = false;
           justRestartedFromHalt = true;
@@ -1229,15 +1223,17 @@ export function runBacktestEngine(
         }
       }
 
-      // C. 若持有空單，但價格收復大升通道 (站上季50%或月50%) 或觸及下方 <=20 綠區轉陽 -> 立即開盤平空
+      // C. 空單平倉 (收復月/季50上升浪大勢 OR 日線<=18轉陽升穿 OR 空單8%硬止損)
+      const shortStopHit =
+        shortShares > 0 &&
+        shortEntryGross > 0 &&
+        (todayOpen - shortEntryGross) / shortEntryGross >= 0.08;
       if (
         shortShares > 0 &&
-        (verdict.signal === 'COVER_SHORT' ||
-          verdict.regime === 'BULL' ||
-          prevBar.close >= q50 ||
-          prevBar.close >= m50 ||
-          todayOpen >= q50 ||
-          todayOpen >= m50)
+        (shortStopHit ||
+          isBullRegime ||
+          verdict.signal === 'COVER_SHORT' ||
+          verdict.signal === 'GOLDEN_BUY')
       ) {
         const coverShares = shortShares;
         const grossCostPrice = todayOpen * (1 + FEE_RATE);
@@ -1259,33 +1255,43 @@ export function runBacktestEngine(
           puzzleHint: hintBase,
           complianceTag: '✅ 精準執行',
           type: 'COVER_SHORT',
-          action: '💎 統一引擎・空單平倉',
+          action: shortStopHit
+            ? '🛑 順勢引擎・空單8%止損平倉'
+            : isBullRegime
+            ? '💎 順勢引擎・收復50線禁空平倉'
+            : '💎 順勢引擎・18極底轉陽平空',
           shares: coverShares,
-          units: verdict.regime === 'BULL' ? '收復50%切線平空100%' : '綠區奇點止盈平空100%',
-          confidence: `Q50:$${q50.toFixed(2)} / M50:$${m50.toFixed(2)}｜日TFDR:${prevOverlay.dTfdr}`,
+          units: shortStopHit
+            ? '8%止損平空100%'
+            : isBullRegime
+            ? '升穿月/季50線禁空平倉100%'
+            : '日<=18轉陽平空100%',
+          confidence: `月50:$${m50.toFixed(2)} / 季50:$${q50.toFixed(2)}｜日TFDR:${prevOverlay.dTfdr}`,
           price: todayOpen.toFixed(2),
           totalHolding: 0,
           holdingType: 'EMPTY',
-          source:
-            verdict.regime === 'BULL'
-              ? `站回季/月 50% 切線恢復大升通道，開盤全數平空`
-              : `日TFDR(${prevOverlay.dTfdr}<=20)觸底轉陽，空單止盈平倉`,
+          source: shortStopHit
+            ? `觸及空單 8% 風控止損線，開盤全數平空`
+            : isBullRegime
+            ? `收復月/季 50 中間線重返上升浪（只買不空），開盤立即 100% 平空`
+            : `日TFDR(${prevOverlay.dTfdr})≤18 且日HA轉陽升穿，空單 100% 止盈平倉`,
           profitPct,
           profit: profitPct,
-          msg: `[${execDate}] 💎 統一引擎・空單平倉 ${coverShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+          msg: `[${execDate}] ${isBullRegime ? '💎 順勢引擎・收復50線禁空平倉' : '💎 順勢引擎・18極底轉陽平空'} ${coverShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
         });
       }
 
-      // D. 跌破季線 50% 切線下方 6% (qMid50 * 0.94 -> FULL_CLEAR)：強制 100% 全清保護利潤
+      // D. 跌入下跌浪大勢 (isBearRegime: 同時跌穿月50與季50中間線) → 立即 100% 清倉多單並嚴禁抄底
       if (longShares > 0 && avgLongCost > 0 && verdict.signal === 'FULL_CLEAR') {
+        const sellShares = longShares;
         const netExitPrice = todayOpen * (1 - FEE_RATE);
         const pnlRatio = (netExitPrice - avgLongCost) / avgLongCost;
-        cashPool += longShares * netExitPrice;
+        cashPool += sellShares * netExitPrice;
         trades.push({ profit: pnlRatio });
 
-        const soldShares = longShares;
         longShares = 0;
         avgLongCost = 0;
+        partialTakenInLeg = false;
         lastActionBarIndex = i;
         const profitPct = Number((pnlRatio * 100).toFixed(2));
 
@@ -1294,138 +1300,131 @@ export function runBacktestEngine(
           signalDate,
           execDate,
           puzzleHint: hintBase,
-          complianceTag: todayOpen <= invPrice * 1.02 ? '✅ 精準執行' : '⚠️ 偏離區間',
+          complianceTag: '✅ 精準執行',
           type: 'CRITICAL SELL',
-          action: '🚨 統一引擎・破季50線全清',
-          shares: soldShares,
-          units: '跌破季50%切線6%全清100%',
-          confidence: `季50%保護破位 (失效線 $${invPrice})`,
+          action: '🚨 順勢引擎・破月季50線100%清倉',
+          shares: sellShares,
+          units: '跌穿月/季50線清倉100%',
+          confidence: `收盤$${prevOverlay.close} < 月50($${m50.toFixed(2)}) & 季50($${q50.toFixed(2)})`,
           price: todayOpen.toFixed(2),
           totalHolding: 0,
           holdingType: 'EMPTY',
-          source: `跌穿季線50%下緣6% ($${prevOverlay.close} < $${invPrice})，全數清倉保護利潤`,
+          source: `跌穿月50($${m50.toFixed(2)})與季50($${q50.toFixed(2)})雙中間線進入下跌浪，開盤 100% 清倉並禁買`,
           profitPct,
           profit: profitPct,
-          msg: `[${execDate}] 🚨 統一引擎・破季50線全清 ${soldShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+          msg: `[${execDate}] 🚨 順勢引擎・破月季50線100%清倉 ${sellShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
         });
       }
 
-      // E. 衝入 80+ 紅色警戒區且 HA 陰線破前低 (PARTIAL_PROFIT)：鎖定 60% 利潤，保留 40% 底倉
+      // E. 上升浪高位止盈 40% (PARTIAL_PROFIT：日線>=88 極頂奇點 AND 日/週雙HA跌穿前低，保留 60% 核心底倉)
       if (
         longShares > 0 &&
         avgLongCost > 0 &&
+        isBullRegime &&
         verdict.signal === 'PARTIAL_PROFIT' &&
+        !partialTakenInLeg &&
         canAct
       ) {
-        const netExitPrice = todayOpen * (1 - FEE_RATE);
-        const pnlRatio = (netExitPrice - avgLongCost) / avgLongCost;
-        const pnlPct = pnlRatio * 100;
-        if (pnlPct > 0) {
-          const ratio = verdict.sizeRatio > 0 ? Math.min(1, verdict.sizeRatio) : 0.6;
-          const sellShares = Math.floor(longShares * ratio);
-          const orderValue = sellShares * todayOpen;
+        const ratio = verdict.sizeRatio > 0 ? Math.min(0.6, verdict.sizeRatio) : 0.4;
+        const sellShares = Math.floor(longShares * ratio);
+        const orderValue = sellShares * todayOpen;
 
-          if (sellShares > 0 && orderValue >= minOrderValue) {
-            cashPool += sellShares * netExitPrice;
-            trades.push({ profit: pnlRatio });
+        if (sellShares > 0 && orderValue >= minOrderValue) {
+          const netExitPrice = todayOpen * (1 - FEE_RATE);
+          const pnlRatio = (netExitPrice - avgLongCost) / avgLongCost;
+          cashPool += sellShares * netExitPrice;
+          trades.push({ profit: pnlRatio });
 
-            longShares -= sellShares;
-            if (longShares === 0) avgLongCost = 0;
-            lastActionBarIndex = i;
-            const profitPct = Number(pnlPct.toFixed(2));
+          longShares -= sellShares;
+          if (longShares === 0) avgLongCost = 0;
+          lastActionBarIndex = i;
+          partialTakenInLeg = true;
+          const profitPct = Number((pnlRatio * 100).toFixed(2));
+          const lockPct = Math.round(ratio * 100);
+          const keepPct = 100 - lockPct;
 
-            tradeLogs.unshift({
-              date: execDate,
-              signalDate,
-              execDate,
-              puzzleHint: hintBase,
-              complianceTag: '✅ 精準執行',
-              type: 'SELL',
-              action: '🟠 統一引擎・高位鎖利60%',
-              shares: sellShares,
-              units: `鎖利${Math.round(ratio * 100)}%留40%底倉`,
-              confidence: `日TFDR ${prevOverlay.dTfdr}>=80＋HA破前低`,
-              price: todayOpen.toFixed(2),
-              totalHolding: longShares,
-              holdingType: longShares > 0 ? 'LONG' : 'EMPTY',
-              source: `衝入80+紅區且日HA轉陰破前低，鎖定 ${Math.round(ratio * 100)}% 利潤、保留 40% 核心底倉`,
-              profitPct,
-              profit: profitPct,
-              msg: `[${execDate}] 🟠 統一引擎・高位鎖利60% ${sellShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
-            });
-          }
+          tradeLogs.unshift({
+            date: execDate,
+            signalDate,
+            execDate,
+            puzzleHint: hintBase,
+            complianceTag: '✅ 精準執行',
+            type: 'SELL',
+            action: `🟠 順勢引擎・88極頂減倉${lockPct}%留${keepPct}%底倉`,
+            shares: sellShares,
+            units: `減倉${lockPct}%保留${keepPct}%核心底倉`,
+            confidence: `日TFDR ${prevOverlay.dTfdr}≥88＋日/週HA雙跌穿前低`,
+            price: todayOpen.toFixed(2),
+            totalHolding: longShares,
+            holdingType: longShares > 0 ? 'LONG' : 'EMPTY',
+            source: `上升浪內日TFDR達到 ${prevOverlay.dTfdr} (≥88) 且日/週HA雙重跌穿前低，減倉 ${lockPct}% 鎖利並死抱 ${keepPct}% 核心底倉`,
+            profitPct,
+            profit: profitPct,
+            msg: `[${execDate}] 🟠 順勢引擎・88極頂減倉${lockPct}%留${keepPct}%底倉 ${sellShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+          });
         }
       }
 
-      // F. 黃金買點 / 復甦低吸 (GOLDEN_BUY / ADD_POSITION)：T+1 開盤驗假破（未跌破失效線）再成交
+      // F. 上升浪低位重倉買入 80% (GOLDEN_BUY：穩站月/季50之上 ＋ 日TFDR <= 25 ＋ 日HA轉陽升穿前高)
       if (
-        !isHalted &&
         shortShares === 0 &&
-        verdict.isPuzzleCross &&
-        (verdict.signal === 'GOLDEN_BUY' || verdict.signal === 'ADD_POSITION') &&
+        isBullRegime &&
+        verdict.signal === 'GOLDEN_BUY' &&
         (justRestartedFromHalt || canAct)
       ) {
-        const openValid = todayOpen > invPrice && todayOpen > prevBar.low * 0.95;
+        const ratio = verdict.sizeRatio > 0 ? Math.min(1, verdict.sizeRatio) : 0.8;
+        const targetCash = cashPool * ratio;
+        const shares = Math.floor(targetCash / (todayOpen * (1 + FEE_RATE)));
+        const orderValue = shares * todayOpen;
 
-        if (openValid) {
-          const ratio = justRestartedFromHalt
-            ? 0.3
-            : verdict.sizeRatio > 0
-            ? Math.min(1, verdict.sizeRatio)
-            : 0.4;
-          const targetCash = cashPool * ratio;
-          const shares = Math.floor(targetCash / (todayOpen * (1 + FEE_RATE)));
-          const orderValue = shares * todayOpen;
-
-          if (shares > 0 && orderValue >= minOrderValue) {
-            const totalCost = orderValue * (1 + FEE_RATE);
-            cashPool -= totalCost;
-            avgLongCost = (longShares * avgLongCost + totalCost) / (longShares + shares);
-            longShares += shares;
-            lastActionBarIndex = i;
-
-            const inBand = todayOpen >= w50 * 0.93 && todayOpen <= w50 * 1.06;
-            const complianceTag = inBand ? '✅ 精準執行' : '⚠️ 偏離區間';
-            const modeLabel = justRestartedFromHalt
-              ? '熔斷滯後重啟30%試探倉'
-              : `現金池${Math.round(ratio * 100)}%`;
-
-            tradeLogs.unshift({
-              date: execDate,
-              signalDate,
-              execDate,
-              puzzleHint: hintBase,
-              complianceTag,
-              type: verdict.signal === 'GOLDEN_BUY' ? 'STRONG BUY' : 'BUY',
-              action: '🟢 統一引擎・黃金買入',
-              shares,
-              units: modeLabel,
-              confidence: justRestartedFromHalt
-                ? `滯後重啟(${daysWithoutNewLow}日不破低＋回撤<15%)`
-                : `50%切線嵌套共振 (${verdict.signal})`,
-              price: todayOpen.toFixed(2),
-              totalHolding: longShares,
-              holdingType: 'LONG',
-              source: `站在大升通道(Q50 $${q50.toFixed(2)}/M50 $${m50.toFixed(2)})＋回踩貼水＋日綠底轉強上穿W50($${w50.toFixed(2)})`,
-              profitPct: null,
-              msg: `[${execDate}] 🟢 統一引擎・黃金買入 ${shares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (${modeLabel}・含0.25%成本)`
-            });
+        if (shares > 0 && orderValue >= minOrderValue) {
+          const totalCost = orderValue * (1 + FEE_RATE);
+          cashPool -= totalCost;
+          if (longShares === 0) {
+            riskPeakEquity = cashPool + shares * todayOpen;
           }
+          avgLongCost = (longShares * avgLongCost + totalCost) / (longShares + shares);
+          longShares += shares;
+          lastActionBarIndex = i;
+          partialTakenInLeg = false;
+          isHalted = false;
+          haltStabilized = false;
+
+          const pctLabel = Math.round(ratio * 100);
+          const inBand = todayOpen <= Math.max(w50 * 1.15, prevBar.high * 1.05);
+          const complianceTag = inBand ? '✅ 精準執行' : '⚠️ 偏離區間';
+
+          tradeLogs.unshift({
+            date: execDate,
+            signalDate,
+            execDate,
+            puzzleHint: hintBase,
+            complianceTag,
+            type: 'STRONG BUY',
+            action: `🔥 順勢引擎・上升浪極底重倉買入${pctLabel}%`,
+            shares,
+            units: `現金池${pctLabel}%坐貨主升浪`,
+            confidence: `穩站月/季50之上｜日TFDR ${prevOverlay.dTfdr}≤25＋日HA轉陽升穿前高`,
+            price: todayOpen.toFixed(2),
+            totalHolding: longShares,
+            holdingType: 'LONG',
+            source: `上升浪大勢內 (收盤$${prevOverlay.close} ≥ 月50 $${m50.toFixed(2)} 或 季50 $${q50.toFixed(2)})，日TFDR=${prevOverlay.dTfdr} (≤25) 且日HA轉陽升穿前高，${pctLabel}%重倉買入坐貨`,
+            profitPct: null,
+            msg: `[${execDate}] 🔥 順勢引擎・上升浪極底重倉買入${pctLabel}% ${shares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (現金池${pctLabel}%・含0.25%成本)`
+          });
         }
       }
 
-      // G. 空頭趨勢沽空 (SHORT_ENTRY)：僅當跌破 Q50 與 M50 雙線，且開盤仍處雙線下方、日 TFDR>=85 轉陰時輕倉 30% 沽空
+      // G. 下跌浪順勢開空 35% (SHORT_ENTRY：跌穿月/季50之下 ＋ 反彈日TFDR >= 80 且轉陰跌穿前低)
       if (
-        !isHalted &&
         longShares === 0 &&
         shortShares === 0 &&
+        isBearRegime &&
         verdict.signal === 'SHORT_ENTRY' &&
-        verdict.regime === 'BEAR' &&
-        todayOpen < q50 &&
-        todayOpen < m50 &&
         canAct
       ) {
-        const marginAlloc = cashPool * 0.3;
+        const shortRatio = verdict.sizeRatio > 0 ? Math.min(0.5, verdict.sizeRatio) : 0.35;
+        const marginAlloc = cashPool * shortRatio;
         const shares = Math.floor(marginAlloc / todayOpen);
         const orderValue = shares * todayOpen;
 
@@ -1436,6 +1435,7 @@ export function runBacktestEngine(
           shortEntryGross = todayOpen;
           shortEntryNetProceeds = netSellPerShare;
           lastActionBarIndex = i;
+          const shortPct = Math.round(shortRatio * 100);
 
           tradeLogs.unshift({
             date: execDate,
@@ -1444,16 +1444,16 @@ export function runBacktestEngine(
             puzzleHint: hintBase,
             complianceTag: '✅ 精準執行',
             type: 'SHORT',
-            action: '🟣 統一引擎・輕倉沽空30%',
+            action: `🟣 順勢引擎・下跌浪輕倉沽空${shortPct}%`,
             shares,
-            units: '熊市輕空30%',
-            confidence: `雙破Q50/M50＋日TFDR ${prevOverlay.dTfdr}>=85轉陰`,
+            units: `下跌浪≥80轉陰沽空${shortPct}%`,
+            confidence: `破月50($${m50.toFixed(2)})/季50($${q50.toFixed(2)})｜日TFDR ${prevOverlay.dTfdr}≥80轉陰跌穿`,
             price: todayOpen.toFixed(2),
             totalHolding: shortShares,
             holdingType: 'SHORT',
-            source: `同時跌破季50%($${q50.toFixed(2)})與月50%($${m50.toFixed(2)})，且日TFDR(${prevOverlay.dTfdr})進入紅頂轉陰，輕倉30%沽空`,
+            source: `跌穿月/季50中間線進入下跌浪，反彈日TFDR=${prevOverlay.dTfdr} (≥80) 且日HA轉陰跌穿前低，開立${shortPct}%輕倉順勢空單`,
             profitPct: null,
-            msg: `[${execDate}] 🟣 統一引擎・輕倉沽空30% ${shares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本)`
+            msg: `[${execDate}] 🟣 順勢引擎・下跌浪輕倉沽空${shortPct}% ${shares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本)`
           });
         }
       }

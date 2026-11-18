@@ -445,14 +445,20 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
   // Viewport / zoom / pan state
   const [viewRange, setViewRange] = useState<{ start: number; end: number } | null>(null);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
+  const [selectedBar, setSelectedBar] = useState<{ barIdx: number; x: number; y: number } | null>(null);
+  const [crosshairDismissed, setCrosshairDismissed] = useState(false);
 
   // 滑鼠 / 單指拖拽平移狀態
   const isDraggingRef = useRef(false);
-  const dragStartRef = useRef<{ x: number; startIdx: number; endIdx: number }>({
+  const dragStartRef = useRef<{ x: number; y: number; moved: boolean; startIdx: number; endIdx: number }>({
     x: 0,
+    y: 0,
+    moved: false,
     startIdx: 0,
     endIdx: 0
   });
+  // 記錄右上角白色十字星數據條座標矩形（供點擊直接隱藏）
+  const infoPillRectRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
 
   // 底部時間軸滑塊拖拽狀態
   const isSliderDraggingRef = useRef(false);
@@ -519,6 +525,8 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
 
   // Reset or adjust viewRange on data changes (預設顯示最近約 35%，保留過往歷史供向左平移查看)
   useEffect(() => {
+    setSelectedBar(null);
+    setCrosshairDismissed(false);
     if (activeData.length > 0) {
       const defaultBars =
         activeData.length <= 80
@@ -1236,10 +1244,27 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       });
     }
 
-    // 9. Interactive Crosshair & Tooltip
-    if (mousePos && mousePos.x >= margin.left && mousePos.x <= margin.left + plotW) {
-      const relX = mousePos.x - margin.left;
-      const hoveredBarIdx = Math.min(visibleBars.length - 1, Math.max(0, Math.floor(relX / stepX)));
+    // 9. Interactive Crosshair & Tooltip (支援點擊空白處或白色數據條立即隱藏 / 再點一下重新查看)
+    const activePointer =
+      !crosshairDismissed &&
+      (selectedBar && selectedBar.barIdx >= startIdx && selectedBar.barIdx <= endIdx
+        ? {
+            localIdx: selectedBar.barIdx - startIdx,
+            y: Math.max(margin.top, Math.min(margin.top + plotH, selectedBar.y))
+          }
+        : mousePos && mousePos.x >= margin.left && mousePos.x <= margin.left + plotW
+        ? {
+            localIdx: Math.min(
+              visibleBars.length - 1,
+              Math.max(0, Math.floor((mousePos.x - margin.left) / stepX))
+            ),
+            y: Math.max(margin.top, Math.min(margin.top + plotH, mousePos.y))
+          }
+        : null);
+
+    if (activePointer) {
+      const hoveredBarIdx = activePointer.localIdx;
+      const pointerY = activePointer.y;
       const hoveredBar = visibleBars[hoveredBarIdx];
       const hoveredTfdr = visibleTfdr[hoveredBarIdx];
       const hX = getX(hoveredBarIdx);
@@ -1255,38 +1280,43 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
 
       // Horizontal line
       ctx.beginPath();
-      ctx.moveTo(margin.left, mousePos.y);
-      ctx.lineTo(margin.left + plotW, mousePos.y);
+      ctx.moveTo(margin.left, pointerY);
+      ctx.lineTo(margin.left + plotW, pointerY);
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // Floating Info Pill in top right (避免與左上角 PiP 拼圖小窗重疊)
+      // Floating Info Pill in top right (避免與左上角 PiP 拼圖小窗重疊；點擊可直接隱藏)
       const tfdrInfo = hoveredTfdr ? ` | TFDR:${hoveredTfdr.score}` : '';
-      const infoText = `${hoveredBar.date?.split(' ')[0]} | O:${hoveredBar.o} H:${hoveredBar.h} L:${hoveredBar.l} C:${hoveredBar.c}${tfdrInfo}`;
+      const infoText = `${hoveredBar.date?.split(' ')[0]} | O:${hoveredBar.o} H:${hoveredBar.h} L:${hoveredBar.l} C:${hoveredBar.c}${tfdrInfo}  ✕`;
       ctx.font = '11px monospace';
       const boxW = Math.min(plotW - 16, Math.max(300, ctx.measureText(infoText).width + 20));
       const boxX = margin.left + plotW - boxW - 8;
+      const boxY = margin.top + 6;
+      const boxH = 26;
+      infoPillRectRef.current = { x: boxX, y: boxY, w: boxW, h: boxH };
 
       ctx.fillStyle = 'rgba(17, 24, 39, 0.92)';
-      ctx.strokeStyle = '#374151';
+      ctx.strokeStyle = '#4b5563';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.roundRect(boxX, margin.top + 6, boxW, 26, 4);
+      ctx.roundRect(boxX, boxY, boxW, boxH, 4);
       ctx.fill();
       ctx.stroke();
 
       ctx.fillStyle = '#ffffff';
       ctx.textAlign = 'left';
-      ctx.fillText(infoText, boxX + 8, margin.top + 23);
+      ctx.fillText(infoText, boxX + 8, boxY + 17);
 
       // Price Tag on Right Axis
-      const hoverPrice = maxPrice - ((mousePos.y - margin.top) / plotH) * (maxPrice - minPrice);
+      const hoverPrice = maxPrice - ((pointerY - margin.top) / plotH) * (maxPrice - minPrice);
       ctx.fillStyle = '#6366f1';
-      ctx.fillRect(width - margin.right + 2, mousePos.y - 8, margin.right - 4, 16);
+      ctx.fillRect(width - margin.right + 2, pointerY - 8, margin.right - 4, 16);
       ctx.fillStyle = '#ffffff';
       ctx.font = 'bold 9px monospace';
       ctx.textAlign = 'left';
-      ctx.fillText(hoverPrice.toFixed(2), width - margin.right + 6, mousePos.y + 4);
+      ctx.fillText(hoverPrice.toFixed(2), width - margin.right + 6, pointerY + 4);
+    } else {
+      infoPillRectRef.current = null;
     }
 
     ctx.restore();
@@ -1296,6 +1326,8 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     boxMarkers,
     hologramLine,
     mousePos,
+    selectedBar,
+    crosshairDismissed,
     tfdrSeries,
     tfdrTurningPoints,
     chartMode,
@@ -1392,12 +1424,49 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     setViewRange({ start: newStart, end: newEnd });
   };
 
+  // 點擊切換白色十字星數據條（點一下查看，點擊空白處或直接點擊白色數據條本身立刻隱藏）
+  const toggleCrosshairAtPoint = useCallback(
+    (localX: number, localY: number, canvasWidth: number) => {
+      const pill = infoPillRectRef.current;
+      const clickedOnPill =
+        Boolean(pill) &&
+        pill !== null &&
+        localX >= pill.x &&
+        localX <= pill.x + pill.w &&
+        localY >= pill.y &&
+        localY <= pill.y + pill.h;
+
+      if (clickedOnPill || (!crosshairDismissed && (selectedBar !== null || mousePos !== null))) {
+        setSelectedBar(null);
+        setMousePos(null);
+        setCrosshairDismissed(true);
+        return;
+      }
+
+      if (!viewRange || activeData.length === 0) return;
+      const marginLeft = 10;
+      const marginRight = 65;
+      const plotW = Math.max(1, canvasWidth - marginLeft - marginRight);
+      const visibleCount = Math.max(1, viewRange.end - viewRange.start + 1);
+      const stepX = plotW / visibleCount;
+      const relX = Math.max(0, Math.min(plotW - 1, localX - marginLeft));
+      const localIdx = Math.min(visibleCount - 1, Math.max(0, Math.floor(relX / stepX)));
+
+      setCrosshairDismissed(false);
+      setSelectedBar({ barIdx: viewRange.start + localIdx, x: localX, y: localY });
+      setMousePos({ x: localX, y: localY });
+    },
+    [crosshairDismissed, selectedBar, mousePos, viewRange, activeData.length]
+  );
+
   // Mouse Drag / Pan
   const handleMouseDown = (e: React.MouseEvent) => {
     if (!viewRange) return;
     isDraggingRef.current = true;
     dragStartRef.current = {
       x: e.clientX,
+      y: e.clientY,
+      moved: false,
       startIdx: viewRange.start,
       endIdx: viewRange.end
     };
@@ -1409,20 +1478,37 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    setMousePos({ x, y });
+
+    if (!crosshairDismissed && !selectedBar) {
+      setMousePos({ x, y });
+    }
 
     if (isDraggingRef.current && viewRange) {
       const dx = e.clientX - dragStartRef.current.x;
-      applyPanOffset(dx, dragStartRef.current.startIdx, dragStartRef.current.endIdx, rect.width);
+      const dy = e.clientY - dragStartRef.current.y;
+      if (Math.hypot(dx, dy) >= 5) {
+        dragStartRef.current.moved = true;
+      }
+      if (dragStartRef.current.moved) {
+        applyPanOffset(dx, dragStartRef.current.startIdx, dragStartRef.current.endIdx, rect.width);
+      }
     }
   };
 
-  const handleMouseUp = () => {
+  const handleMouseUp = (e: React.MouseEvent) => {
+    const wasMoved = dragStartRef.current.moved;
     isDraggingRef.current = false;
+    if (!wasMoved && canvasRef.current) {
+      const rect = canvasRef.current.getBoundingClientRect();
+      toggleCrosshairAtPoint(e.clientX - rect.left, e.clientY - rect.top, rect.width);
+    }
   };
 
   const handleMouseLeave = () => {
-    setMousePos(null);
+    if (!selectedBar) {
+      setMousePos(null);
+      setCrosshairDismissed(false);
+    }
   };
 
   // Single-finger Touch Pan + Two-finger Pinch Zoom
@@ -1434,18 +1520,11 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       pinchStartRef.current = null;
       dragStartRef.current = {
         x: e.touches[0].clientX,
+        y: e.touches[0].clientY,
+        moved: false,
         startIdx: viewRange.start,
         endIdx: viewRange.end
       };
-
-      const canvas = canvasRef.current;
-      if (canvas) {
-        const rect = canvas.getBoundingClientRect();
-        setMousePos({
-          x: e.touches[0].clientX - rect.left,
-          y: e.touches[0].clientY - rect.top
-        });
-      }
     } else if (e.touches.length === 2) {
       isDraggingRef.current = false;
       const dist = Math.hypot(
@@ -1467,12 +1546,21 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
 
     if (e.touches.length === 1 && isDraggingRef.current) {
       const touchX = e.touches[0].clientX;
+      const touchY = e.touches[0].clientY;
       const dx = touchX - dragStartRef.current.x;
-      applyPanOffset(dx, dragStartRef.current.startIdx, dragStartRef.current.endIdx, rect.width);
-      setMousePos({
-        x: touchX - rect.left,
-        y: e.touches[0].clientY - rect.top
-      });
+      const dy = touchY - dragStartRef.current.y;
+      if (Math.hypot(dx, dy) >= 6) {
+        dragStartRef.current.moved = true;
+      }
+      if (dragStartRef.current.moved) {
+        applyPanOffset(dx, dragStartRef.current.startIdx, dragStartRef.current.endIdx, rect.width);
+        if (!crosshairDismissed) {
+          setMousePos({
+            x: touchX - rect.left,
+            y: touchY - rect.top
+          });
+        }
+      }
     } else if (e.touches.length === 2 && pinchStartRef.current) {
       const dist = Math.hypot(
         e.touches[0].clientX - e.touches[1].clientX,
@@ -1493,9 +1581,19 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     }
   };
 
-  const handleTouchEnd = () => {
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    const wasMoved = dragStartRef.current.moved;
+    const wasSingleDrag = isDraggingRef.current && !pinchStartRef.current;
     isDraggingRef.current = false;
     pinchStartRef.current = null;
+    if (wasSingleDrag && !wasMoved && e.changedTouches.length > 0 && canvasRef.current) {
+      const rect = canvasRef.current.getBoundingClientRect();
+      toggleCrosshairAtPoint(
+        e.changedTouches[0].clientX - rect.left,
+        e.changedTouches[0].clientY - rect.top,
+        rect.width
+      );
+    }
   };
 
   // 底部歷史時間軸滑塊拖拽（快速跳轉過往所有年份）
