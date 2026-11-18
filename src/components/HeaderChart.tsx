@@ -2,88 +2,193 @@ import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react'
 import { ModelBar, RawKline } from '../types/quant';
 import { calculateDynamicReversals } from '../services/quantCalculations';
 import { calculateTFDRSeries } from '../services/tfdrIndicator';
-import { OHLCBar, PuzzleState, resampleByCalendarUTC } from '../services/puzzleDecisionEngine';
+import {
+  buildFullPuzzleTimeline,
+  OHLCBar,
+  OverlayPoint,
+  PuzzleState,
+  PuzzleVerdict
+} from '../services/puzzleDecisionEngine';
 import { ZoomIn, ZoomOut, RotateCcw, ChevronDown, ChevronUp } from 'lucide-react';
 
-// 1. 迷你 SVG 單圖渲染器（畫出走勢折線 + 黃色生命線 + 奇點圓點）
-const MiniChartCard: React.FC<{
-  title: string;
-  bars: number[];
-  midline: number;
-  momScore: number;
-  isUp: boolean;
-}> = ({ title, bars, midline, momScore, isUp }) => {
-  const slice = bars.slice(-20);
-  if (slice.length < 2) {
-    return (
-      <div className="bg-slate-900/90 p-1.5 rounded border border-slate-700/60 text-[10px] text-slate-400">
-        {title}: 數據累積中
-      </div>
-    );
+interface OverlayEntry {
+  point: OverlayPoint;
+  verdict: PuzzleVerdict;
+}
+
+function buildStepAfterPath(
+  points: { x: number; y: number | null }[]
+): string {
+  let d = '';
+  let prevY: number | null = null;
+  for (let i = 0; i < points.length; i++) {
+    const { x, y } = points[i];
+    if (y == null || !Number.isFinite(y)) {
+      prevY = null;
+      continue;
+    }
+    if (prevY == null) {
+      d += `M ${x.toFixed(1)},${y.toFixed(1)}`;
+    } else {
+      d += ` H ${x.toFixed(1)} V ${y.toFixed(1)}`;
+    }
+    prevY = y;
   }
-  const allVals = Number.isFinite(midline) && midline > 0 ? [...slice, midline] : slice;
-  const min = Math.min(...allVals);
-  const max = Math.max(...allVals);
-  const range = Math.max(0.001, max - min);
-  const w = 105;
-  const h = 38;
-  const toY = (v: number) => h - 4 - ((v - min) / range) * (h - 8);
-  const points = slice
-    .map((v, idx) => `${((idx / (slice.length - 1)) * w).toFixed(1)},${toY(v).toFixed(1)}`)
-    .join(' ');
-  const midY = toY(Number.isFinite(midline) && midline > 0 ? midline : slice[slice.length - 1]).toFixed(1);
-  const lastY = toY(slice[slice.length - 1]).toFixed(1);
-  const strokeColor = isUp ? '#10b981' : '#ef4444';
+  return d;
+}
 
-  return (
-    <div className="bg-slate-900/95 p-1.5 rounded border border-slate-700/80 flex flex-col">
-      <div className="flex justify-between items-center text-[10px] mb-0.5">
-        <span className="font-bold text-slate-200">{title}</span>
-        <span className={momScore >= 50 ? 'text-emerald-400 font-mono' : 'text-red-400 font-mono'}>
-          動能:{momScore}
-        </span>
-      </div>
-      <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} className="overflow-visible">
-        {/* 黃色虛線：該週期中間生命線 */}
-        <line x1="0" y1={midY} x2={w} y2={midY} stroke="#f59e0b" strokeWidth="1" strokeDasharray="3,2" />
-        {/* 價格走勢折線 */}
-        <polyline fill="none" stroke={strokeColor} strokeWidth="1.5" points={points} />
-        {/* 最新位置發光點 */}
-        <circle cx={w} cy={lastY} r="2.5" fill={strokeColor} />
-      </svg>
-    </div>
-  );
-};
-
-// 2. KC 博士・2×2 四圖並排迷你走勢拼圖懸浮組件
-const FourTimeframePuzzlePiP: React.FC<{
+// 透明膠片同框疊合拼圖（Step-After 階梯生命線 + 右側獨立 0-100 TFDR 副軸 + 派生金色交匯點 + 截至週期 Tooltip）
+const FourTimeframeOverlayPiP: React.FC<{
   puzzleState: PuzzleState;
-  qCloses: number[];
-  mCloses: number[];
-  wCloses: number[];
-  dCloses: number[];
-}> = ({ puzzleState, qCloses, mCloses, wCloses, dCloses }) => {
+  overlayEntries: OverlayEntry[];
+}> = ({ puzzleState, overlayEntries }) => {
   // 桌面預設展開、手機版預設收合以免遮擋主圖
   const [pipCollapsed, setPipCollapsed] = useState<boolean>(() =>
     typeof window !== 'undefined' ? window.innerWidth < 768 : false
   );
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+
+  const slice = overlayEntries.slice(-90);
+
+  const chartGeometry = useMemo(() => {
+    if (slice.length < 2) return null;
+    // 左側統一價格軸（嚴禁混入 0-100 動能數值）
+    const priceVals: number[] = [];
+    for (let i = 0; i < slice.length; i++) {
+      const pt = slice[i].point;
+      if (Number.isFinite(pt.close) && pt.close > 0) priceVals.push(pt.close);
+      if (pt.qMid != null && Number.isFinite(pt.qMid) && pt.qMid > 0) priceVals.push(pt.qMid);
+      if (pt.mMid != null && Number.isFinite(pt.mMid) && pt.mMid > 0) priceVals.push(pt.mMid);
+      if (pt.wMid != null && Number.isFinite(pt.wMid) && pt.wMid > 0) priceVals.push(pt.wMid);
+    }
+    if (priceVals.length === 0) return null;
+
+    const minPrice = Math.min(...priceVals);
+    const maxPrice = Math.max(...priceVals);
+    const priceRange = Math.max(0.001, maxPrice - minPrice);
+
+    const w = 292;
+    const h = 118;
+    const padLeft = 2;
+    const padRight = 24; // 右側預留獨立 0-100 TFDR 副軸刻度空間
+    const plotW = w - padLeft - padRight;
+    const padTop = 6;
+    const padBottom = 6;
+    const pricePlotH = h - padTop - padBottom;
+
+    const toX = (idx: number) => padLeft + (idx / (slice.length - 1)) * plotW;
+    const toPriceY = (v: number) =>
+      padTop + (1 - (v - minPrice) / priceRange) * pricePlotH;
+    // 右側獨立 TFDR 0-100 副軸映射（底部 35% 高度區間，視覺清晰且不干擾左軸價格刻度）
+    const tfdrAxisTop = h - padBottom - pricePlotH * 0.36;
+    const tfdrAxisHeight = pricePlotH * 0.36;
+    const toTfdrY = (score: number) =>
+      h - padBottom - (Math.max(0, Math.min(100, score)) / 100) * tfdrAxisHeight;
+
+    const qStepPath = buildStepAfterPath(
+      slice.map((e, idx) => ({
+        x: toX(idx),
+        y: e.point.qMid != null ? toPriceY(e.point.qMid) : null
+      }))
+    );
+    const mStepPath = buildStepAfterPath(
+      slice.map((e, idx) => ({
+        x: toX(idx),
+        y: e.point.mMid != null ? toPriceY(e.point.mMid) : null
+      }))
+    );
+    const wStepPath = buildStepAfterPath(
+      slice.map((e, idx) => ({
+        x: toX(idx),
+        y: e.point.wMid != null ? toPriceY(e.point.wMid) : null
+      }))
+    );
+    const dPoints = slice
+      .map((e, idx) => `${toX(idx).toFixed(1)},${toPriceY(e.point.close).toFixed(1)}`)
+      .join(' ');
+
+    const barW = Math.max(1.4, (plotW / slice.length) * 0.65);
+    const tfdrBars = slice.map((e, idx) => {
+      const cx = toX(idx);
+      const score = e.point.dTfdr;
+      const barTop = toTfdrY(score);
+      const barH = Math.max(1, h - padBottom - barTop);
+      const fill = score <= 25 ? '#10b981' : score >= 86 ? '#ef4444' : '#64748b';
+      const fillOpacity = score <= 25 || score >= 86 ? 0.68 : 0.22;
+      return {
+        x: (cx - barW / 2).toFixed(1),
+        y: barTop.toFixed(1),
+        width: barW.toFixed(1),
+        height: barH.toFixed(1),
+        fill,
+        fillOpacity
+      };
+    });
+
+    const crosses = slice
+      .map((e, idx) =>
+        e.verdict.isPuzzleCross
+          ? {
+              cx: toX(idx).toFixed(1),
+              cy: toPriceY(e.point.close).toFixed(1),
+              date: e.point.date,
+              price: e.point.close
+            }
+          : null
+      )
+      .filter((c): c is { cx: string; cy: string; date: string; price: number } => c !== null);
+
+    return {
+      w,
+      h,
+      padLeft,
+      plotW,
+      padBottom,
+      minPrice,
+      maxPrice,
+      qStepPath,
+      mStepPath,
+      wStepPath,
+      dPoints,
+      tfdrBars,
+      crosses,
+      tfdrAxisTop,
+      toX,
+      toPriceY,
+      toTfdrY
+    };
+  }, [slice]);
+
+  const activeEntry =
+    hoverIdx != null && slice[hoverIdx]
+      ? slice[hoverIdx]
+      : slice.length > 0
+      ? slice[slice.length - 1]
+      : null;
 
   return (
     <div
-      className="absolute top-2 left-2 z-20 w-[258px] sm:w-[276px] max-w-[92vw] bg-slate-950/88 backdrop-blur-md border border-indigo-500/50 rounded-lg p-2 shadow-2xl select-none"
+      className="absolute top-2 left-2 z-20 w-[308px] sm:w-[344px] max-w-[92vw] bg-slate-950/90 backdrop-blur-md border border-indigo-500/50 rounded-lg p-2 shadow-2xl select-none"
       onMouseDown={(e) => e.stopPropagation()}
       onTouchStart={(e) => e.stopPropagation()}
       onWheel={(e) => e.stopPropagation()}
     >
       <div className="flex items-center justify-between gap-2 pb-1 mb-1.5 border-b border-slate-800">
-        <span className="text-[10.5px] font-bold text-amber-400 truncate">
-          🧩 KC四維並排拼圖 (黃虛線=生命線)
-        </span>
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-[10.5px] font-bold text-amber-400 truncate">
+            🧩 四維階梯生命線疊合拼圖
+          </span>
+          {puzzleState.isPuzzleCross && (
+            <span className="px-1 py-0.2 rounded bg-amber-500/20 border border-amber-400/60 text-amber-300 text-[9px] font-bold shrink-0">
+              ● 交匯買點
+            </span>
+          )}
+        </div>
         <button
           type="button"
           onClick={() => setPipCollapsed(prev => !prev)}
           className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:bg-slate-700 flex items-center gap-0.5 shrink-0 transition"
-          title={pipCollapsed ? '展開四維並排拼圖' : '收合四維並排拼圖'}
+          title={pipCollapsed ? '展開四維階梯生命線疊合拼圖' : '收合四維階梯生命線疊合拼圖'}
         >
           {pipCollapsed ? (
             <>
@@ -96,39 +201,200 @@ const FourTimeframePuzzlePiP: React.FC<{
           )}
         </button>
       </div>
+
       {!pipCollapsed && (
         <>
-          <div className="grid grid-cols-2 gap-1.5">
-            <MiniChartCard
-              title="① 季線 Q"
-              bars={qCloses}
-              midline={puzzleState.timeframes.Q.midline}
-              momScore={puzzleState.timeframes.Q.mom}
-              isUp={puzzleState.timeframes.Q.haBull}
-            />
-            <MiniChartCard
-              title="② 月線 M"
-              bars={mCloses}
-              midline={puzzleState.timeframes.M.midline}
-              momScore={puzzleState.timeframes.M.mom}
-              isUp={puzzleState.timeframes.M.haBull}
-            />
-            <MiniChartCard
-              title="③ 週線 W"
-              bars={wCloses}
-              midline={puzzleState.timeframes.W.midline}
-              momScore={puzzleState.timeframes.W.mom}
-              isUp={puzzleState.timeframes.W.haBull}
-            />
-            <MiniChartCard
-              title="④ 日線 D"
-              bars={dCloses}
-              midline={puzzleState.timeframes.D.midline}
-              momScore={puzzleState.timeframes.D.mom}
-              isUp={puzzleState.timeframes.D.haBull}
-            />
+          {chartGeometry && activeEntry ? (
+            <div className="relative bg-slate-900/90 rounded border border-slate-800 p-1">
+              {/* 統一左軸價格刻度 & 當前懸停/最新標註 */}
+              <div className="flex justify-between text-[8.5px] font-mono text-slate-400 px-0.5 mb-0.5">
+                <span>高 ${chartGeometry.maxPrice.toFixed(2)}</span>
+                <span className="text-slate-300">
+                  {activeEntry.point.date} · ${activeEntry.point.close.toFixed(2)}
+                </span>
+              </div>
+
+              <svg
+                width="100%"
+                height={chartGeometry.h}
+                viewBox={`0 0 ${chartGeometry.w} ${chartGeometry.h}`}
+                className="overflow-visible block cursor-crosshair"
+                onMouseMove={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const relX = ((e.clientX - rect.left) / Math.max(1, rect.width)) * chartGeometry.w;
+                  const norm = Math.max(
+                    0,
+                    Math.min(1, (relX - chartGeometry.padLeft) / Math.max(1, chartGeometry.plotW))
+                  );
+                  const idx = Math.round(norm * (slice.length - 1));
+                  setHoverIdx(idx);
+                }}
+                onMouseLeave={() => setHoverIdx(null)}
+              >
+                {/* 右側獨立 0-100 TFDR 副軸參考刻度 */}
+                <line
+                  x1={chartGeometry.padLeft + chartGeometry.plotW}
+                  y1={chartGeometry.tfdrAxisTop}
+                  x2={chartGeometry.padLeft + chartGeometry.plotW}
+                  y2={chartGeometry.h - chartGeometry.padBottom}
+                  stroke="#334155"
+                  strokeWidth="0.7"
+                />
+                <text
+                  x={chartGeometry.padLeft + chartGeometry.plotW + 2}
+                  y={chartGeometry.tfdrAxisTop + 4}
+                  fill="#94a3b8"
+                  fontSize="7"
+                  fontFamily="monospace"
+                >
+                  100
+                </text>
+                <text
+                  x={chartGeometry.padLeft + chartGeometry.plotW + 2}
+                  y={chartGeometry.toTfdrY(25) + 2}
+                  fill="#10b981"
+                  fontSize="7"
+                  fontFamily="monospace"
+                >
+                  25
+                </text>
+                <text
+                  x={chartGeometry.padLeft + chartGeometry.plotW + 2}
+                  y={chartGeometry.h - chartGeometry.padBottom}
+                  fill="#64748b"
+                  fontSize="7"
+                  fontFamily="monospace"
+                >
+                  0
+                </text>
+
+                {/* L5 底部 TFDR 0-100 副軸柱狀圖 */}
+                {chartGeometry.tfdrBars.map((b, idx) => (
+                  <rect
+                    key={idx}
+                    x={b.x}
+                    y={b.y}
+                    width={b.width}
+                    height={b.height}
+                    fill={b.fill}
+                    fillOpacity={b.fillOpacity}
+                    rx="0.6"
+                  />
+                ))}
+
+                {/* L1 季線生命線：step-after 粗紫實線 */}
+                {chartGeometry.qStepPath && (
+                  <path
+                    fill="none"
+                    stroke="#a855f7"
+                    strokeWidth="2"
+                    opacity="0.78"
+                    d={chartGeometry.qStepPath}
+                  />
+                )}
+
+                {/* L2 月線生命線：step-after 粗黃實線 */}
+                {chartGeometry.mStepPath && (
+                  <path
+                    fill="none"
+                    stroke="#f59e0b"
+                    strokeWidth="1.8"
+                    opacity="0.85"
+                    d={chartGeometry.mStepPath}
+                  />
+                )}
+
+                {/* L3 週線生命線：step-after 藍色虛線 */}
+                {chartGeometry.wStepPath && (
+                  <path
+                    fill="none"
+                    stroke="#38bdf8"
+                    strokeWidth="1.2"
+                    strokeDasharray="3,2"
+                    d={chartGeometry.wStepPath}
+                  />
+                )}
+
+                {/* L4 日線走勢線：白色細實線 */}
+                <polyline
+                  fill="none"
+                  stroke="#ffffff"
+                  strokeWidth="1.5"
+                  points={chartGeometry.dPoints}
+                />
+
+                {/* 懸停垂直指示線 */}
+                {hoverIdx != null && slice[hoverIdx] && (
+                  <line
+                    x1={chartGeometry.toX(hoverIdx)}
+                    y1={4}
+                    x2={chartGeometry.toX(hoverIdx)}
+                    y2={chartGeometry.h - chartGeometry.padBottom}
+                    stroke="#94a3b8"
+                    strokeWidth="0.8"
+                    strokeDasharray="2,2"
+                  />
+                )}
+
+                {/* L6 派生金色交匯圓點 PUZZLE_CROSS */}
+                {chartGeometry.crosses.map((c, idx) => (
+                  <g key={idx}>
+                    <circle cx={c.cx} cy={c.cy} r="6" fill="#fbbf24" opacity="0.28" />
+                    <circle cx={c.cx} cy={c.cy} r="3.5" fill="#fbbf24" stroke="#ffffff" strokeWidth="0.7" />
+                  </g>
+                ))}
+              </svg>
+
+              {/* 已完結週期截斷標註 Tooltip（「截至 2026-Q3」） */}
+              <div className="mt-1 px-1 py-0.5 rounded bg-slate-950/90 border border-slate-800/80 text-[8.5px] font-mono text-slate-300 space-y-0.5">
+                <div className="flex justify-between">
+                  <span>低 ${chartGeometry.minPrice.toFixed(2)}</span>
+                  <span className="text-slate-400">
+                    日TFDR {activeEntry.point.dTfdr}｜交匯點 {chartGeometry.crosses.length} 枚
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-x-2 text-slate-300">
+                  <span className="text-purple-300">
+                    季:{activeEntry.point.qMid != null ? `$${activeEntry.point.qMid}` : '不足'}
+                    {activeEntry.point.qPeriodEnd ? `(截至 ${activeEntry.point.qPeriodEnd})` : ''}
+                  </span>
+                  <span className="text-amber-300">
+                    月:{activeEntry.point.mMid != null ? `$${activeEntry.point.mMid}` : '不足'}
+                    {activeEntry.point.mPeriodEnd ? `(截至 ${activeEntry.point.mPeriodEnd})` : ''}
+                  </span>
+                  <span className="text-sky-300">
+                    週:{activeEntry.point.wMid != null ? `$${activeEntry.point.wMid}` : '不足'}
+                    {activeEntry.point.wPeriodEnd ? `(截至 ${activeEntry.point.wPeriodEnd})` : ''}
+                  </span>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-slate-900/90 p-2 rounded border border-slate-800 text-[10px] text-slate-400">
+              四維生命線疊合數據累積中...
+            </div>
+          )}
+
+          {/* 圖層色碼對照與關鍵價位 */}
+          <div className="mt-1 flex flex-wrap items-center justify-between gap-x-2 text-[9px] text-slate-300">
+            <span className="flex items-center gap-1">
+              <span className="w-2.5 h-0.5 bg-[#a855f7] inline-block" /> 季階梯
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="w-2.5 h-0.5 bg-[#f59e0b] inline-block" /> 月階梯
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="w-2.5 h-0.5 border-b border-dashed border-[#38bdf8] inline-block" /> 週階梯
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="w-2.5 h-0.5 bg-white inline-block" /> 日
+            </span>
+            <span className="flex items-center gap-1 text-amber-300 font-semibold">
+              <span className="w-2 h-2 rounded-full bg-[#fbbf24] inline-block" /> 交匯買點
+            </span>
           </div>
-          <div className="mt-1.5 pt-1 border-t border-slate-800 text-[10px] text-slate-300 flex justify-between font-mono">
+
+          <div className="mt-1 pt-1 border-t border-slate-800 text-[9.5px] text-slate-300 flex justify-between font-mono">
             <span>
               低吸:<b className="text-emerald-400">${puzzleState.levels.buyZone.low}</b>
             </span>
@@ -226,12 +492,10 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     return data;
   }, [data, isReplay, replayIndex]);
 
-  // 從完整日線（fallback 至 activeData）重採樣生成 Q / M / W / D 收盤價陣列，供 KC 四維並排迷你圖渲染
-  const { qCloses, mCloses, wCloses, dCloses } = useMemo(() => {
+  // 從完整日線（fallback 至 activeData）構建無未來函數階梯疊合序列與派生 PuzzleVerdict
+  const overlayEntries = useMemo<OverlayEntry[]>(() => {
     const base: RawKline[] = dailyKlines.length > 0 ? dailyKlines : activeData;
-    if (!base.length) {
-      return { qCloses: [], mCloses: [], wCloses: [], dCloses: [] };
-    }
+    if (!base.length) return [];
     const replayCutoff =
       isReplay && activeData.length > 0 ? (activeData[activeData.length - 1].date || '').slice(0, 10) : null;
     const ohlc: OHLCBar[] = base
@@ -242,19 +506,28 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
         low: Number(b.l),
         close: Number(b.c)
       }))
-      .filter(b => Boolean(b.date) && Number.isFinite(b.close) && b.close > 0 && (!replayCutoff || b.date <= replayCutoff))
+      .filter(
+        b =>
+          Boolean(b.date) &&
+          Number.isFinite(b.open) &&
+          b.open > 0 &&
+          Number.isFinite(b.close) &&
+          b.close > 0 &&
+          (!replayCutoff || b.date <= replayCutoff)
+      )
       .sort((a, b) => a.date.localeCompare(b.date));
 
-    if (!ohlc.length) {
-      return { qCloses: [], mCloses: [], wCloses: [], dCloses: [] };
+    if (!ohlc.length) return [];
+    const timeline = buildFullPuzzleTimeline(ohlc);
+    const startIdx = Math.max(0, timeline.overlays.length - 90);
+    const entries: OverlayEntry[] = [];
+    for (let i = startIdx; i < timeline.overlays.length; i++) {
+      entries.push({
+        point: timeline.overlays[i],
+        verdict: timeline.verdicts[i]
+      });
     }
-
-    return {
-      dCloses: ohlc.map(b => b.close),
-      wCloses: resampleByCalendarUTC(ohlc, 'W').map(b => b.close),
-      mCloses: resampleByCalendarUTC(ohlc, 'M').map(b => b.close),
-      qCloses: resampleByCalendarUTC(ohlc, 'Q').map(b => b.close)
-    };
+    return entries;
   }, [dailyKlines, activeData, isReplay]);
 
   // Reset or adjust viewRange on data changes (預設顯示最近約 35%，保留過往歷史供向左平移查看)
@@ -1451,15 +1724,9 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       >
         <canvas ref={canvasRef} className="w-full h-full block" />
 
-        {/* 左上角：KC 博士 2×2 四圖並排迷你走勢拼圖 (PiP) */}
+        {/* 左上角：透明膠片四維生命線同框疊合拼圖 (SVG Overlay Canvas) */}
         {puzzleState && (
-          <FourTimeframePuzzlePiP
-            puzzleState={puzzleState}
-            qCloses={qCloses}
-            mCloses={mCloses}
-            wCloses={wCloses}
-            dCloses={dCloses}
-          />
+          <FourTimeframeOverlayPiP puzzleState={puzzleState} overlayEntries={overlayEntries} />
         )}
 
         {/* Loading Overlay */}

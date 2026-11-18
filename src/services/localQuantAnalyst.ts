@@ -68,6 +68,7 @@ export function evaluatePuzzleExpertSummary(puzzle: PuzzleState): LocalExpertSum
     ADD_POSITION: `🟢【信心 ${puzzle.signalStrength}%・升浪奇點分批低吸 (${Math.round(puzzle.positionSizingHint * 100)}%)】`,
     PARTIAL_PROFIT: `🟠【信心 ${puzzle.signalStrength}%・高位奇點鎖利減倉 (${Math.round(puzzle.positionSizingHint * 100)}%)】`,
     FULL_CLEAR: `🚨【信心 ${puzzle.signalStrength}%・月線破位全數清倉】`,
+    HALT_REDUCE: `🛑【回撤熔斷控險・強制減半持倉】`,
     SHORT_ENTRY: `🟣【信心 ${puzzle.signalStrength}%・月線大跌通道反彈沽空 (${Math.round(puzzle.positionSizingHint * 100)}%)】`,
     COVER_SHORT: `💎【信心 ${puzzle.signalStrength}%・熊市下方奇點全數平空】`,
     HOLD:
@@ -130,6 +131,7 @@ export function evaluateLocalExpertSummary(input: LocalAnalysisInput): LocalExpe
     asOfDate: todayStr,
     asOfIndex: Math.max(0, input.closes.length - 1),
     currentPrice: input.currentPrice,
+    isPuzzleCross: false,
     timeframes: {
       Q: { bars: 0, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.monthlyMidline, prevMidline: input.monthlyMidline, atr: 0, tfdr: input.monthlyTFDR, rsi: 50, mom: Number(((50 + input.monthlyTFDR) / 2).toFixed(1)), sampleOK: false, isLastBarComplete: false },
       M: { bars: 0, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.monthlyMidline, prevMidline: input.monthlyMidline, atr: 0, tfdr: input.monthlyTFDR, rsi: 50, mom: Number(((50 + input.monthlyTFDR) / 2).toFixed(1)), sampleOK: false, isLastBarComplete: false },

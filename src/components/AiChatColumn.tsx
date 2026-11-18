@@ -58,6 +58,7 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
     ADD_POSITION: '🟢 分批低吸預警',
     PARTIAL_PROFIT: '🟠 高拋鎖利預警',
     FULL_CLEAR: '🚨 破位清倉預警',
+    HALT_REDUCE: '🛑 25%回撤熔斷減半',
     SHORT_ENTRY: '🟣 順勢沽空預警',
     COVER_SHORT: '💎 全數平空預警',
     HOLD: '⚖️ 持倉觀望'

@@ -50,29 +50,34 @@ export async function fetchMarketData(
     console.warn('Backend proxy fetch failed, attempting direct EastMoney fetch:', err);
   }
 
-  // 3. 嘗試瀏覽器端直接抓取東方財富 (push2his)
+  // 3. 嘗試瀏覽器端直接抓取東方財富 (push2his)，擴充至 20 年 (~5000 根日線) 並優先請求後復權 (fqt=2)
   try {
     let secid = /^\d+$/.test(cleanSym) ? `116.${cleanSym.padStart(5, '0')}` : `105.${cleanSym}`;
-    const directUrl = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56&klt=${klt}&fqt=1&end=20500101&lmt=3000`;
+    const fetchDirectFqt = async (id: string) => {
+      for (const fqt of [2, 1]) {
+        try {
+          const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${id}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56&klt=${klt}&fqt=${fqt}&end=20500101&lmt=5000`;
+          const res = await fetch(url);
+          const d = await res.json();
+          if (d?.data?.klines && d.data.klines.length > 0) {
+            return d.data.klines;
+          }
+        } catch {
+          continue;
+        }
+      }
+      return null;
+    };
 
-    const res = await fetch(directUrl);
-    const d = await res.json();
-    let klines = d?.data?.klines;
+    let klines = await fetchDirectFqt(secid);
 
     if (!klines || klines.length === 0) {
       const suffixes = ['.N', '.O', '.A', '.K'];
       for (const suffix of suffixes) {
-        try {
-          const trySecid = `105.${cleanSym}${suffix}`;
-          const tryUrl = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${trySecid}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56&klt=${klt}&fqt=1&end=20500101&lmt=3000`;
-          const tryR = await fetch(tryUrl);
-          const tryD = await tryR.json();
-          if (tryD?.data?.klines && tryD.data.klines.length > 0) {
-            klines = tryD.data.klines;
-            break;
-          }
-        } catch {
-          continue;
+        const tryKlines = await fetchDirectFqt(`105.${cleanSym}${suffix}`);
+        if (tryKlines && tryKlines.length > 0) {
+          klines = tryKlines;
+          break;
         }
       }
     }
@@ -230,16 +235,16 @@ function parseEastMoneyKlines(rawKlines: any[], cycle: string): RawKline[] {
   // 2. 檢測並自動修正非自然拆股跳空，生成平滑的前復權連續序列
   const splitAdjusted = adjustKlinesForSplits(cleanKlines);
 
-  return splitAdjusted.slice(-3000);
+  return splitAdjusted.slice(-5000);
 }
 
 function generateSyntheticKline(symbol: string, cycle: string): RawKline[] {
-  // 月線: 240 根 (~20年 2006-2026), 週線: 520 根 (~10年), 日線: 2500 根 (~10年), 5分鐘: 300 根
+  // 月線: 240 根 (~20年 2006-2026), 週線: 1040 根 (~20年), 日線: 5000 根 (~20年), 5分鐘: 300 根
   const bars =
     cycle === 'monthly' ? 240
-    : cycle === 'weekly' ? 520
+    : cycle === 'weekly' ? 1040
     : cycle === '5min' ? 300
-    : 2500;
+    : 5000;
   const list: RawKline[] = [];
   let basePrice = 200;
 

@@ -31,31 +31,36 @@ app.get('/api/kline', async (req: Request, res: Response) => {
       secid = `105.${cleanSym}`;
     }
 
-    const buildUrl = (id: string) =>
-      `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${id}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56&klt=${klt}&fqt=1&end=20500101&lmt=3000`;
+    const buildUrl = (id: string, fqt: number) =>
+      `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${id}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56&klt=${klt}&fqt=${fqt}&end=20500101&lmt=5000`;
 
-    let response = await fetch(buildUrl(secid), {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      signal: AbortSignal.timeout(10000)
-    });
-    let data = await response.json();
+    const fetchWithFqtFallback = async (id: string, timeoutMs: number) => {
+      for (const fqt of [2, 1]) {
+        try {
+          const resp = await fetch(buildUrl(id, fqt), {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: AbortSignal.timeout(timeoutMs)
+          });
+          const json = await resp.json();
+          if (json?.data?.klines && json.data.klines.length > 0) {
+            return json;
+          }
+        } catch {
+          continue;
+        }
+      }
+      return null;
+    };
+
+    let data = await fetchWithFqtFallback(secid, 10000);
 
     if (!data?.data?.klines || data.data.klines.length === 0) {
       const suffixes = ['.N', '.O', '.A', '.K'];
       for (const suffix of suffixes) {
-        try {
-          const trySecid = `105.${cleanSym}${suffix}`;
-          const tryResp = await fetch(buildUrl(trySecid), {
-            headers: { 'User-Agent': 'Mozilla/5.0' },
-            signal: AbortSignal.timeout(5000)
-          });
-          const tryData = await tryResp.json();
-          if (tryData?.data?.klines && tryData.data.klines.length > 0) {
-            data = tryData;
-            break;
-          }
-        } catch {
-          continue;
+        const tryData = await fetchWithFqtFallback(`105.${cleanSym}${suffix}`, 5000);
+        if (tryData?.data?.klines && tryData.data.klines.length > 0) {
+          data = tryData;
+          break;
         }
       }
     }
