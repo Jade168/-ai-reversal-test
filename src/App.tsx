@@ -117,20 +117,62 @@ export const App: React.FC = () => {
     }
   ]);
 
+  const didInitRef = useRef(false);
+
   const addChatMessage = useCallback((role: ChatMessage['role'], text: string) => {
-    setChatMessages((prev) => [
-      ...prev,
-      {
-        id: `${Date.now()}-${Math.random()}`,
-        role,
-        text,
-        timestamp: Date.now()
+    const trimmed = text.trim();
+    setChatMessages((prev) => {
+      // 1. 若最新一條訊息與即將寫入的內容相同，直接覆蓋更新而非重複新增一條
+      if (
+        prev.length > 0 &&
+        prev[prev.length - 1].role === role &&
+        prev[prev.length - 1].text.trim() === trimmed
+      ) {
+        const updated = [...prev];
+        updated[updated.length - 1] = {
+          ...updated[updated.length - 1],
+          text,
+          timestamp: Date.now()
+        };
+        return updated;
       }
-    ]);
+
+      // 2. 若為拼圖最新單日預警報告或重複報告（📊 【...），覆蓋最近一筆同類報告避免翻舊帳堆疊
+      if (role === 'ai' && trimmed.startsWith('📊 【')) {
+        const isPuzzleCard = trimmed.includes('拼圖量化引擎');
+        for (let i = prev.length - 1; i >= 0; i--) {
+          const prevText = prev[i].text.trim();
+          if (
+            prev[i].role === 'ai' &&
+            (prevText === trimmed || (isPuzzleCard && prevText.includes('拼圖量化引擎')))
+          ) {
+            const updated = [...prev];
+            updated[i] = {
+              ...updated[i],
+              text,
+              timestamp: Date.now()
+            };
+            return updated;
+          }
+        }
+      }
+
+      return [
+        ...prev,
+        {
+          id: `${Date.now()}-${Math.random()}`,
+          role,
+          text,
+          timestamp: Date.now()
+        }
+      ];
+    });
   }, []);
 
   // Load API config from localStorage on mount and auto-load 2-3 years historical analysis
   useEffect(() => {
+    if (didInitRef.current) return;
+    didInitRef.current = true;
     const savedProvider = (localStorage.getItem('ai_provider') as any) || 'claude';
     const savedUrl = localStorage.getItem('gcli2api_url') || '';
     const savedKey = localStorage.getItem('gcli2api_key') || '';
@@ -174,7 +216,6 @@ export const App: React.FC = () => {
 
     setIsLoading(true);
     setLoadingMessage(`🔄 正在從東方財富抓取 ${sym} 真實行情數據...`);
-    addChatMessage('system', `📊 開始量化掃描 ${sym}...`);
 
     try {
       const klines = await fetchMarketData(sym, assetType, period, dataSource);
@@ -226,8 +267,14 @@ export const App: React.FC = () => {
 
       setDailyKlines(dailyKlinesForTfdr);
 
-      // Backtest Engine (1836.15 數律 + TFDR 日週月三維共振融合版)
-      const { stats: bStats, logs } = runBacktestEngine(computedModel, fund, period, dailyKlinesForTfdr);
+      // Backtest Engine (puzzle/v2-strict 嚴格時點凍結 + 開盤成交 + 單邊 0.25% 成本)
+      const { stats: bStats, logs } = runBacktestEngine(
+        computedModel,
+        fund,
+        period,
+        dailyKlinesForTfdr,
+        sym
+      );
       setStats(bStats);
       setTradeLogs(logs);
 
@@ -274,11 +321,6 @@ export const App: React.FC = () => {
       });
       const localSummary = localInput ? evaluateLocalExpertSummary(localInput) : null;
       setExpertSummary(localSummary);
-
-      addChatMessage(
-        'ai',
-        `📊 【${sym} 369+142857 複合共振分析速覽】\n\n【現價位置】現價: $${lastBar.c.toFixed(2)} | 歸元數: ${resAnalysis.guiYuan.current}\n\n【142857 循環位】\n🟢 溝貨區: $${resAnalysis.suggestions.strongBuy} - $${resAnalysis.suggestions.buyZone}\n🔴 賣出區: $${resAnalysis.suggestions.sellZone} - $${resAnalysis.suggestions.target2}\n\n【TFDR 三維奇點】日線 ${tfdrMatrix.dailyScore} | 週線 ${tfdrMatrix.weeklyScore} | 月線 ${tfdrMatrix.monthlyScore}\n${tfdrMatrix.regimeTitle}${localSummary ? `\n\n【專家大腦同步指令】${localSummary.confidenceTag}\n• ${localSummary.regimeLabel}｜${localSummary.trendQuality}\n• ${localSummary.coreAction}` : ''}\n\n【信號判斷】${resAnalysis.signal} - ${resAnalysis.action}\n\n【回測數據】總收益率: ${bStats.totalReturn}% | 勝率: ${bStats.winRate}%`
-      );
     } catch (err: any) {
       console.error(err);
       addChatMessage('error', `❌ 量化分析出錯: ${err.message}`);
@@ -542,6 +584,7 @@ export const App: React.FC = () => {
         timeframe={period}
         supportLevels={resonance?.r142857 ? [resonance.r142857.strongSupport, resonance.r142857.midSupport] : []}
         resistanceLevels={resonance?.r142857 ? [resonance.r142857.strongResist, resonance.r142857.midResist] : []}
+        puzzleState={expertSummary?.puzzle ?? null}
       />
 
       {/* 2. API Config & Data Switcher Card */}
@@ -565,6 +608,7 @@ export const App: React.FC = () => {
               onSendExpert={handleSendExpert}
               onRunZeroTokenDiagnosis={handleRunZeroTokenDiagnosis}
               isSendingExpert={isSendingExpert}
+              latestPuzzle={expertSummary?.puzzle ?? null}
             />
           </div>
         </div>

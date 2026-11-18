@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { ChatMessage } from '../types/quant';
+import { PuzzleState } from '../services/puzzleDecisionEngine';
 
 interface AiChatColumnProps {
   messages: ChatMessage[];
@@ -9,6 +10,7 @@ interface AiChatColumnProps {
   onSendExpert: (text: string, forceRefresh?: boolean) => void;
   onRunZeroTokenDiagnosis?: () => void;
   isSendingExpert?: boolean;
+  latestPuzzle?: PuzzleState | null;
 }
 
 export const AiChatColumn: React.FC<AiChatColumnProps> = ({
@@ -18,7 +20,8 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
   onSendLocal,
   onSendExpert,
   onRunZeroTokenDiagnosis,
-  isSendingExpert = false
+  isSendingExpert = false,
+  latestPuzzle = null
 }) => {
   const [inputText, setInputText] = useState('');
   const [forceRefreshCloud, setForceRefreshCloud] = useState(false);
@@ -48,6 +51,16 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
     const query = inputText.trim() || '請結合月線通道、週線生命線與 TFDR 奇點給我完整實戰操盤報告';
     onSendExpert(query, forceRefreshCloud);
     setInputText('');
+  };
+
+  const signalLabelMap: Record<PuzzleState['signal'], string> = {
+    GOLDEN_BUY: '🔥 黃金買入預警',
+    ADD_POSITION: '🟢 分批低吸預警',
+    PARTIAL_PROFIT: '🟠 高拋鎖利預警',
+    FULL_CLEAR: '🚨 破位清倉預警',
+    SHORT_ENTRY: '🟣 順勢沽空預警',
+    COVER_SHORT: '💎 全數平空預警',
+    HOLD: '⚖️ 持倉觀望'
   };
 
   return (
@@ -81,6 +94,64 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
           狀態: {aiReady ? '已連接 ✅' : '未連接'}
         </span>
       </div>
+
+      {/* 單卡置頂覆蓋模式：只顯示最新交易日 (dailyData.length - 1) 拼圖關鍵位與開盤觀察重點 */}
+      {latestPuzzle && (
+        <div className="mb-1.5 p-2.5 rounded-md bg-slate-900/95 border border-indigo-500/50 text-xs shrink-0 shadow">
+          <div className="flex items-center justify-between gap-2 pb-1.5 mb-1.5 border-b border-slate-800">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="font-bold text-amber-300">
+                🎯 {latestPuzzle.symbol} 最新單日預警
+              </span>
+              <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+                {latestPuzzle.signalDate} · ${latestPuzzle.currentPrice}
+              </span>
+            </div>
+            <span
+              className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                latestPuzzle.regime === 'UPTREND_CHANNEL'
+                  ? 'bg-emerald-950/90 text-emerald-300 border border-emerald-600/40'
+                  : 'bg-purple-950/90 text-purple-300 border border-purple-600/40'
+              }`}
+            >
+              {latestPuzzle.regime === 'UPTREND_CHANNEL' ? '大升通道(禁空)' : '大跌通道'} ·{' '}
+              {signalLabelMap[latestPuzzle.signal]}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-3 gap-1 mb-1.5 text-[10.5px]">
+            <div className="p-1.5 rounded bg-emerald-950/40 border border-emerald-700/40">
+              <div className="text-emerald-400 text-[9.5px]">🟢 買入埋伏區</div>
+              <div className="font-mono font-bold text-white">
+                ${latestPuzzle.levels.buyZone.low}–${latestPuzzle.levels.buyZone.high}
+              </div>
+            </div>
+            <div className="p-1.5 rounded bg-red-950/40 border border-red-700/40">
+              <div className="text-red-400 text-[9.5px]">🔴 高拋目標區</div>
+              <div className="font-mono font-bold text-white">
+                ${latestPuzzle.levels.takeProfitZone.low}–${latestPuzzle.levels.takeProfitZone.high}
+              </div>
+            </div>
+            <div className="p-1.5 rounded bg-amber-950/40 border border-amber-700/40">
+              <div className="text-amber-400 text-[9.5px]">🛑 失效止損價</div>
+              <div className="font-mono font-bold text-white">
+                ${latestPuzzle.levels.invalidationPrice}
+              </div>
+            </div>
+          </div>
+
+          <div className="text-[10.5px] text-slate-300 space-y-0.5 leading-snug">
+            <div className="text-indigo-300 font-bold text-[10px]">
+              👁️ T+1 開盤觀察重點（僅顯示最新交易日）：
+            </div>
+            {latestPuzzle.keyPoints.map((pt, i) => (
+              <div key={i} className="text-slate-300">
+                • {pt}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Messages Scroll Area */}
       <div className="flex-1 min-h-0 overflow-y-auto p-1.5 pr-1 overscroll-contain bg-[#050505] rounded-md mb-1.5 border border-[#222] space-y-2 text-xs">

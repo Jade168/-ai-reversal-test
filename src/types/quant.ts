@@ -62,6 +62,10 @@ export interface TradeLog {
   type: string;
   msg: string;
   date: string;
+  signalDate?: string;
+  execDate?: string;
+  puzzleHint?: string;
+  complianceTag?: string;
   action: string;
   shares: number;
   units: string;

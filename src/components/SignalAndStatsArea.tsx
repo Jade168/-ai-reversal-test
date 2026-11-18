@@ -158,14 +158,14 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
         </div>
 
         <div className="text-[10px] text-center text-gray-500 mt-1.5">
-          專家級牛熊隔離＋考夫曼KER主升減倉鎖利（統一 -8% 硬止損・真實現金池複利）；未計手續費及滑點
+          T日收盤拼圖預警 ➔ T+1日開盤驗假破成交（月線斜率鎖＋8日禁空鎖＋單邊 0.25% 成本・-8% 硬止損）
         </div>
 
         {/* 整合於決策中樞底部的雙核回測交易紀錄 */}
         <div className="mt-3 pt-2.5 border-t border-slate-800">
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-xs font-bold text-amber-400">
-              📜 月線通道＋複利滾存回測交易紀錄（踩週中線重倉補回・上下滑動檢視）
+              📜 統一引擎回測帳本（T日預警 ➔ T+1開盤驗假破・上下滑動檢視）
             </span>
             <span className="text-[11px] text-slate-400">共 {tradeLogs.length} 筆操盤指令</span>
           </div>
@@ -187,6 +187,8 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
                     ? 'text-orange-400'
                     : 'text-red-400';
 
+                const isCompliant = log.complianceTag?.includes('精準執行');
+
                 return (
                   <div
                     key={idx}
@@ -194,13 +196,23 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
                   >
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center flex-wrap gap-1.5 min-w-0">
-                        <span className="text-slate-400 font-mono text-[11px]">[{log.date}]</span>
+                        <span className="text-slate-400 font-mono text-[10.5px]">
+                          [預警 {log.signalDate || log.date} ➔ 成交 {log.execDate || log.date}]
+                        </span>
                         <span className={`font-bold ${actionColor}`}>
                           {log.action} {log.shares.toLocaleString()}股
                         </span>
-                        <span className="px-1.5 py-0.2 text-[10px] rounded bg-amber-950/80 text-amber-300 border border-amber-600/40">
-                          {log.confidence}
-                        </span>
+                        {log.complianceTag && (
+                          <span
+                            className={`px-1.5 py-0.2 text-[10px] rounded border font-semibold ${
+                              isCompliant
+                                ? 'bg-emerald-950/80 text-emerald-300 border-emerald-600/40'
+                                : 'bg-amber-950/80 text-amber-300 border-amber-600/40'
+                            }`}
+                          >
+                            {log.complianceTag}
+                          </span>
+                        )}
                       </div>
                       <div className="font-mono text-[11px] shrink-0">
                         <span className="text-slate-200">@ ${log.price}</span>
@@ -215,6 +227,11 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
                         )}
                       </div>
                     </div>
+                    {log.puzzleHint && (
+                      <div className="text-[10px] text-indigo-300/90 font-mono truncate">
+                        拼圖區間：{log.puzzleHint}
+                      </div>
+                    )}
                     <div className="flex items-center justify-between gap-2 text-[10px] text-slate-400">
                       <span className="truncate">觸發依據：{log.source}</span>
                       {log.holdingType === 'SHORT' ? (

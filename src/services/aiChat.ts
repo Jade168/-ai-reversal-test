@@ -1,7 +1,7 @@
 import { ModelBar, SymbolInfo, BacktestStats, BatchScanResult, ApiConfig, NewsItem, RawKline } from '../types/quant';
 import { QUANT_CONFIG } from './quantCalculations';
 import { MultiTimeframeTFDR, TFDRPoint } from './tfdrIndicator';
-import { buildLocalAnalysisInput, generateLocalExpertReport } from './localQuantAnalyst';
+import { generatePuzzleExpertReport } from './localQuantAnalyst';
 
 export interface QuantContext {
   symbolInfo: SymbolInfo | null;
@@ -17,23 +17,22 @@ export interface QuantContext {
 }
 
 export function generateZeroTokenDiagnosis(context: QuantContext): string | null {
-  const { symbolInfo, modelData, dailyKlines, tfdr, latestTfdrPoint } = context;
-  if (!symbolInfo || !tfdr) return null;
+  const { symbolInfo, modelData, dailyKlines } = context;
+  if (!symbolInfo) return null;
 
   const sourceKlines: RawKline[] =
     dailyKlines && dailyKlines.length > 0 ? dailyKlines : modelData;
   if (!sourceKlines || sourceKlines.length === 0) return null;
 
-  const currentPrice = Number(symbolInfo.latestPrice) || sourceKlines[sourceKlines.length - 1].c;
-  const inputData = buildLocalAnalysisInput({
-    symbol: symbolInfo.symbol,
-    currentPrice,
-    dailyKlines: sourceKlines,
-    tfdr,
-    latestTfdrPoint
-  });
-  if (!inputData) return null;
-  return generateLocalExpertReport(inputData);
+  const dailyData = sourceKlines.map(bar => ({
+    date: (bar.date || '').split(' ')[0],
+    open: Number(bar.o),
+    high: Number(bar.h),
+    low: Number(bar.l),
+    close: Number(bar.c)
+  }));
+
+  return generatePuzzleExpertReport(symbolInfo.symbol, dailyData) || null;
 }
 
 function formatTfdrSystemBlock(tfdr?: MultiTimeframeTFDR | null): string {
