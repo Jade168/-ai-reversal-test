@@ -111,11 +111,29 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
               className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
                 latestPuzzle.regime === 'UPTREND_CHANNEL'
                   ? 'bg-emerald-950/90 text-emerald-300 border border-emerald-600/40'
-                  : 'bg-purple-950/90 text-purple-300 border border-purple-600/40'
+                  : latestPuzzle.regime === 'DOWNTREND_CHANNEL'
+                  ? 'bg-purple-950/90 text-purple-300 border border-purple-600/40'
+                  : 'bg-amber-950/90 text-amber-300 border border-amber-600/40'
               }`}
             >
-              {latestPuzzle.regime === 'UPTREND_CHANNEL' ? '大升通道(禁空)' : '大跌通道'} ·{' '}
-              {signalLabelMap[latestPuzzle.signal]}
+              {latestPuzzle.regime === 'UPTREND_CHANNEL'
+                ? '大升通道(禁空)'
+                : latestPuzzle.regime === 'DOWNTREND_CHANNEL'
+                ? '大跌通道(雙破48)'
+                : '中軸過渡區'}{' '}
+              · {signalLabelMap[latestPuzzle.signal]}
+            </span>
+          </div>
+
+          <div className="mb-1.5 px-2 py-1 rounded bg-slate-950/80 border border-slate-800 font-mono text-[10px] text-cyan-300 flex flex-wrap items-center justify-between gap-1">
+            <span>
+              月動能 {latestPuzzle.timeframes.M.mom} ({latestPuzzle.timeframes.M.mom >= 50 ? '>50' : latestPuzzle.timeframes.M.mom < 48 ? '<48破軸' : '48-50'})
+            </span>
+            <span>
+              週動能 {latestPuzzle.timeframes.W.mom} ({latestPuzzle.timeframes.W.mom >= 50 ? '未穿50' : latestPuzzle.timeframes.W.mom < 48 ? '<48破軸' : '45-50'})
+            </span>
+            <span>
+              日動能 {latestPuzzle.timeframes.D.mom} ({latestPuzzle.timeframes.D.mom <= 24 ? '下方奇點' : latestPuzzle.timeframes.D.mom >= 85 ? '上方奇點' : '中性'})
             </span>
           </div>
 

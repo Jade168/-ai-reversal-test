@@ -15,6 +15,8 @@ export interface TimeframeFeature {
   prevMidline: number;
   atr: number;
   tfdr: number;
+  rsi: number;
+  mom: number;
   sampleOK: boolean;
   isLastBarComplete: boolean;
 }
@@ -86,6 +88,21 @@ function getCalendarMeta(dateStr: string) {
   return meta;
 }
 
+// 輔助函數：計算標準 RSI(14) 動能指標 (0 - 100，50 為多空強弱中軸)
+export function calcRSI(closes: number[], period: number = 14): number {
+  if (closes.length <= period) return 50;
+  let gains = 0;
+  let losses = 0;
+  for (let i = closes.length - period; i < closes.length; i++) {
+    const diff = closes[i] - closes[i - 1];
+    if (diff >= 0) gains += diff;
+    else losses -= diff;
+  }
+  if (losses === 0) return 100;
+  const rs = gains / period / (losses / period);
+  return Number((100 - 100 / (1 + rs)).toFixed(1));
+}
+
 export function resampleByCalendarUTC(
   sortedDaily: OHLCBar[],
   unit: 'W' | 'M' | 'Q'
@@ -145,7 +162,7 @@ function computeNativeFeatures(
   bars: (OHLCBar & { isComplete?: boolean })[],
   midPeriod: number,
   minSample: number
-): TimeframeFeature & { band90: number; band15: number; haCloses?: number[] } {
+): TimeframeFeature & { band90: number; band15: number } {
   const n = bars.length;
   if (!n) {
     return {
@@ -157,6 +174,8 @@ function computeNativeFeatures(
       prevMidline: 0,
       atr: 0,
       tfdr: 50,
+      rsi: 50,
+      mom: 50,
       sampleOK: false,
       isLastBarComplete: false,
       band90: 0,
@@ -186,7 +205,6 @@ function computeNativeFeatures(
   for (let i = midStart; i < compLen; i++) midSum += ha[i].close;
   const midline = midSum / Math.max(1, compLen - midStart);
 
-  // 前一根已收盤週期的動態中線（用於斜率鎖判斷）
   const prevCompLen = Math.max(1, compLen - 1);
   const prevMidStart = Math.max(0, prevCompLen - midPeriod);
   let prevMidSum = 0;
@@ -225,6 +243,15 @@ function computeNativeFeatures(
   if (currC <= minC || currL <= band15) tfdr = Math.min(tfdr, 14);
   tfdr = Math.max(0, Math.min(100, Math.round(tfdr)));
 
+  // 僅取最近 15 根已收盤收盤價計算 RSI(14)，與全量傳入等價但零多餘配置
+  const rsiStart = Math.max(0, compLen - 15);
+  const recentCloses: number[] = [];
+  for (let i = rsiStart; i < compLen; i++) recentCloses.push(bars[i].close);
+  const rsi = calcRSI(recentCloses, 14);
+
+  // 綜合動能分數 = (標準 RSI(14) + TFDR) / 2，50 為多空強弱中軸
+  const mom = Number(((rsi + tfdr) / 2).toFixed(1));
+
   return {
     bars: n,
     haBull: ha[n - 1].isBull,
@@ -234,59 +261,13 @@ function computeNativeFeatures(
     prevMidline: Number(prevMidline.toFixed(2)),
     atr: Number(atr.toFixed(2)),
     tfdr,
+    rsi,
+    mom,
     sampleOK: compLen >= minSample,
     isLastBarComplete: isComplete,
     band90,
-    band15,
-    haCloses: ha.map(h => h.close)
+    band15
   };
-}
-
-/**
- * 8日同向保護鎖：檢查過去 8 個交易日內是否出現過低位奇點（dScore <= 25 或觸及 band15）
- */
-function hasRecentBottomSingularity8d(dailyBars: OHLCBar[], haCloses: number[]): boolean {
-  const n = dailyBars.length;
-  if (n < 2) return false;
-  const startDay = Math.max(0, n - 8);
-  for (let idx = startDay; idx < n; idx++) {
-    const end = idx + 1;
-    const midStart = Math.max(0, end - 20);
-    let midSum = 0;
-    for (let k = midStart; k < end; k++) midSum += haCloses[k];
-    const mid = midSum / Math.max(1, end - midStart);
-
-    const atrP = Math.min(14, end);
-    let atrSum = 0;
-    for (let k = end - atrP; k < end; k++) {
-      atrSum +=
-        k <= 0
-          ? dailyBars[0].high - dailyBars[0].low
-          : Math.max(
-              dailyBars[k].high - dailyBars[k].low,
-              Math.abs(dailyBars[k].high - dailyBars[k - 1].close),
-              Math.abs(dailyBars[k].low - dailyBars[k - 1].close)
-            );
-    }
-    const atr = Math.max(0.0001, atrSum / Math.max(1, atrP));
-    const band15 = mid - atr * 3.1;
-
-    const recStart = Math.max(0, end - 14);
-    let minC = Infinity;
-    for (let k = recStart; k < end; k++) {
-      if (dailyBars[k].close < minC) minC = dailyBars[k].close;
-    }
-
-    const bar = dailyBars[idx];
-    let dScore = 50 + ((bar.close - mid) / (atr * 2.2)) * 22;
-    if (bar.close <= minC || bar.low <= band15) dScore = Math.min(dScore, 14);
-    dScore = Math.max(0, Math.min(100, Math.round(dScore)));
-
-    if (dScore <= 25 || bar.low <= band15) {
-      return true;
-    }
-  }
-  return false;
 }
 
 export function computePuzzleDecision(
@@ -306,18 +287,20 @@ export function computePuzzleDecision(
     ? allDailyBars
     : [...allDailyBars].sort((a, b) => a.date.localeCompare(b.date));
 
-  // 嚴格截斷至 asOfIndex 防止任何未來函數洩漏
+  // 嚴格截斷至 asOfIndex（防未來函數）
   const safeIdx = Math.max(0, Math.min(sorted.length - 1, asOfIndex));
   const frozen = sorted.slice(0, safeIdx + 1);
   const currBar = frozen[frozen.length - 1];
   const price = currBar.close;
 
-  const featDRaw = computeNativeFeatures(frozen, 20, 20);
+  const featD = computeNativeFeatures(frozen, 20, 20);
   const featW = computeNativeFeatures(resampleByCalendarUTC(frozen, 'W'), 20, 20);
   const featM = computeNativeFeatures(resampleByCalendarUTC(frozen, 'M'), 12, 12);
   const featQ = computeNativeFeatures(resampleByCalendarUTC(frozen, 'Q'), 8, 30);
 
-  const { haCloses: dailyHaCloses = [], ...featD } = featDRaw;
+  const dMom = featD.mom;
+  const wMom = featW.mom;
+  const mMom = featM.mom;
 
   const kerSlice = frozen.slice(-15);
   const netChg = Math.abs(kerSlice[kerSlice.length - 1].close - kerSlice[0].close);
@@ -327,94 +310,148 @@ export function computePuzzleDecision(
   }
   const ker = sumVol === 0 ? 0 : Number((netChg / sumVol).toFixed(2));
 
-  // 1. 月線斜率鎖牛熊：只有當 price < featM.midline * 0.95 && featM.midline < prevMMid 才判定為 DOWNTREND_CHANNEL；否則一律鎖定 UPTREND_CHANNEL
-  const prevMMid = featM.prevMidline;
-  const isDown = price < featM.midline * 0.95 && featM.midline < prevMMid;
-  const isUp = !isDown;
+  // 動能中軸定性
+  const isBullHeart = mMom >= 50 && wMom >= 50; // 月線與週線雙站 50 中軸之上（大升浪心臟強勁）
+  const isBearBreak = mMom < 48 && wMom < 48; // 週月雙破 48 中軸（牛市終結、大跌浪確立）
+  const regime: PuzzleState['regime'] = isBullHeart
+    ? 'UPTREND_CHANNEL'
+    : isBearBreak
+    ? 'DOWNTREND_CHANNEL'
+    : 'CONSOLIDATION';
 
-  // 2. 8日同向保護鎖：近 8 個交易日內曾出現低位奇點 (dScore <= 25 或觸及 band15) 則嚴禁 SHORT_ENTRY
-  const shortLock8dActive = hasRecentBottomSingularity8d(frozen, dailyHaCloses);
+  // 動能文字標籤（讓圖表、專家與交易員 100% 同步）
+  const mTag = mMom >= 50 ? '(>50)' : mMom < 42 ? '(<42深熊)' : mMom < 48 ? '(<48破軸)' : '(48-50過渡)';
+  const wTag =
+    wMom >= 78
+      ? '(>=78過熱)'
+      : wMom >= 50
+      ? '(未穿50)'
+      : wMom < 42
+      ? '(<42深熊)'
+      : wMom < 48
+      ? '(<48破軸)'
+      : '(48-50過渡)';
+  const dTag =
+    dMom <= 24 ? '(下方奇點)' : dMom >= 84 ? '(上方奇點沽)' : dMom >= 78 ? '(反彈高位)' : '(中性)';
+  const momSummary = `月動能 ${mMom}${mTag} / 週動能 ${wMom}${wTag} / 日動能 ${dMom}${dTag}`;
 
   const tol = Math.max(price * 0.005, featD.atr * 0.8);
-  const invalidationPrice = Number((featM.midline * 0.95).toFixed(2));
-  const buyAnchor = isUp ? Math.max(featW.midline, featD.band15) : featD.band15;
+  const invalidationPrice = isBearBreak
+    ? Number(featW.midline.toFixed(2))
+    : Number(Math.min(featM.midline * 0.9, featD.band15 * 0.94).toFixed(2));
+
+  // 買入區設在現價附近（健康低吸絕不追高）
+  const buyAnchor = isBullHeart
+    ? dMom <= 24
+      ? price
+      : Math.min(price, Math.max(featW.midline, featD.band15))
+    : featD.band15;
 
   const buyZone = {
-    low: Number((buyAnchor - tol).toFixed(2)),
-    high: Number((buyAnchor + tol).toFixed(2))
+    low: Number((buyAnchor - tol * 0.7).toFixed(2)),
+    high: Number((buyAnchor + tol * 0.5).toFixed(2))
   };
+  const takeProfitAnchor = dMom >= 85 || dMom >= 78 ? Math.max(price, featD.band90) : featD.band90;
   const takeProfitZone = {
-    low: Number((featD.band90 - tol).toFixed(2)),
-    high: Number((featD.band90 + tol).toFixed(2))
+    low: Number((takeProfitAnchor - tol * 0.6).toFixed(2)),
+    high: Number((takeProfitAnchor + tol * 0.6).toFixed(2))
   };
 
   let signal: PuzzleState['signal'] = 'HOLD';
   let signalStrength = 50;
   let positionSizingHint = 0;
-  const reasons: string[] = [];
+  const reasons: string[] = [momSummary];
   const riskFlags: string[] = [];
 
   if (!featQ.sampleOK) riskFlags.push(`季線僅 ${featQ.bars} 根(<30)，降級參考`);
   if (!featW.sampleOK) riskFlags.push(`週線不足 20 週，降低權重`);
   if (ker < 0.3) riskFlags.push(`KER(${ker})偏低，處於震盪雜訊期`);
-  if (shortLock8dActive) riskFlags.push('8日保護鎖啟動（近8日曾見低位奇點，禁止反手沽空）');
 
-  if (isUp) {
-    const slopeText =
-      featM.midline >= prevMMid
-        ? `月中線($${featM.midline})穩步上揚`
-        : `價格守住月線95%鎖線($${invalidationPrice})`;
-    reasons.push(`${slopeText}，鎖定大升通道（100% 禁空）`);
-
-    if (featD.tfdr <= 22 && Math.abs(price - featW.midline) <= featW.atr * 1.2 && featW.sampleOK) {
-      signal = 'GOLDEN_BUY';
-      signalStrength = 92;
-      positionSizingHint = 0.85;
-      reasons.push(`回踩週中線($${featW.midline}) + 日線下方奇點(${featD.tfdr})交匯`);
-    } else if (featD.tfdr <= 20) {
-      signal = 'ADD_POSITION';
-      signalStrength = 78;
-      positionSizingHint = 0.4;
-      reasons.push(`大升通道內觸及日線下方奇點(${featD.tfdr})，分批低吸`);
-    } else if (featD.tfdr >= 85) {
-      signal = 'PARTIAL_PROFIT';
-      signalStrength = 82;
-      positionSizingHint = ker >= 0.55 ? 0.3 : 0.65;
-      reasons.push(`日線高位奇點(${featD.tfdr})，按 KER(${ker}) 高拋鎖利並留底倉`);
+  if (isBullHeart) {
+    // 鐵律一：大升浪黃金低吸 (mMom >= 50 && wMom >= 50 && dMom <= 24)
+    if (dMom <= 24) {
+      const isDeepGolden = dMom <= 20;
+      signal = isDeepGolden ? 'GOLDEN_BUY' : 'ADD_POSITION';
+      signalStrength = isDeepGolden ? 92 : 82;
+      positionSizingHint = isDeepGolden ? 0.85 : 0.5;
+      reasons.push(
+        `週月站穩50中軸＋日動能跌至 ${dMom}(<=24奇點買區)，主升浪健康洗盤結束・現價附近低吸`
+      );
     }
-  } else {
-    reasons.push(
-      `跌破月線95%保護位($${invalidationPrice})且月中線下彎($${prevMMid}➔$${featM.midline})，確認大跌通道`
-    );
-    if (featD.tfdr >= 82 && !shortLock8dActive) {
-      signal = 'SHORT_ENTRY';
+    // 鐵律二：(b)/(c) 主升浪高位奇點分級鎖利（不賣飛底倉）
+    else if (dMom >= 85 && wMom >= 78) {
+      signal = 'PARTIAL_PROFIT';
       signalStrength = 88;
-      positionSizingHint = 0.7;
-      reasons.push(`大跌通道反彈觸及上方奇點(${featD.tfdr})，通過8日鎖順勢沽空`);
-    } else if (featD.tfdr >= 82 && shortLock8dActive) {
-      signal = 'HOLD';
-      signalStrength = 55;
-      positionSizingHint = 0;
-      reasons.push(`雖見上方奇點(${featD.tfdr})，但受8日同向保護鎖攔截禁空`);
-    } else if (featD.tfdr <= 20) {
+      positionSizingHint = 0.6;
+      reasons.push(
+        `日動能 ${dMom}(>=85) 與 週動能 ${wMom}(>=78) 雙雙過熱，減持60%鎖定大波段利潤`
+      );
+    } else if (dMom >= 85 && wMom < 78) {
+      signal = 'PARTIAL_PROFIT';
+      signalStrength = 74;
+      positionSizingHint = 0.2;
+      reasons.push(
+        `日動能 ${dMom}(>=85) 但 週動能 ${wMom}(<78未過熱)，僅減倉20%鎖利、死抱80%核心底倉`
+      );
+    } else {
+      reasons.push(`週月站穩50中軸＋無固定止損割肉，安穩持有主升浪核心底倉`);
+    }
+  } else if (isBearBreak) {
+    // 1. 嚴格沽空鐵律：必須「圖表日線真正出現奇點沽 (dMom >= 84)」且「月線生命線失守 (price < featM.midline)」且「月動能 < 42 且 週動能 < 42」且未站回週中線之上才允許開空！
+    const canShort =
+      dMom >= 84 &&
+      price < featM.midline &&
+      price < featW.midline &&
+      mMom < 42 &&
+      wMom < 42;
+    // 2. 平空鎖利與風控：只要日線動能回落至 <= 28（見好就收），或週線動能重返 >= 48 / 價格站回週中線之上，立刻全數平空！
+    if (dMom <= 28 || wMom >= 48 || price >= featW.midline) {
       signal = 'COVER_SHORT';
       signalStrength = 85;
       positionSizingHint = 1.0;
-      reasons.push(`跌至日線下方奇點(${featD.tfdr})，全數平空鎖利`);
+      const coverReason =
+        dMom <= 28
+          ? `大跌浪日動能回落至 ${dMom}(<=28下方奇點)`
+          : price >= featW.midline
+          ? `價格($${price})站回週中線($${featW.midline})之上`
+          : `週動能重返 ${wMom}(>=48)`;
+      reasons.push(`${coverReason}，觸發全數平空鎖利／及時止損`);
+    } else if (canShort) {
+      signal = 'SHORT_ENTRY';
+      signalStrength = 85;
+      positionSizingHint = 0.3; // 空單嚴格限制 30% 輕倉，防軋空
+      reasons.push(`四圖共振走熊 + 日線觸及上方奇點沽(${dMom})，順勢輕倉沽空`);
+    } else {
+      signal = 'FULL_CLEAR';
+      signalStrength = 90;
+      positionSizingHint = 1.0;
+      reasons.push(
+        `週月雙破48中軸大跌浪確立，多單全數清倉離場並絕對禁買（未現dMom>=84奇點沽前嚴禁開空）`
+      );
     }
+  } else {
+    // 過渡緩衝區（例如月線仍 >=50，週線處於 45-50 防守帶）
+    const holdFloorMsg =
+      wMom >= 45
+        ? `週動能 ${wMom}(未跌穿45防守中軸)，拒絕割肉、維持持倉觀察`
+        : `週動能 ${wMom}(<45偏弱)，暫停加倉等待週月共振確認`;
+    reasons.push(holdFloorMsg);
   }
 
-  // 4 條精華 keyPoints（供左側最新單卡與 T+1 開盤驗證展示）
   const keyPoints: string[] = [
-    isUp
-      ? `月線斜率鎖：大升通道確立（現價 $${price} / 失效線 $${invalidationPrice}，100% 禁空）`
-      : `月線斜率鎖：大跌通道確認（月中線 $${prevMMid} ↘ $${featM.midline}，失效線 $${invalidationPrice}）`,
-    `四維結構：季TFDR ${featQ.tfdr}｜月TFDR ${featM.tfdr}｜週TFDR ${featW.tfdr}｜日TFDR ${featD.tfdr}（KER ${ker}）`,
+    `動能中軸：${momSummary}`,
+    isBullHeart
+      ? `大升浪保護：週月站穩50中軸（不設-8%固定止損，死抱80%核心底倉）`
+      : isBearBreak
+      ? `大跌浪警報：週月雙破48中軸（全清多單・禁買；須月/週<42且破月中線且日動能>=84始30%輕倉沽空，日<=28或站回週中線平空）`
+      : `中軸過渡區：月${mMom} / 週${wMom}（守45週中軸不割肉，暫不開新倉）`,
     `關鍵區間：買入埋伏 $${buyZone.low}–$${buyZone.high}｜高拋目標 $${takeProfitZone.low}–$${takeProfitZone.high}`,
-    `T+1 開盤驗證：買入須守穩 $${invalidationPrice} 上且不高於 $${(buyZone.high * 1.03).toFixed(2)}；沽空須低於 $${(takeProfitZone.high * 1.02).toFixed(2)}${shortLock8dActive ? '（8日鎖禁空中）' : ''}`
+    `T+1 開盤驗證：單筆須 >= 5% 初始本金（過濾碎股）；買入須 <= $${(buyZone.high * 1.03).toFixed(2)} 不追高`
   ];
 
-  const cleanFeature = (f: TimeframeFeature & { band90?: number; band15?: number; haCloses?: number[] }): TimeframeFeature => ({
+  const stripInternal = (
+    f: TimeframeFeature & { band90?: number; band15?: number }
+  ): TimeframeFeature => ({
     bars: f.bars,
     haBull: f.haBull,
     haLow: f.haLow,
@@ -423,6 +460,8 @@ export function computePuzzleDecision(
     prevMidline: f.prevMidline,
     atr: f.atr,
     tfdr: f.tfdr,
+    rsi: f.rsi,
+    mom: f.mom,
     sampleOK: f.sampleOK,
     isLastBarComplete: f.isLastBarComplete
   });
@@ -435,12 +474,12 @@ export function computePuzzleDecision(
     asOfIndex: safeIdx,
     currentPrice: price,
     timeframes: {
-      Q: cleanFeature(featQ),
-      M: cleanFeature(featM),
-      W: cleanFeature(featW),
-      D: cleanFeature(featD)
+      Q: stripInternal(featQ),
+      M: stripInternal(featM),
+      W: stripInternal(featW),
+      D: stripInternal(featD)
     },
-    regime: isUp ? 'UPTREND_CHANNEL' : 'DOWNTREND_CHANNEL',
+    regime,
     signal,
     signalStrength,
     positionSizingHint,
@@ -450,7 +489,7 @@ export function computePuzzleDecision(
       invalidationPrice
     },
     ker,
-    shortLock8dActive,
+    shortLock8dActive: false,
     reasons,
     keyPoints,
     riskFlags,

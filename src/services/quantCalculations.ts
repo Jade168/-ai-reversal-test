@@ -1089,6 +1089,8 @@ export function runBacktestEngine(
     };
   }
 
+  const minOrderValue = initialFund * 0.05; // 鐵律四：單筆下單金額低於初始本金 5% 直接跳過，消滅碎股紀錄
+
   for (let i = 0; i < ohlcDaily.length; i++) {
     const currBar = ohlcDaily[i];
     const todayOpen = currBar.open; // 今日真實開盤價
@@ -1098,260 +1100,189 @@ export function runBacktestEngine(
       const prevPuzzle = computePuzzleDecision(symbol, ohlcDaily, i - 1);
       const signalDate = prevPuzzle.signalDate || prevPuzzle.asOfDate;
       const execDate = currBar.date;
-      const reasonText = prevPuzzle.reasons.join('；') || '統一拼圖引擎訊號';
-      const buyHint = `買入埋伏區 $${prevPuzzle.levels.buyZone.low}–$${prevPuzzle.levels.buyZone.high} (失效 $${prevPuzzle.levels.invalidationPrice})`;
-      const sellHint = `高拋目標區 $${prevPuzzle.levels.takeProfitZone.low}–$${prevPuzzle.levels.takeProfitZone.high} (失效 $${prevPuzzle.levels.invalidationPrice})`;
+      const reasonText = prevPuzzle.reasons.join('；') || '50中軸＋奇點拼圖訊號';
+      const buyHint = `買入埋伏區 $${prevPuzzle.levels.buyZone.low}–$${prevPuzzle.levels.buyZone.high} (月${prevPuzzle.timeframes.M.mom}/週${prevPuzzle.timeframes.W.mom}/日${prevPuzzle.timeframes.D.mom})`;
+      const sellHint = `高拋目標區 $${prevPuzzle.levels.takeProfitZone.low}–$${prevPuzzle.levels.takeProfitZone.high} (月${prevPuzzle.timeframes.M.mom}/週${prevPuzzle.timeframes.W.mom}/日${prevPuzzle.timeframes.D.mom})`;
       const canAct = i - lastActionBarIndex >= 5;
-      let stoppedOut = false;
 
-      // 1. 全局 -8% 硬止損（開盤價成交＋扣單邊 0.25% 成本）
-      if (longShares > 0 && avgLongCost > 0) {
-        const netExitPrice = todayOpen * (1 - FEE_RATE);
-        const pnlRatio = (netExitPrice - avgLongCost) / avgLongCost;
-        const pnlPct = pnlRatio * 100;
-        if (pnlPct <= -8) {
-          cashPool += longShares * netExitPrice;
-          trades.push({ profit: pnlRatio });
-          const soldShares = longShares;
-          longShares = 0;
-          avgLongCost = 0;
-          lastActionBarIndex = i;
-          const profitPct = Number(pnlPct.toFixed(2));
-          tradeLogs.unshift({
-            date: execDate,
-            signalDate,
-            execDate,
-            puzzleHint: sellHint,
-            complianceTag: '⚠️ 偏離區間',
-            type: 'CRITICAL SELL',
-            action: '🛡️ 統一引擎・多單止損',
-            shares: soldShares,
-            units: '硬止損100%',
-            confidence: `統一引擎風控 (預警 ${signalDate})`,
-            price: todayOpen.toFixed(2),
-            totalHolding: 0,
-            holdingType: 'EMPTY',
-            source: `單筆浮虧達 ${profitPct}% (已扣雙邊0.25%成本)，開盤紀律止損｜${reasonText}`,
-            profitPct,
-            profit: profitPct,
-            msg: `[${execDate}] 🛡️ 統一引擎・多單止損 ${soldShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} | 淨盈虧: ${profitPct}%`
-          });
-          stoppedOut = true;
-        }
-      }
+      // 1. 平空鎖利與風控：日動能回落 <= 28、週動能重返 >= 48、或價格站回週中線之上，立刻全數平空
+      const shouldCoverShort =
+        prevPuzzle.signal === 'COVER_SHORT' ||
+        prevPuzzle.regime !== 'DOWNTREND_CHANNEL' ||
+        prevPuzzle.timeframes.D.mom <= 28 ||
+        prevPuzzle.timeframes.W.mom >= 48 ||
+        prevPuzzle.currentPrice >= prevPuzzle.timeframes.W.midline ||
+        todayOpen >= prevPuzzle.timeframes.W.midline ||
+        todayOpen >= prevPuzzle.levels.invalidationPrice;
 
-      if (!stoppedOut && shortShares > 0 && avgShortPrice > 0) {
+      if (shortShares > 0 && avgShortPrice > 0 && shouldCoverShort) {
         const grossPnl = (avgShortPrice - todayOpen) * shortShares;
         const exitFee = shortShares * todayOpen * FEE_RATE;
         const netPnl = grossPnl - shortEntryFee - exitFee;
         const pnlRatio = netPnl / (shortShares * avgShortPrice);
-        const pnlPct = pnlRatio * 100;
-        if (pnlPct <= -8) {
-          cashPool += shortShares * avgShortPrice + grossPnl - exitFee;
-          trades.push({ profit: pnlRatio });
-          const covered = shortShares;
-          shortShares = 0;
-          avgShortPrice = 0;
-          shortEntryFee = 0;
-          lastActionBarIndex = i;
-          const profitPct = Number(pnlPct.toFixed(2));
-          tradeLogs.unshift({
-            date: execDate,
-            signalDate,
-            execDate,
-            puzzleHint: buyHint,
-            complianceTag: '⚠️ 偏離區間',
-            type: 'BUY TO COVER',
-            action: '🛡️ 統一引擎・空單止損',
-            shares: covered,
-            units: '硬止損100%',
-            confidence: `統一引擎風控 (預警 ${signalDate})`,
-            price: todayOpen.toFixed(2),
-            totalHolding: 0,
-            holdingType: 'EMPTY',
-            source: `空單浮虧達 ${profitPct}% (已扣雙邊0.25%成本)，開盤紀律止損｜${reasonText}`,
-            profitPct,
-            profit: profitPct,
-            msg: `[${execDate}] 🛡️ 統一引擎・空單止損 ${covered.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} | 淨盈虧: ${profitPct}%`
-          });
-          stoppedOut = true;
+        cashPool += shortShares * avgShortPrice + grossPnl - exitFee;
+        trades.push({ profit: pnlRatio });
+
+        const covered = shortShares;
+        shortShares = 0;
+        avgShortPrice = 0;
+        shortEntryFee = 0;
+        lastActionBarIndex = i;
+        const profitPct = Number((pnlRatio * 100).toFixed(2));
+        const inBuyZone =
+          todayOpen >= prevPuzzle.levels.buyZone.low * 0.98 &&
+          todayOpen <= prevPuzzle.levels.buyZone.high * 1.03;
+        const complianceTag =
+          inBuyZone ||
+          todayOpen >= prevPuzzle.timeframes.W.midline ||
+          todayOpen >= prevPuzzle.levels.invalidationPrice
+            ? '✅ 精準執行'
+            : '⚠️ 偏離區間';
+        const triggerNote =
+          prevPuzzle.timeframes.D.mom <= 28
+            ? `日動能${prevPuzzle.timeframes.D.mom}<=28平空`
+            : prevPuzzle.currentPrice >= prevPuzzle.timeframes.W.midline ||
+              todayOpen >= prevPuzzle.timeframes.W.midline
+            ? `站回週中線$${prevPuzzle.timeframes.W.midline}平空`
+            : `週動能${prevPuzzle.timeframes.W.mom}>=48脫離深熊平空`;
+
+        tradeLogs.unshift({
+          date: execDate,
+          signalDate,
+          execDate,
+          puzzleHint: buyHint,
+          complianceTag,
+          type: 'BUY TO COVER',
+          action: '💎 統一引擎・全數平空',
+          shares: covered,
+          units: '全數平空100%',
+          confidence: `統一引擎 ${prevPuzzle.signalStrength}% (${triggerNote})`,
+          price: todayOpen.toFixed(2),
+          totalHolding: longShares,
+          holdingType: longShares > 0 ? 'LONG' : 'EMPTY',
+          source: reasonText,
+          profitPct,
+          profit: profitPct,
+          msg: `[${execDate}] 💎 統一引擎・全數平空 ${covered.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+        });
+      }
+
+      // 2. 鐵律三(a)：週月雙破 48 中軸 (DOWNTREND_CHANNEL / FULL_CLEAR) ➔ 立刻全數清倉多單離場（絕不在牛市中軸之上 -8% 割肉）
+      if (
+        longShares > 0 &&
+        avgLongCost > 0 &&
+        (prevPuzzle.regime === 'DOWNTREND_CHANNEL' || prevPuzzle.signal === 'FULL_CLEAR')
+      ) {
+        const netExitPrice = todayOpen * (1 - FEE_RATE);
+        const pnlRatio = (netExitPrice - avgLongCost) / avgLongCost;
+        cashPool += longShares * netExitPrice;
+        trades.push({ profit: pnlRatio });
+
+        const soldShares = longShares;
+        longShares = 0;
+        avgLongCost = 0;
+        lastActionBarIndex = i;
+        const profitPct = Number((pnlRatio * 100).toFixed(2));
+        const complianceTag =
+          prevPuzzle.regime === 'DOWNTREND_CHANNEL' ? '✅ 精準執行' : '⚠️ 偏離區間';
+
+        tradeLogs.unshift({
+          date: execDate,
+          signalDate,
+          execDate,
+          puzzleHint: sellHint,
+          complianceTag,
+          type: 'CRITICAL SELL',
+          action: '🟠 統一引擎・多單鎖利',
+          shares: soldShares,
+          units: '雙破50軸清倉100%',
+          confidence: `統一引擎 ${prevPuzzle.signalStrength}% (月${prevPuzzle.timeframes.M.mom}/週${prevPuzzle.timeframes.W.mom}<48)`,
+          price: todayOpen.toFixed(2),
+          totalHolding: 0,
+          holdingType: 'EMPTY',
+          source: reasonText,
+          profitPct,
+          profit: profitPct,
+          msg: `[${execDate}] 🟠 統一引擎・多單鎖利(週月雙破清倉) ${soldShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+        });
+      }
+
+      // 3. 鐵律一：大升浪黃金低吸（GOLDEN_BUY / ADD_POSITION）＋ 鐵律四：過濾 < 5% 本金碎單
+      if (
+        shortShares === 0 &&
+        prevPuzzle.regime === 'UPTREND_CHANNEL' &&
+        (prevPuzzle.signal === 'GOLDEN_BUY' || prevPuzzle.signal === 'ADD_POSITION') &&
+        canAct
+      ) {
+        const openAboveInvalidation = todayOpen > prevPuzzle.levels.invalidationPrice;
+        const openNotOverextended = todayOpen <= prevPuzzle.levels.buyZone.high * 1.03;
+
+        if (openAboveInvalidation && openNotOverextended) {
+          const ratio =
+            prevPuzzle.positionSizingHint > 0
+              ? Math.min(1, prevPuzzle.positionSizingHint)
+              : prevPuzzle.signal === 'GOLDEN_BUY'
+              ? 0.85
+              : 0.5;
+          const targetCash = cashPool * ratio;
+          const shares = Math.floor(targetCash / (todayOpen * (1 + FEE_RATE)));
+          const orderValue = shares * todayOpen;
+
+          // 鐵律四：單筆下單金額低於初始本金 5% 直接跳過，消滅碎股紀錄
+          if (shares > 0 && orderValue >= minOrderValue) {
+            const grossCost = orderValue;
+            const fee = grossCost * FEE_RATE;
+            const totalCost = grossCost + fee;
+            cashPool -= totalCost;
+            avgLongCost = (longShares * avgLongCost + totalCost) / (longShares + shares);
+            longShares += shares;
+            lastActionBarIndex = i;
+
+            const inExactZone =
+              todayOpen >= prevPuzzle.levels.buyZone.low &&
+              todayOpen <= prevPuzzle.levels.buyZone.high;
+            const complianceTag = inExactZone ? '✅ 精準執行' : '⚠️ 偏離區間';
+
+            tradeLogs.unshift({
+              date: execDate,
+              signalDate,
+              execDate,
+              puzzleHint: buyHint,
+              complianceTag,
+              type: prevPuzzle.signal === 'GOLDEN_BUY' ? 'STRONG BUY' : 'BUY',
+              action: '✅ 開盤驗證通過・精準買入',
+              shares,
+              units: `現金池${Math.round(ratio * 100)}%`,
+              confidence: `統一引擎 ${prevPuzzle.signalStrength}% (${prevPuzzle.signal})`,
+              price: todayOpen.toFixed(2),
+              totalHolding: longShares,
+              holdingType: 'LONG',
+              source: reasonText,
+              profitPct: null,
+              msg: `[${execDate}] ✅ 開盤驗證通過・精準買入 ${shares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | ${reasonText}`
+            });
+          }
         }
       }
 
-      if (!stoppedOut) {
-        // 2. 全數平空：COVER_SHORT 或 價格/開盤重返 invalidationPrice 之上 或 轉入 UPTREND_CHANNEL
-        if (
-          shortShares > 0 &&
-          avgShortPrice > 0 &&
-          (prevPuzzle.signal === 'COVER_SHORT' ||
-            prevPuzzle.currentPrice >= prevPuzzle.levels.invalidationPrice ||
-            todayOpen >= prevPuzzle.levels.invalidationPrice ||
-            prevPuzzle.regime === 'UPTREND_CHANNEL')
-        ) {
-          const grossPnl = (avgShortPrice - todayOpen) * shortShares;
-          const exitFee = shortShares * todayOpen * FEE_RATE;
-          const netPnl = grossPnl - shortEntryFee - exitFee;
-          const pnlRatio = netPnl / (shortShares * avgShortPrice);
-          cashPool += shortShares * avgShortPrice + grossPnl - exitFee;
-          trades.push({ profit: pnlRatio });
+      // 4. 鐵律二(b)/(c)：主升浪分級鎖利（wMom < 78 減20% 或 雙過熱減60%），嚴守單筆 >= 5% 本金過濾
+      if (
+        longShares > 0 &&
+        avgLongCost > 0 &&
+        prevPuzzle.signal === 'PARTIAL_PROFIT' &&
+        canAct
+      ) {
+        const netExitPrice = todayOpen * (1 - FEE_RATE);
+        const pnlRatio = (netExitPrice - avgLongCost) / avgLongCost;
+        const pnlPct = pnlRatio * 100;
+        if (pnlPct > 0) {
+          const ratio =
+            prevPuzzle.positionSizingHint > 0 ? Math.min(1, prevPuzzle.positionSizingHint) : 0.2;
+          const sellShares = Math.floor(longShares * ratio);
+          const orderValue = sellShares * todayOpen;
 
-          const covered = shortShares;
-          shortShares = 0;
-          avgShortPrice = 0;
-          shortEntryFee = 0;
-          lastActionBarIndex = i;
-          const profitPct = Number((pnlRatio * 100).toFixed(2));
-          const inBuyZone =
-            todayOpen >= prevPuzzle.levels.buyZone.low * 0.98 &&
-            todayOpen <= prevPuzzle.levels.buyZone.high * 1.03;
-          const complianceTag =
-            inBuyZone || todayOpen >= prevPuzzle.levels.invalidationPrice
-              ? '✅ 精準執行'
-              : '⚠️ 偏離區間';
-          const triggerNote =
-            prevPuzzle.signal === 'COVER_SHORT'
-              ? '下方奇點平空'
-              : `重返失效線 $${prevPuzzle.levels.invalidationPrice} 之上`;
-
-          tradeLogs.unshift({
-            date: execDate,
-            signalDate,
-            execDate,
-            puzzleHint: buyHint,
-            complianceTag,
-            type: 'BUY TO COVER',
-            action: '💎 統一引擎・全數平空',
-            shares: covered,
-            units: '全數平空100%',
-            confidence: `統一引擎 ${prevPuzzle.signalStrength}% (${triggerNote})`,
-            price: todayOpen.toFixed(2),
-            totalHolding: longShares,
-            holdingType: longShares > 0 ? 'LONG' : 'EMPTY',
-            source: reasonText,
-            profitPct,
-            profit: profitPct,
-            msg: `[${execDate}] 💎 統一引擎・全數平空 ${covered.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
-          });
-        }
-
-        // 3. 破位轉入大跌通道時保護性清倉多單
-        if (
-          longShares > 0 &&
-          avgLongCost > 0 &&
-          prevPuzzle.regime === 'DOWNTREND_CHANNEL' &&
-          prevPuzzle.signal !== 'PARTIAL_PROFIT' &&
-          prevPuzzle.signal !== 'FULL_CLEAR'
-        ) {
-          const netExitPrice = todayOpen * (1 - FEE_RATE);
-          const pnlRatio = (netExitPrice - avgLongCost) / avgLongCost;
-          cashPool += longShares * netExitPrice;
-          trades.push({ profit: pnlRatio });
-
-          const soldShares = longShares;
-          longShares = 0;
-          avgLongCost = 0;
-          lastActionBarIndex = i;
-          const profitPct = Number((pnlRatio * 100).toFixed(2));
-          const complianceTag =
-            todayOpen <= prevPuzzle.levels.invalidationPrice ? '✅ 精準執行' : '⚠️ 偏離區間';
-
-          tradeLogs.unshift({
-            date: execDate,
-            signalDate,
-            execDate,
-            puzzleHint: sellHint,
-            complianceTag,
-            type: 'CRITICAL SELL',
-            action: '🟠 統一引擎・多單鎖利',
-            shares: soldShares,
-            units: '破位清倉100%',
-            confidence: `統一引擎 ${prevPuzzle.signalStrength}% (大跌通道清倉)`,
-            price: todayOpen.toFixed(2),
-            totalHolding: 0,
-            holdingType: 'EMPTY',
-            source: reasonText,
-            profitPct,
-            profit: profitPct,
-            msg: `[${execDate}] 🟠 統一引擎・多單鎖利(破位清倉) ${soldShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
-          });
-        }
-
-        // 4. 買入開盤二次驗證（GOLDEN_BUY / ADD_POSITION）：
-        // 必須同時滿足：未跳空跌穿失效線 (todayOpen > invalidationPrice) 且 未過度高開透支 (todayOpen <= buyZone.high * 1.03)
-        if (
-          shortShares === 0 &&
-          (prevPuzzle.signal === 'GOLDEN_BUY' || prevPuzzle.signal === 'ADD_POSITION') &&
-          canAct &&
-          cashPool > todayOpen * 10
-        ) {
-          const openAboveInvalidation = todayOpen > prevPuzzle.levels.invalidationPrice;
-          const openNotOverextended = todayOpen <= prevPuzzle.levels.buyZone.high * 1.03;
-
-          if (openAboveInvalidation && openNotOverextended) {
-            const ratio =
-              prevPuzzle.positionSizingHint > 0
-                ? Math.min(1, prevPuzzle.positionSizingHint)
-                : prevPuzzle.signal === 'GOLDEN_BUY'
-                ? 0.85
-                : 0.4;
-            const shares = Math.floor((cashPool * ratio) / (todayOpen * (1 + FEE_RATE)));
-            if (shares > 0) {
-              const grossCost = shares * todayOpen;
-              const fee = grossCost * FEE_RATE;
-              const totalCost = grossCost + fee;
-              cashPool -= totalCost;
-              avgLongCost = (longShares * avgLongCost + totalCost) / (longShares + shares);
-              longShares += shares;
-              lastActionBarIndex = i;
-
-              const inExactZone =
-                todayOpen >= prevPuzzle.levels.buyZone.low &&
-                todayOpen <= prevPuzzle.levels.buyZone.high;
-              const complianceTag = inExactZone ? '✅ 精準執行' : '⚠️ 偏離區間';
-
-              tradeLogs.unshift({
-                date: execDate,
-                signalDate,
-                execDate,
-                puzzleHint: buyHint,
-                complianceTag,
-                type: prevPuzzle.signal === 'GOLDEN_BUY' ? 'STRONG BUY' : 'BUY',
-                action: '✅ 開盤驗證通過・精準買入',
-                shares,
-                units: `現金池${Math.round(ratio * 100)}%`,
-                confidence: `統一引擎 ${prevPuzzle.signalStrength}% (${prevPuzzle.signal})`,
-                price: todayOpen.toFixed(2),
-                totalHolding: longShares,
-                holdingType: 'LONG',
-                source: reasonText,
-                profitPct: null,
-                msg: `[${execDate}] ✅ 開盤驗證通過・精準買入 ${shares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | ${reasonText}`
-              });
-            }
-          }
-        }
-
-        // 5. 多單鎖利驗證（PARTIAL_PROFIT / FULL_CLEAR）
-        if (
-          longShares > 0 &&
-          avgLongCost > 0 &&
-          (prevPuzzle.signal === 'PARTIAL_PROFIT' || prevPuzzle.signal === 'FULL_CLEAR') &&
-          (prevPuzzle.signal === 'FULL_CLEAR' || canAct)
-        ) {
-          const netExitPrice = todayOpen * (1 - FEE_RATE);
-          const pnlRatio = (netExitPrice - avgLongCost) / avgLongCost;
-          const pnlPct = pnlRatio * 100;
-          if (prevPuzzle.signal === 'FULL_CLEAR' || pnlPct > 0) {
-            const ratio =
-              prevPuzzle.signal === 'FULL_CLEAR'
-                ? 1
-                : prevPuzzle.positionSizingHint > 0
-                ? Math.min(1, prevPuzzle.positionSizingHint)
-                : 0.5;
-            const sellShares =
-              ratio >= 1 || longShares * todayOpen < 30000
-                ? longShares
-                : Math.max(1, Math.floor(longShares * ratio));
+          // 鐵律四：單筆金額低於初始本金 5% 直接跳過
+          if (sellShares > 0 && orderValue >= minOrderValue) {
             cashPool += sellShares * netExitPrice;
             trades.push({ profit: pnlRatio });
 
@@ -1370,11 +1301,11 @@ export function runBacktestEngine(
               execDate,
               puzzleHint: sellHint,
               complianceTag,
-              type: prevPuzzle.signal === 'FULL_CLEAR' ? 'CRITICAL SELL' : 'SELL',
+              type: 'SELL',
               action: '🟠 統一引擎・多單鎖利',
               shares: sellShares,
-              units: longShares === 0 ? '全清100%' : `鎖利${Math.round(ratio * 100)}%`,
-              confidence: `統一引擎 ${prevPuzzle.signalStrength}% · KER=${prevPuzzle.ker}`,
+              units: `鎖利${Math.round(ratio * 100)}% (抱底倉${100 - Math.round(ratio * 100)}%)`,
+              confidence: `統一引擎 ${prevPuzzle.signalStrength}% (週動能${prevPuzzle.timeframes.W.mom})`,
               price: todayOpen.toFixed(2),
               totalHolding: longShares,
               holdingType: longShares > 0 ? 'LONG' : 'EMPTY',
@@ -1385,55 +1316,64 @@ export function runBacktestEngine(
             });
           }
         }
+      }
 
-        // 6. 順勢沽空開盤驗證（SHORT_ENTRY）：
-        // 必須確認開盤無大幅跳空高開突破阻力 (todayOpen <= takeProfitZone.high * 1.02)，防止開盤即被軋空
-        if (
-          longShares === 0 &&
-          shortShares === 0 &&
-          prevPuzzle.regime === 'DOWNTREND_CHANNEL' &&
-          prevPuzzle.signal === 'SHORT_ENTRY' &&
-          canAct &&
-          cashPool > todayOpen * 10
-        ) {
-          const openNotGapUpBreakout = todayOpen <= prevPuzzle.levels.takeProfitZone.high * 1.02;
-          if (openNotGapUpBreakout) {
-            const ratio =
-              prevPuzzle.positionSizingHint > 0 ? Math.min(1, prevPuzzle.positionSizingHint) : 0.7;
-            const shares = Math.floor((cashPool * ratio) / (todayOpen * (1 + FEE_RATE)));
-            if (shares > 0) {
-              const margin = shares * todayOpen;
-              const fee = margin * FEE_RATE;
-              cashPool -= margin + fee;
-              avgShortPrice = todayOpen;
-              shortEntryFee = fee;
-              shortShares = shares;
-              lastActionBarIndex = i;
+      // 5. 鐵律三(b)：必須日線出現奇點沽 (dMom >= 84)、失守月中線 (price < M.midline)、且 月動能 < 42 與 週動能 < 42 才允許 30% 輕倉沽空
+      const strictShortGuard =
+        prevPuzzle.timeframes.D.mom >= 84 &&
+        prevPuzzle.currentPrice < prevPuzzle.timeframes.M.midline &&
+        prevPuzzle.timeframes.M.mom < 42 &&
+        prevPuzzle.timeframes.W.mom < 42;
+      if (
+        longShares === 0 &&
+        shortShares === 0 &&
+        prevPuzzle.regime === 'DOWNTREND_CHANNEL' &&
+        prevPuzzle.signal === 'SHORT_ENTRY' &&
+        strictShortGuard &&
+        canAct
+      ) {
+        const openNotGapUpBreakout =
+          todayOpen <= prevPuzzle.levels.takeProfitZone.high * 1.02 &&
+          todayOpen < prevPuzzle.timeframes.M.midline &&
+          todayOpen < prevPuzzle.timeframes.W.midline;
+        if (openNotGapUpBreakout) {
+          const ratio =
+            prevPuzzle.positionSizingHint > 0 ? Math.min(0.3, prevPuzzle.positionSizingHint) : 0.3;
+          const shares = Math.floor((cashPool * ratio) / (todayOpen * (1 + FEE_RATE)));
+          const orderValue = shares * todayOpen;
 
-              const inExactShortZone =
-                todayOpen >= prevPuzzle.levels.takeProfitZone.low * 0.98 &&
-                todayOpen <= prevPuzzle.levels.takeProfitZone.high;
-              const complianceTag = inExactShortZone ? '✅ 精準執行' : '⚠️ 偏離區間';
+          if (shares > 0 && orderValue >= minOrderValue) {
+            const margin = orderValue;
+            const fee = margin * FEE_RATE;
+            cashPool -= margin + fee;
+            avgShortPrice = todayOpen;
+            shortEntryFee = fee;
+            shortShares = shares;
+            lastActionBarIndex = i;
 
-              tradeLogs.unshift({
-                date: execDate,
-                signalDate,
-                execDate,
-                puzzleHint: sellHint,
-                complianceTag,
-                type: 'STRONG SHORT',
-                action: '🟣 統一引擎・順勢沽空',
-                shares,
-                units: `現金池${Math.round(ratio * 100)}%沽空`,
-                confidence: `統一引擎 ${prevPuzzle.signalStrength}% (DOWNTREND_CHANNEL)`,
-                price: todayOpen.toFixed(2),
-                totalHolding: shortShares,
-                holdingType: 'SHORT',
-                source: reasonText,
-                profitPct: null,
-                msg: `[${execDate}] 🟣 統一引擎・順勢沽空 ${shares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | ${reasonText}`
-              });
-            }
+            const inExactShortZone =
+              todayOpen >= prevPuzzle.levels.takeProfitZone.low * 0.98 &&
+              todayOpen <= prevPuzzle.levels.takeProfitZone.high;
+            const complianceTag = inExactShortZone ? '✅ 精準執行' : '⚠️ 偏離區間';
+
+            tradeLogs.unshift({
+              date: execDate,
+              signalDate,
+              execDate,
+              puzzleHint: sellHint,
+              complianceTag,
+              type: 'STRONG SHORT',
+              action: '🟣 統一引擎・順勢沽空',
+              shares,
+              units: `現金池${Math.round(ratio * 100)}%輕倉沽空`,
+              confidence: `統一引擎 ${prevPuzzle.signalStrength}% (日動能${prevPuzzle.timeframes.D.mom}>=84)`,
+              price: todayOpen.toFixed(2),
+              totalHolding: shortShares,
+              holdingType: 'SHORT',
+              source: reasonText,
+              profitPct: null,
+              msg: `[${execDate}] 🟣 統一引擎・順勢沽空 ${shares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | ${reasonText}`
+            });
           }
         }
       }

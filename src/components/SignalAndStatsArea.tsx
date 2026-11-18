@@ -158,7 +158,7 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
         </div>
 
         <div className="text-[10px] text-center text-gray-500 mt-1.5">
-          T日收盤拼圖預警 ➔ T+1日開盤驗假破成交（月線斜率鎖＋8日禁空鎖＋單邊 0.25% 成本・-8% 硬止損）
+          50動能中軸(RSI+TFDR)＋15/85奇點拼圖｜T+1開盤驗假破（單筆 ≥ 5% 本金・單邊0.25%成本・移除牛市固定止損）
         </div>
 
         {/* 整合於決策中樞底部的雙核回測交易紀錄 */}

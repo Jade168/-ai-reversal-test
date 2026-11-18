@@ -82,7 +82,7 @@ export function evaluatePuzzleExpertSummary(puzzle: PuzzleState): LocalExpertSum
   const reasonsSummary = puzzle.reasons.join('；');
   const riskText = puzzle.riskFlags.length > 0 ? puzzle.riskFlags.join('；') : '無異常結構風險';
 
-  const coreAction = `${reasonsSummary}。參考低吸區 $${puzzle.levels.buyZone.low}–$${puzzle.levels.buyZone.high}，止盈區 $${puzzle.levels.takeProfitZone.low}–$${puzzle.levels.takeProfitZone.high}，月線失效位 $${puzzle.levels.invalidationPrice}（嚴守 -8% 單筆硬止損）。`;
+  const coreAction = `${reasonsSummary}。買入埋伏區 $${puzzle.levels.buyZone.low}–$${puzzle.levels.buyZone.high}，高拋目標區 $${puzzle.levels.takeProfitZone.low}–$${puzzle.levels.takeProfitZone.high}（以月/週 50 動能中軸守護底倉，不設牛市 -8% 固定割肉）。`;
 
   const keyPointsBlock =
     puzzle.keyPoints && puzzle.keyPoints.length > 0
@@ -93,8 +93,8 @@ export function evaluatePuzzleExpertSummary(puzzle: PuzzleState): LocalExpertSum
     `📊 【${puzzle.symbol} 拼圖量化引擎・最新單日預警】(${puzzle.schema} | ${puzzle.signalDate || puzzle.asOfDate})`,
     `${confidenceTag}`,
     `• 大局定性：${regimeLabel}｜${trendQuality}`,
-    `• 四維原生結構：季線(${Q.bars}根)中線 $${Q.midline} / TFDR ${Q.tfdr}｜月線(${M.bars}根)中線 $${M.midline} / TFDR ${M.tfdr}｜週線(${W.bars}根)中線 $${W.midline} / TFDR ${W.tfdr}｜日線中線 $${D.midline} / TFDR ${D.tfdr}`,
-    `• 關鍵座標：現價 $${puzzle.currentPrice}｜買入埋伏 $${puzzle.levels.buyZone.low}–$${puzzle.levels.buyZone.high}｜高拋目標 $${puzzle.levels.takeProfitZone.low}–$${puzzle.levels.takeProfitZone.high}｜失效止損 $${puzzle.levels.invalidationPrice}`,
+    `• 四維動能結構：季(動能${Q.mom}/TFDR ${Q.tfdr})｜月(動能${M.mom}/TFDR ${M.tfdr})｜週(動能${W.mom}/TFDR ${W.tfdr})｜日(動能${D.mom}/TFDR ${D.tfdr})`,
+    `• 關鍵座標：現價 $${puzzle.currentPrice}｜買入埋伏 $${puzzle.levels.buyZone.low}–$${puzzle.levels.buyZone.high}｜高拋目標 $${puzzle.levels.takeProfitZone.low}–$${puzzle.levels.takeProfitZone.high}｜保護線 $${puzzle.levels.invalidationPrice}`,
     `• 觸發依據：${reasonsSummary}`,
     `• 風險標記：${riskText}${keyPointsBlock}`,
     `• 操盤指令：${coreAction}`
@@ -131,10 +131,10 @@ export function evaluateLocalExpertSummary(input: LocalAnalysisInput): LocalExpe
     asOfIndex: Math.max(0, input.closes.length - 1),
     currentPrice: input.currentPrice,
     timeframes: {
-      Q: { bars: 0, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.monthlyMidline, prevMidline: input.monthlyMidline, atr: 0, tfdr: input.monthlyTFDR, sampleOK: false, isLastBarComplete: false },
-      M: { bars: 0, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.monthlyMidline, prevMidline: input.monthlyMidline, atr: 0, tfdr: input.monthlyTFDR, sampleOK: false, isLastBarComplete: false },
-      W: { bars: 0, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.weeklyMidline, prevMidline: input.weeklyMidline, atr: 0, tfdr: input.weeklyTFDR, sampleOK: false, isLastBarComplete: false },
-      D: { bars: input.closes.length, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.weeklyMidline, prevMidline: input.weeklyMidline, atr: 0, tfdr: input.dailyTFDR, sampleOK: true, isLastBarComplete: true }
+      Q: { bars: 0, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.monthlyMidline, prevMidline: input.monthlyMidline, atr: 0, tfdr: input.monthlyTFDR, rsi: 50, mom: Number(((50 + input.monthlyTFDR) / 2).toFixed(1)), sampleOK: false, isLastBarComplete: false },
+      M: { bars: 0, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.monthlyMidline, prevMidline: input.monthlyMidline, atr: 0, tfdr: input.monthlyTFDR, rsi: 50, mom: Number(((50 + input.monthlyTFDR) / 2).toFixed(1)), sampleOK: false, isLastBarComplete: false },
+      W: { bars: 0, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.weeklyMidline, prevMidline: input.weeklyMidline, atr: 0, tfdr: input.weeklyTFDR, rsi: 50, mom: Number(((50 + input.weeklyTFDR) / 2).toFixed(1)), sampleOK: false, isLastBarComplete: false },
+      D: { bars: input.closes.length, haBull: input.isMonthlyUptrend, haLow: 0, prevHaLow: 0, midline: input.weeklyMidline, prevMidline: input.weeklyMidline, atr: 0, tfdr: input.dailyTFDR, rsi: 50, mom: Number(((50 + input.dailyTFDR) / 2).toFixed(1)), sampleOK: true, isLastBarComplete: true }
     },
     regime: input.isMonthlyUptrend && input.currentPrice >= input.monthlyMidline ? 'UPTREND_CHANNEL' : 'DOWNTREND_CHANNEL',
     signal: 'HOLD',

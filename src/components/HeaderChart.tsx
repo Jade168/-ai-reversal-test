@@ -1,12 +1,153 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { ModelBar } from '../types/quant';
+import { ModelBar, RawKline } from '../types/quant';
 import { calculateDynamicReversals } from '../services/quantCalculations';
 import { calculateTFDRSeries } from '../services/tfdrIndicator';
-import { PuzzleState } from '../services/puzzleDecisionEngine';
+import { OHLCBar, PuzzleState, resampleByCalendarUTC } from '../services/puzzleDecisionEngine';
 import { ZoomIn, ZoomOut, RotateCcw, ChevronDown, ChevronUp } from 'lucide-react';
+
+// 1. 迷你 SVG 單圖渲染器（畫出走勢折線 + 黃色生命線 + 奇點圓點）
+const MiniChartCard: React.FC<{
+  title: string;
+  bars: number[];
+  midline: number;
+  momScore: number;
+  isUp: boolean;
+}> = ({ title, bars, midline, momScore, isUp }) => {
+  const slice = bars.slice(-20);
+  if (slice.length < 2) {
+    return (
+      <div className="bg-slate-900/90 p-1.5 rounded border border-slate-700/60 text-[10px] text-slate-400">
+        {title}: 數據累積中
+      </div>
+    );
+  }
+  const allVals = Number.isFinite(midline) && midline > 0 ? [...slice, midline] : slice;
+  const min = Math.min(...allVals);
+  const max = Math.max(...allVals);
+  const range = Math.max(0.001, max - min);
+  const w = 105;
+  const h = 38;
+  const toY = (v: number) => h - 4 - ((v - min) / range) * (h - 8);
+  const points = slice
+    .map((v, idx) => `${((idx / (slice.length - 1)) * w).toFixed(1)},${toY(v).toFixed(1)}`)
+    .join(' ');
+  const midY = toY(Number.isFinite(midline) && midline > 0 ? midline : slice[slice.length - 1]).toFixed(1);
+  const lastY = toY(slice[slice.length - 1]).toFixed(1);
+  const strokeColor = isUp ? '#10b981' : '#ef4444';
+
+  return (
+    <div className="bg-slate-900/95 p-1.5 rounded border border-slate-700/80 flex flex-col">
+      <div className="flex justify-between items-center text-[10px] mb-0.5">
+        <span className="font-bold text-slate-200">{title}</span>
+        <span className={momScore >= 50 ? 'text-emerald-400 font-mono' : 'text-red-400 font-mono'}>
+          動能:{momScore}
+        </span>
+      </div>
+      <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} className="overflow-visible">
+        {/* 黃色虛線：該週期中間生命線 */}
+        <line x1="0" y1={midY} x2={w} y2={midY} stroke="#f59e0b" strokeWidth="1" strokeDasharray="3,2" />
+        {/* 價格走勢折線 */}
+        <polyline fill="none" stroke={strokeColor} strokeWidth="1.5" points={points} />
+        {/* 最新位置發光點 */}
+        <circle cx={w} cy={lastY} r="2.5" fill={strokeColor} />
+      </svg>
+    </div>
+  );
+};
+
+// 2. KC 博士・2×2 四圖並排迷你走勢拼圖懸浮組件
+const FourTimeframePuzzlePiP: React.FC<{
+  puzzleState: PuzzleState;
+  qCloses: number[];
+  mCloses: number[];
+  wCloses: number[];
+  dCloses: number[];
+}> = ({ puzzleState, qCloses, mCloses, wCloses, dCloses }) => {
+  // 桌面預設展開、手機版預設收合以免遮擋主圖
+  const [pipCollapsed, setPipCollapsed] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth < 768 : false
+  );
+
+  return (
+    <div
+      className="absolute top-2 left-2 z-20 w-[258px] sm:w-[276px] max-w-[92vw] bg-slate-950/88 backdrop-blur-md border border-indigo-500/50 rounded-lg p-2 shadow-2xl select-none"
+      onMouseDown={(e) => e.stopPropagation()}
+      onTouchStart={(e) => e.stopPropagation()}
+      onWheel={(e) => e.stopPropagation()}
+    >
+      <div className="flex items-center justify-between gap-2 pb-1 mb-1.5 border-b border-slate-800">
+        <span className="text-[10.5px] font-bold text-amber-400 truncate">
+          🧩 KC四維並排拼圖 (黃虛線=生命線)
+        </span>
+        <button
+          type="button"
+          onClick={() => setPipCollapsed(prev => !prev)}
+          className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:bg-slate-700 flex items-center gap-0.5 shrink-0 transition"
+          title={pipCollapsed ? '展開四維並排拼圖' : '收合四維並排拼圖'}
+        >
+          {pipCollapsed ? (
+            <>
+              展開 <ChevronDown size={11} />
+            </>
+          ) : (
+            <>
+              收合 <ChevronUp size={11} />
+            </>
+          )}
+        </button>
+      </div>
+      {!pipCollapsed && (
+        <>
+          <div className="grid grid-cols-2 gap-1.5">
+            <MiniChartCard
+              title="① 季線 Q"
+              bars={qCloses}
+              midline={puzzleState.timeframes.Q.midline}
+              momScore={puzzleState.timeframes.Q.mom}
+              isUp={puzzleState.timeframes.Q.haBull}
+            />
+            <MiniChartCard
+              title="② 月線 M"
+              bars={mCloses}
+              midline={puzzleState.timeframes.M.midline}
+              momScore={puzzleState.timeframes.M.mom}
+              isUp={puzzleState.timeframes.M.haBull}
+            />
+            <MiniChartCard
+              title="③ 週線 W"
+              bars={wCloses}
+              midline={puzzleState.timeframes.W.midline}
+              momScore={puzzleState.timeframes.W.mom}
+              isUp={puzzleState.timeframes.W.haBull}
+            />
+            <MiniChartCard
+              title="④ 日線 D"
+              bars={dCloses}
+              midline={puzzleState.timeframes.D.midline}
+              momScore={puzzleState.timeframes.D.mom}
+              isUp={puzzleState.timeframes.D.haBull}
+            />
+          </div>
+          <div className="mt-1.5 pt-1 border-t border-slate-800 text-[10px] text-slate-300 flex justify-between font-mono">
+            <span>
+              低吸:<b className="text-emerald-400">${puzzleState.levels.buyZone.low}</b>
+            </span>
+            <span>
+              高拋:<b className="text-amber-400">${puzzleState.levels.takeProfitZone.low}</b>
+            </span>
+            <span>
+              止損:<b className="text-red-400">${puzzleState.levels.invalidationPrice}</b>
+            </span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
 
 interface HeaderChartProps {
   data: ModelBar[];
+  dailyKlines?: RawKline[];
   isLoading: boolean;
   loadingMessage: string;
   isReplay: boolean;
@@ -21,6 +162,7 @@ interface HeaderChartProps {
 
 export const HeaderChart: React.FC<HeaderChartProps> = ({
   data,
+  dailyKlines = [],
   isLoading,
   loadingMessage,
   isReplay,
@@ -37,11 +179,6 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
 
   // 1. 圖表顯示模式狀態：【傳統數律共振】⇄【TFDR 奇點通道】
   const [chartMode, setChartMode] = useState<'CLASSIC' | 'TFDR'>('CLASSIC');
-
-  // 四維拼圖畫中畫（PiP）小窗：桌面預設展開、手機版預設收合
-  const [pipExpanded, setPipExpanded] = useState<boolean>(() =>
-    typeof window !== 'undefined' ? window.innerWidth >= 768 : true
-  );
 
   // Viewport / zoom / pan state
   const [viewRange, setViewRange] = useState<{ start: number; end: number } | null>(null);
@@ -88,6 +225,37 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     }
     return data;
   }, [data, isReplay, replayIndex]);
+
+  // 從完整日線（fallback 至 activeData）重採樣生成 Q / M / W / D 收盤價陣列，供 KC 四維並排迷你圖渲染
+  const { qCloses, mCloses, wCloses, dCloses } = useMemo(() => {
+    const base: RawKline[] = dailyKlines.length > 0 ? dailyKlines : activeData;
+    if (!base.length) {
+      return { qCloses: [], mCloses: [], wCloses: [], dCloses: [] };
+    }
+    const replayCutoff =
+      isReplay && activeData.length > 0 ? (activeData[activeData.length - 1].date || '').slice(0, 10) : null;
+    const ohlc: OHLCBar[] = base
+      .map(b => ({
+        date: (b.date || '').slice(0, 10),
+        open: Number(b.o),
+        high: Number(b.h),
+        low: Number(b.l),
+        close: Number(b.c)
+      }))
+      .filter(b => Boolean(b.date) && Number.isFinite(b.close) && b.close > 0 && (!replayCutoff || b.date <= replayCutoff))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    if (!ohlc.length) {
+      return { qCloses: [], mCloses: [], wCloses: [], dCloses: [] };
+    }
+
+    return {
+      dCloses: ohlc.map(b => b.close),
+      wCloses: resampleByCalendarUTC(ohlc, 'W').map(b => b.close),
+      mCloses: resampleByCalendarUTC(ohlc, 'M').map(b => b.close),
+      qCloses: resampleByCalendarUTC(ohlc, 'Q').map(b => b.close)
+    };
+  }, [dailyKlines, activeData, isReplay]);
 
   // Reset or adjust viewRange on data changes (預設顯示最近約 35%，保留過往歷史供向左平移查看)
   useEffect(() => {
@@ -1283,125 +1451,15 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       >
         <canvas ref={canvasRef} className="w-full h-full block" />
 
-        {/* 左上角：四維拼圖畫中畫 (PiP) 半透明磨砂小窗（自帶收合/展開按鈕，手機版預設收合） */}
+        {/* 左上角：KC 博士 2×2 四圖並排迷你走勢拼圖 (PiP) */}
         {puzzleState && (
-          <div
-            className="absolute top-2 left-2 z-20 max-w-[92vw] sm:max-w-[360px] bg-slate-950/75 backdrop-blur-md border border-slate-700/75 rounded-lg shadow-xl text-[10px] text-slate-200 select-none"
-            onMouseDown={(e) => e.stopPropagation()}
-            onTouchStart={(e) => e.stopPropagation()}
-            onWheel={(e) => e.stopPropagation()}
-          >
-            <div className="px-2 py-1 flex items-center justify-between gap-2 border-b border-slate-800/80">
-              <div className="flex items-center gap-1.5 min-w-0">
-                <span className="font-bold text-amber-300 truncate">
-                  🧩 {puzzleState.symbol} 四維拼圖
-                </span>
-                <span className="font-mono text-[9.5px] text-slate-400">
-                  {puzzleState.signalDate}
-                </span>
-                {!pipExpanded && (
-                  <div className="flex items-center gap-1 ml-0.5">
-                    {(
-                      [
-                        ['Q', puzzleState.timeframes.Q],
-                        ['M', puzzleState.timeframes.M],
-                        ['W', puzzleState.timeframes.W],
-                        ['D', puzzleState.timeframes.D]
-                      ] as const
-                    ).map(([label, tf]) => {
-                      const dotColor = !tf.sampleOK
-                        ? 'bg-amber-400'
-                        : tf.haBull
-                        ? 'bg-emerald-400'
-                        : 'bg-red-400';
-                      return (
-                        <span
-                          key={label}
-                          className="inline-flex items-center gap-0.5 px-1 py-0.2 rounded bg-slate-900/90 text-[9px] font-mono"
-                        >
-                          <span className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
-                          {label}
-                        </span>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-              <button
-                type="button"
-                onClick={() => setPipExpanded(prev => !prev)}
-                className="px-1.5 py-0.5 rounded bg-slate-800/90 hover:bg-slate-700 text-slate-200 flex items-center gap-0.5 text-[9.5px] font-semibold shrink-0 transition"
-                title={pipExpanded ? '收合四維拼圖小窗' : '展開四維拼圖小窗'}
-              >
-                {pipExpanded ? (
-                  <>
-                    收合 <ChevronUp size={11} />
-                  </>
-                ) : (
-                  <>
-                    展開 <ChevronDown size={11} />
-                  </>
-                )}
-              </button>
-            </div>
-
-            {pipExpanded && (
-              <div className="p-2 space-y-1.5">
-                <div className="grid grid-cols-4 gap-1">
-                  {(
-                    [
-                      ['季Q', puzzleState.timeframes.Q],
-                      ['月M', puzzleState.timeframes.M],
-                      ['週W', puzzleState.timeframes.W],
-                      ['日D', puzzleState.timeframes.D]
-                    ] as const
-                  ).map(([label, tf]) => {
-                    const dotColor = !tf.sampleOK
-                      ? 'bg-amber-400 shadow-[0_0_5px_rgba(251,191,36,0.8)]'
-                      : tf.haBull
-                      ? 'bg-emerald-400 shadow-[0_0_5px_rgba(52,211,153,0.8)]'
-                      : 'bg-red-400 shadow-[0_0_5px_rgba(248,113,113,0.8)]';
-                    const scoreColor =
-                      tf.tfdr >= 82
-                        ? 'text-red-400'
-                        : tf.tfdr <= 22
-                        ? 'text-emerald-400'
-                        : 'text-slate-100';
-
-                    return (
-                      <div
-                        key={label}
-                        className="px-1.5 py-1 rounded bg-slate-900/85 border border-slate-800/90 text-center"
-                      >
-                        <div className="flex items-center justify-center gap-1 text-[9.5px] text-slate-300 font-semibold">
-                          <span className={`w-1.5 h-1.5 rounded-full ${dotColor}`} />
-                          <span>{label}</span>
-                        </div>
-                        <div className={`font-mono font-bold text-[10.5px] ${scoreColor}`}>
-                          {tf.tfdr}
-                        </div>
-                        <div className="font-mono text-[8.5px] text-slate-400">
-                          ${tf.midline}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 text-[9.5px] font-mono pt-1 border-t border-slate-800/80">
-                  <span className="text-emerald-400">
-                    🟢 買 ${puzzleState.levels.buyZone.low}–${puzzleState.levels.buyZone.high}
-                  </span>
-                  <span className="text-red-400">
-                    🔴 拋 ${puzzleState.levels.takeProfitZone.low}–${puzzleState.levels.takeProfitZone.high}
-                  </span>
-                  <span className="text-amber-300">
-                    🛑 失效 ${puzzleState.levels.invalidationPrice}
-                  </span>
-                </div>
-              </div>
-            )}
-          </div>
+          <FourTimeframePuzzlePiP
+            puzzleState={puzzleState}
+            qCloses={qCloses}
+            mCloses={mCloses}
+            wCloses={wCloses}
+            dCloses={dCloses}
+          />
         )}
 
         {/* Loading Overlay */}

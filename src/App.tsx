@@ -576,6 +576,7 @@ export const App: React.FC = () => {
       {/* 1. Header Interactive Candlestick Chart */}
       <HeaderChart
         data={modelData}
+        dailyKlines={dailyKlines}
         isLoading={isLoading}
         loadingMessage={loadingMessage}
         isReplay={isReplaying}
