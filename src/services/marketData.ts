@@ -22,7 +22,7 @@ export function mapPeriod(period: string): number {
 
 export async function fetchMarketData(
   symbol: string,
-  assetType: string = 'stock',
+  _assetType: string = 'stock',
   cycle: string = 'daily',
   source: string = 'eastmoney'
 ): Promise<RawKline[]> {

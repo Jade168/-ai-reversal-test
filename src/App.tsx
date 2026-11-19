@@ -13,7 +13,6 @@ import {
   FourierState
 } from './types/quant';
 import {
-  QUANT_CONFIG,
   calculateModel,
   calculate369And142857,
   calculateCosmicReversalSignal,

@@ -8,7 +8,6 @@ import {
   FourierSpectrumItem,
   RibbonState,
   TechScore,
-  MonthlyStrategyResult,
   ReversalAnchor
 } from '../types/quant';
 import { buildFullPuzzleTimeline, LAST_SELL_EXPIRY_BARS, OHLCBar } from './puzzleDecisionEngine';
@@ -258,152 +257,6 @@ export function calculateModel(rawData: RawKline[], coreNum: number = QUANT_CONF
       signalType: buySignal ? 'BUY_STRONG' : (sellSignal ? 'SELL_STRONG' : 'HOLD')
     };
   });
-}
-
-/**
- * 【修正後的 369 + 142857 複合共振信號生成核心】
- * 對標 1.5% 智能容差窗口與 ATR 波動率自適應，徹底解決低位買入信號過小或缺失問題
- */
-export function calculateReversalSignals(
-  data: RawKline[],
-  supportLevels: number[],
-  resistanceLevels: number[],
-  tolerance: number = 0.005
-) {
-  const signals: Array<{
-    index: number;
-    type: 'BUY_STRONG' | 'SELL_STRONG';
-    label: string;
-    price: number;
-    size: number;
-    atr: number;
-  }> = [];
-
-  if (!Array.isArray(data) || data.length === 0) return signals;
-
-  for (let i = 0; i < data.length; i++) {
-    const currentLow = data[i].l;
-    const currentHigh = data[i].h;
-    const currentClose = data[i].c;
-
-    const lookback = Math.min(14, i + 1);
-    let trSum = 0;
-    for (let k = Math.max(0, i - lookback + 1); k <= i; k++) {
-      const prevC = k > 0 ? data[k - 1].c : data[k].o;
-      const tr = Math.max(data[k].h - data[k].l, Math.abs(data[k].h - prevC), Math.abs(data[k].l - prevC));
-      trSum += tr;
-    }
-    const currentAtr = trSum / lookback || (currentClose * 0.02);
-
-    // 【修正低位信號】：對齊強支撐位，引入 1.5% 容差，保證低位不漏報
-    const isAtSupport = supportLevels.some(level =>
-      Math.abs(currentLow - level) / level <= tolerance || Math.abs(currentClose - level) / level <= tolerance
-    );
-
-    // 【修正高位信號】：對齊阻力位
-    const isAtResistance = resistanceLevels.some(level =>
-      Math.abs(currentHigh - level) / level <= tolerance || Math.abs(currentClose - level) / level <= tolerance
-    );
-
-    const gy = getGuiYuan(Math.floor(currentClose));
-    const isGyResonance = [3, 6, 9].includes(gy);
-
-    if (isAtSupport && (isGyResonance || data[i].c > data[i].o)) {
-      signals.push({
-        index: i,
-        type: 'BUY_STRONG',
-        label: '🔥 強支撐低位',
-        price: currentClose,
-        size: 14,
-        atr: currentAtr
-      });
-    } else if (isAtResistance && (isGyResonance || data[i].c < data[i].o)) {
-      signals.push({
-        index: i,
-        type: 'SELL_STRONG',
-        label: '⚡ 阻力高位',
-        price: currentClose,
-        size: 14,
-        atr: currentAtr
-      });
-    }
-  }
-
-  return signals;
-}
-
-/**
- * 【修正月線與長週期預測不準確的加權模組 (多時間框架 MTF 對齊)】
- * 動態權重分配：月線佔 50%，週線佔 30%，日線佔 20%
- * 避免單一月線指標因 K 線收盤滯後（整月延遲）產生的鈍化與假突破
- */
-export function calculateMonthlyStrategy(
-  monthlyData: RawKline[],
-  weeklyData?: RawKline[],
-  dailyData?: RawKline[]
-): MonthlyStrategyResult {
-  if (!Array.isArray(monthlyData) || monthlyData.length === 0) {
-    return {
-      status: 'STATUS: HOLD',
-      reason: '數據不足以執行多時間框架對齊',
-      blendedTrend: 0,
-      monthlyTrend: 0,
-      weeklyTrend: 0,
-      dailyTrend: 0,
-      lastClose: 0
-    };
-  }
-
-  const mCloses = monthlyData.map(b => b.c);
-  const mTrendArr = EMA(mCloses, Math.min(20, Math.max(3, mCloses.length)));
-  const mTrend = mTrendArr[mTrendArr.length - 1] || mCloses[mCloses.length - 1];
-
-  let wTrend = mTrend;
-  if (weeklyData && weeklyData.length > 0) {
-    const wCloses = weeklyData.map(b => b.c);
-    const wTrendArr = EMA(wCloses, Math.min(20, Math.max(3, wCloses.length)));
-    wTrend = wTrendArr[wTrendArr.length - 1] || wCloses[wCloses.length - 1];
-  } else {
-    // 若無獨立週線，自適應採用月線短期 EMA(6) 作為中週期代理
-    const fastMTrendArr = EMA(mCloses, Math.min(6, Math.max(2, mCloses.length)));
-    wTrend = fastMTrendArr[fastMTrendArr.length - 1] || mTrend;
-  }
-
-  let dTrend = wTrend;
-  if (dailyData && dailyData.length > 0) {
-    const dCloses = dailyData.map(b => b.c);
-    const dTrendArr = EMA(dCloses, Math.min(20, Math.max(3, dCloses.length)));
-    dTrend = dTrendArr[dTrendArr.length - 1] || dCloses[dCloses.length - 1];
-  } else {
-    // 自適應採用月線超短期 EMA(2) 作為短週期代理
-    const ultraFastArr = EMA(mCloses, Math.min(2, mCloses.length));
-    dTrend = ultraFastArr[ultraFastArr.length - 1] || wTrend;
-  }
-
-  // 動態權重分配：月線佔 50%，週線佔 30%，日線佔 20%
-  const blendedTrend = (mTrend * 0.5) + (wTrend * 0.3) + (dTrend * 0.2);
-  const lastClose = mCloses[mCloses.length - 1];
-
-  let status: 'STRONG_BUY' | 'TAKE_PROFIT' | 'STATUS: HOLD' = 'STATUS: HOLD';
-  let reason = '⚖️ 多空平衡區，維持量化觀望';
-
-  if (lastClose < blendedTrend * 0.95) {
-    status = 'STRONG_BUY';
-    reason = '🔥 月/週/日三軌共振超跌，觸及大週期戰略地板價（強支撐）';
-  } else if (lastClose > blendedTrend * 1.05) {
-    status = 'TAKE_PROFIT';
-    reason = '⚡ 已達月線級別高位阻力區，建議分批獲利減倉';
-  }
-
-  return {
-    status,
-    reason,
-    blendedTrend: Number(blendedTrend.toFixed(2)),
-    monthlyTrend: Number(mTrend.toFixed(2)),
-    weeklyTrend: Number(wTrend.toFixed(2)),
-    dailyTrend: Number(dTrend.toFixed(2)),
-    lastClose: Number(lastClose.toFixed(2))
-  };
 }
 
 // ===================== 369 + 142857 複合共振分析 =====================
@@ -826,21 +679,6 @@ export function calculateCosmicReversalSignal(klineData: RawKline[], currentPeri
   const rsiSeries = calcRSISeries(_closes, 14);
   const macdHistSeries = calcMACDHistSeries(_closes);
 
-  // 月線方向確認用的均線序列（依 profile.maPeriod 於迴圈內取值）
-  const maCache: Record<number, (number | null)[]> = {};
-  const maAt = (n: number) => {
-    if (!maCache[n]) {
-      const arr: (number | null)[] = new Array(_closes.length).fill(null);
-      let sum = 0;
-      for (let k = 0; k < _closes.length; k++) {
-        sum += _closes[k];
-        if (k >= n) sum -= _closes[k - n];
-        if (k >= n - 1) arr[k] = sum / n;
-      }
-      maCache[n] = arr;
-    }
-    return maCache[n];
-  };
   // 月線擺動方向（ZigZag 15%）序列
   const zigZagDirs = calcZigZagDirections(_closes, 15);
 
@@ -924,11 +762,6 @@ export function calculateCosmicReversalSignal(klineData: RawKline[], currentPeri
     const buyIndicatorOk = !((curRsi !== null && curRsi > 65) && macdFalling);
     const sellIndicatorOk = !((curRsi !== null && curRsi < 35) && macdRising);
 
-    const maSeries = maAt(profile.maPeriod);
-    const maNow = maSeries[i];
-    const maPrev = i > 0 ? maSeries[i - 1] : maNow;
-    const crossUp = maNow !== null && maPrev !== null && bar.c > maNow && previous.c <= maPrev;
-    const crossDown = maNow !== null && maPrev !== null && bar.c < maNow && previous.c >= maPrev;
 
     const regime = calcMarketRegime(processedKlines, i, profile.anchorBars);
     const buyRegimeOk = !regime || regime.isDeepZone || !regime.isDownZone;
@@ -1081,7 +914,7 @@ export function runBacktestEngine(
 
   // O(N) 無未來函數時間軸：嚴格計算每根日線截至當日之季/月/週 50% 平衡切線與奇點決策
   const timeline = buildFullPuzzleTimeline(ohlcDaily);
-  const { sorted, overlays, verdicts, prior20Lows } = timeline;
+  const { sorted, overlays, verdicts } = timeline;
 
   let cashPool = initialFund;
   let longShares = 0;
@@ -1130,7 +963,6 @@ export function runBacktestEngine(
       const prevBar = sorted[prevIdx];
       const prevOverlay = overlays[prevIdx];
       const verdict = verdicts[prevIdx];
-      const prior20Low = prior20Lows[prevIdx];
 
       const signalDate = prevOverlay.date;
       const execDate = currBar.date;

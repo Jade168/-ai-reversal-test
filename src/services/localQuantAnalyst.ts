@@ -65,11 +65,9 @@ export function evaluatePuzzleExpertSummary(puzzle: PuzzleState): LocalExpertSum
   const signalBadgeMap: Record<PuzzleState['signal'], string> = {
     GOLDEN_BUY: `🔥【信心 ${puzzle.signalStrength}%・上升浪重倉買入 (${Math.round(puzzle.positionSizingHint * 100)}%)】`,
     BULL_DIP_BUY: `📈【信心 ${puzzle.signalStrength}%・牛市回踩中線拐頭補滿80%】`,
-    ADD_POSITION: `🟢【信心 ${puzzle.signalStrength}%・低位加倉坐貨 (${Math.round(puzzle.positionSizingHint * 100)}%)】`,
     PARTIAL_PROFIT: `🟠【信心 ${puzzle.signalStrength}%・跌穿奇點低減倉45% (保留55%核心底倉)】`,
     FULL_CLEAR: `🚨【信心 ${puzzle.signalStrength}%・跌穿月/季50線 100%清倉禁買】`,
     WEEKLY_BREAK_TRIM: `🚨【信心 ${puzzle.signalStrength}%・週線大陰突變減倉40% (保留60%核心底倉)】`,
-    HALT_REDUCE: `🛑【回撤熔斷控險・強制減半持倉】`,
     SHORT_ENTRY: `🟣【信心 ${puzzle.signalStrength}%・下跌浪≥80輕倉沽空 (${Math.round(puzzle.positionSizingHint * 100)}%)】`,
     COVER_SHORT: `💎【信心 ${puzzle.signalStrength}%・空單100%平倉】`,
     HOLD:
@@ -210,10 +208,6 @@ export function evaluateLocalExpertSummary(input: LocalAnalysisInput): LocalExpe
   return evaluatePuzzleExpertSummary(syntheticPuzzle);
 }
 
-export function generateLocalExpertReport(input: LocalAnalysisInput): string {
-  return evaluateLocalExpertSummary(input).fullReport;
-}
-
 /**
  * 將現有專案的 dailyKlines 組裝為 LocalAnalysisInput（內部直接調用 computePuzzleDecision）
  */
@@ -224,7 +218,7 @@ export function buildLocalAnalysisInput(params: {
   tfdr: MultiTimeframeTFDR;
   latestTfdrPoint?: TFDRPoint | null;
 }): LocalAnalysisInput | null {
-  const { symbol, currentPrice, dailyKlines, tfdr, latestTfdrPoint } = params;
+  const { symbol, currentPrice, dailyKlines, latestTfdrPoint } = params;
   if (!dailyKlines || dailyKlines.length === 0 || !Number.isFinite(currentPrice) || currentPrice <= 0) {
     return null;
   }

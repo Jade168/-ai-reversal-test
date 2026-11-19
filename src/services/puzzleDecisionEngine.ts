@@ -143,11 +143,9 @@ export interface PuzzleVerdict {
   signal:
     | 'GOLDEN_BUY'
     | 'BULL_DIP_BUY'
-    | 'ADD_POSITION'
     | 'PARTIAL_PROFIT'
     | 'FULL_CLEAR'
     | 'WEEKLY_BREAK_TRIM'
-    | 'HALT_REDUCE'
     | 'SHORT_ENTRY'
     | 'COVER_SHORT'
     | 'HOLD';
@@ -281,11 +279,9 @@ export interface PuzzleState {
   signal:
     | 'GOLDEN_BUY'
     | 'BULL_DIP_BUY'
-    | 'ADD_POSITION'
     | 'PARTIAL_PROFIT'
     | 'FULL_CLEAR'
     | 'WEEKLY_BREAK_TRIM'
-    | 'HALT_REDUCE'
     | 'SHORT_ENTRY'
     | 'COVER_SHORT'
     | 'HOLD';
@@ -406,67 +402,6 @@ export function calcRSI(closes: number[], period: number = 14): number {
   if (losses === 0) return 100;
   const rs = gains / period / (losses / period);
   return Number((100 - 100 / (1 + rs)).toFixed(1));
-}
-
-export function resampleByCalendarUTC(
-  sortedDaily: OHLCBar[],
-  unit: 'W' | 'M' | 'Q'
-): (OHLCBar & { isComplete: boolean; periodKey: string })[] {
-  if (!sortedDaily.length) return [];
-  const groups: {
-    key: string;
-    date: string;
-    open: number;
-    high: number;
-    low: number;
-    close: number;
-  }[] = [];
-  const groupIndex = new Map<string, number>();
-
-  for (let i = 0; i < sortedDaily.length; i++) {
-    const bar = sortedDaily[i];
-    const meta = getCalendarMeta(bar.date);
-    const key = unit === 'M' ? meta.mKey : unit === 'Q' ? meta.qKey : meta.wKey;
-    const existingIdx = groupIndex.get(key);
-    if (existingIdx === undefined) {
-      groupIndex.set(key, groups.length);
-      groups.push({
-        key,
-        date: bar.date,
-        open: bar.open,
-        high: bar.high,
-        low: bar.low,
-        close: bar.close
-      });
-    } else {
-      const g = groups[existingIdx];
-      g.date = bar.date;
-      if (bar.high > g.high) g.high = bar.high;
-      if (bar.low < g.low) g.low = bar.low;
-      g.close = bar.close;
-    }
-  }
-
-  groups.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  const lastMeta = getCalendarMeta(sortedDaily[sortedDaily.length - 1].date);
-
-  return groups.map((g, idx) => {
-    let isComplete = true;
-    if (idx === groups.length - 1) {
-      if (unit === 'W') isComplete = lastMeta.isWeekEnd;
-      else if (unit === 'M') isComplete = lastMeta.isMonthEnd;
-      else if (unit === 'Q') isComplete = lastMeta.isQuarterEnd;
-    }
-    return {
-      date: g.date,
-      open: g.open,
-      high: g.high,
-      low: g.low,
-      close: g.close,
-      isComplete,
-      periodKey: g.key
-    };
-  });
 }
 
 interface IncrementalPeriodState {
@@ -2359,16 +2294,6 @@ export function buildNestedPuzzlePiP(
   };
 }
 
-export function computePuzzleOverlaySeries(
-  allDailyBars: OHLCBar[],
-  windowBars: number = 90
-): OverlayPoint[] {
-  if (!allDailyBars?.length) return [];
-  const timeline = buildFullPuzzleTimeline(allDailyBars);
-  const count = Math.max(1, windowBars);
-  return timeline.overlays.slice(-count);
-}
-
 export function computePuzzleDecision(
   symbol: string,
   allDailyBars: OHLCBar[],
@@ -2505,11 +2430,9 @@ export function computePuzzleDecision(
   const actionTitleMap: Record<PuzzleVerdict['signal'], string> = {
     GOLDEN_BUY: '🔥 上升浪升穿奇點高・80% 重倉買入坐貨（只買不空）',
     BULL_DIP_BUY: '📈 牛市回踩中線拐頭・補滿80%目標倉位（唔等深跌奇點底）',
-    ADD_POSITION: '🟢 上升浪低位加倉坐貨',
     PARTIAL_PROFIT: '🟠 奇點沽跌穿奇點低・減倉45%（保留55%核心底倉）',
     FULL_CLEAR: '🚨 跌穿月/季50中間線・100%清倉多單並嚴禁做多',
     WEEKLY_BREAK_TRIM: '🚨 週線大陰突變・減倉40%（保留60%核心底倉吃主升浪）',
-    HALT_REDUCE: '🛑 回撤熔斷控險・減半倉位',
     SHORT_ENTRY: '🟣 下跌浪奇點沽跌穿奇點低・開立35%輕倉空單',
     COVER_SHORT: '💎 奇點買升穿奇點高或收復50線・100%平空',
     HOLD: isBullRegime

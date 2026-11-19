@@ -197,13 +197,6 @@ function aggregateBarsByStep(
   return { closes, highs, lows };
 }
 
-export interface AlignedTFDRPoint {
-  timestamp: number;
-  dailyScore: number;
-  weeklyScore: number;
-  monthlyScore: number;
-}
-
 export function computeMultiTimeframeTFDRFromDaily(dailyBars: RawKline[]): MultiTimeframeTFDR {
   if (!dailyBars || dailyBars.length === 0) {
     return evaluateMultiTimeframeTFDR(50, 50, 50);
@@ -224,34 +217,4 @@ export function computeMultiTimeframeTFDRFromDaily(dailyBars: RawKline[]): Multi
   const monthlyScore = monthlySeries.length > 0 ? monthlySeries[monthlySeries.length - 1].score : 50;
 
   return evaluateMultiTimeframeTFDR(dailyScore, weeklyScore, monthlyScore);
-}
-
-export function computeAlignedMultiTimeframeTFDRSeries(dailyBars: RawKline[]): AlignedTFDRPoint[] {
-  if (!dailyBars || dailyBars.length === 0) return [];
-
-  const dailyCloses = dailyBars.map(b => Number(b.c));
-  const dailyHighs = dailyBars.map(b => Number(b.h));
-  const dailyLows = dailyBars.map(b => Number(b.l));
-  const dailySeries = calculateTFDRSeries(dailyCloses, dailyHighs, dailyLows);
-
-  const weeklyAgg = aggregateBarsByStep(dailyBars, 5);
-  const weeklySeries = calculateTFDRSeries(weeklyAgg.closes, weeklyAgg.highs, weeklyAgg.lows);
-
-  const monthlyAgg = aggregateBarsByStep(dailyBars, 21);
-  const monthlySeries = calculateTFDRSeries(monthlyAgg.closes, monthlyAgg.highs, monthlyAgg.lows);
-
-  return dailyBars.map((bar, i) => {
-    const ts = Number.isFinite(Number(bar.timestamp))
-      ? Number(bar.timestamp)
-      : Date.parse(String(bar.date || ''));
-    const wIdx = Math.min(Math.max(0, weeklySeries.length - 1), Math.floor(i / 5));
-    const mIdx = Math.min(Math.max(0, monthlySeries.length - 1), Math.floor(i / 21));
-
-    return {
-      timestamp: Number.isFinite(ts) ? ts : i,
-      dailyScore: dailySeries[i]?.score ?? 50,
-      weeklyScore: weeklySeries[wIdx]?.score ?? 50,
-      monthlyScore: monthlySeries[mIdx]?.score ?? 50,
-    };
-  });
 }
