@@ -55,6 +55,7 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
 
   const signalLabelMap: Record<PuzzleState['signal'], string> = {
     GOLDEN_BUY: '🔥 80%重倉買入坐貨',
+    BULL_DIP_BUY: '📈 牛市回踩中線拐頭補滿80%',
     ADD_POSITION: '🟢 極底加倉坐貨',
     PARTIAL_PROFIT: '🟠 減倉45%留55%底倉',
     FULL_CLEAR: '🚨 破50線100%清倉禁買',

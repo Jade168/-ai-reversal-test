@@ -64,6 +64,7 @@ export function evaluatePuzzleExpertSummary(puzzle: PuzzleState): LocalExpertSum
 
   const signalBadgeMap: Record<PuzzleState['signal'], string> = {
     GOLDEN_BUY: `🔥【信心 ${puzzle.signalStrength}%・上升浪重倉買入 (${Math.round(puzzle.positionSizingHint * 100)}%)】`,
+    BULL_DIP_BUY: `📈【信心 ${puzzle.signalStrength}%・牛市回踩中線拐頭補滿80%】`,
     ADD_POSITION: `🟢【信心 ${puzzle.signalStrength}%・低位加倉坐貨 (${Math.round(puzzle.positionSizingHint * 100)}%)】`,
     PARTIAL_PROFIT: `🟠【信心 ${puzzle.signalStrength}%・跌穿奇點低減倉45% (保留55%核心底倉)】`,
     FULL_CLEAR: `🚨【信心 ${puzzle.signalStrength}%・跌穿月/季50線 100%清倉禁買】`,

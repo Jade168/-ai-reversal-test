@@ -142,6 +142,7 @@ export interface PuzzleVerdict {
   isPuzzleCross: boolean;
   signal:
     | 'GOLDEN_BUY'
+    | 'BULL_DIP_BUY'
     | 'ADD_POSITION'
     | 'PARTIAL_PROFIT'
     | 'FULL_CLEAR'
@@ -200,13 +201,15 @@ export interface PuzzleVerdict {
   monthlyTopLock?: boolean; // 規則 B：月線破底禁買鎖是否生效（過熱期月 HA 破底，100% 禁買）
   weeklyBreakLock?: boolean; // 週線突變禁買鎖是否生效（週線大陰跌穿前兩枝低位，100% 禁買）
   isWeeklyBreakClear?: boolean; // 本次 FULL_CLEAR 是否由週線突變觸發（結構突變即離場），而非跌穿月／季 50 線
-  isWeeklyBreakTrim?: boolean; // 本次 WEEKLY_BREAK_TRIM 是否由週線突變觸發（S1 減 20%／S2 減 40%，唔係 100% 全清）
+  isWeeklyBreakTrim?: boolean; // 本次 WEEKLY_BREAK_TRIM 是否由週線突變觸發（S2 減 40%，唔係 100% 全清；S1 零 Trim 死抱，唔減倉）
   isWeeklyReclaimUnlock?: boolean; // 本次週線鎖是否由第二條解鎖路解除（企返 50 線＋月動能回暖，或收市升穿破位週高點）
   buyTier?: 1 | 2 | null; // 分級做 T：本次 GOLDEN_BUY 嘅級別（Tier 1 中線回調買 50%／Tier 2 深回調買 100%），非買入時為 null
   isChaseBuy?: boolean; // 本次 GOLDEN_BUY 是否拋物線逼空追擊買入（48 < dTfdr ≤ 65，三級 HA 齊升，日 HA 轉陽破前高，買 40%）
   isUnlockCapBuy?: boolean; // 本次 GOLDEN_BUY 是否畀週線鎖解鎖限倉壓到 40%（右側確認倉，唔係底部全倉）
   isWeeklyInstantUnlock?: boolean; // 本次 GOLDEN_BUY 是否黃金大底即時解鎖週線鎖（武裝期間 dTfdr ≤ 25＋本週高升穿上週高，當日即解鎖，唔使等星期五收陽）
   isMa3TopExit?: boolean; // 本次 PARTIAL_PROFIT 是否 3MA 觸角逃頂（ma3 刺穿 band90 後拐頭向下）；回測用 +5% 浮盈門檻執行，唔受護盾 +8% 限制
+  isBullDipBuy?: boolean; // 本次 BULL_DIP_BUY 是否牛市回踩中線拐頭買入（S1/S2 回踩日線中間線＋ma3 拐頭向上＋dTfdr < 62，補滿 80% 目標倉位，唔使等深跌奇點底）
+  traderDirective?: string; // 交易員指令（一行白話：四態通道＋方向＋有效買入上限＋鎖狀態），交易員一睇就知而家係上升定下跌通道、買得幾多、禁做咩，唔會錯沽／錯買
   compactHint: string;
 }
 
@@ -277,6 +280,7 @@ export interface PuzzleState {
   regime: 'UPTREND_CHANNEL' | 'DOWNTREND_CHANNEL' | 'CONSOLIDATION';
   signal:
     | 'GOLDEN_BUY'
+    | 'BULL_DIP_BUY'
     | 'ADD_POSITION'
     | 'PARTIAL_PROFIT'
     | 'FULL_CLEAR'
@@ -869,9 +873,12 @@ export const NO_CHASE_BUY_WTFDR = 68; // 高位禁追天花板：週線動能 wT
 export const NO_CHASE_BUY_DTFDR_S3 = 45; // S3 過渡警戒期（季線 50–60）收緊：日線動能 dTfdr ≥ 45 即禁買（弱勢震盪股唔好半山腰追高）
 export const SINGULARITY_BUY_WINDOW_BARS = 7; // 奇點買時效窗：武裝後 1–7 個交易日內先有效，超過 7 日自動過期作廢
 export const GOLDEN_BOTTOM_DTFDR = 25; // 黃金大底：買入武裝期間日線動能曾跌到 ≤ 25（深超賣真底部），先有資格即時解鎖週線鎖
-export const WEEKLY_BREAK_TRIM_RATIO = 0.4; // 週線突變減倉 40%（S2 牛市洗盤，死守 60% 核心底倉；只有 S4 先 100% 全清）
-export const WEEKLY_BREAK_TRIM_RATIO_S1 = 0.2; // S1 最強主升浪：週線小幅突變只需象徵性減倉 20%（死守 80% 底倉）
+export const WEEKLY_BREAK_TRIM_RATIO = 0.4; // 週線突變減倉 40%（S2 牛市洗盤，死守 60% 核心底倉；只有 S4 先 100% 全清；S1 零 Trim 死抱，唔減倉）
 export const WEEKLY_BREAK_ARM_DAYS = 2; // 週線突變 2 日確認防抖（週線 HA 週中逐日重算會閃進閃出，連續 2 日都滿足突變條件先確認，過濾假破位）
+// ── S1 極限泡沫區逃頂＋牛市回踩中線拐頭上車（讓利潤奔跑，2026-11-19）──
+export const S1_BUBBLE_DTFDR = 92; // S1 極限泡沫區：日線動能 dTfdr ≥ 92 先准許 3MA 觸角逃頂減倉（唔係泡沫區，S1 死抱唔賣）
+export const S1_BUBBLE_TRIM_RATIO = 0.25; // S1 極限泡沫區逃頂最多減倉 25%（死守 75%–80% 核心底倉吃滿整段魚身）
+export const BULL_DIP_MIDLINE_TOLERANCE = 1.02; // 牛市回踩中線：當日低位 ≤ 日線中間線 × 1.02（誤差 ≤ 2%），即回踩到 20 日中線附近
 // ── 拋物線逼空主升浪順勢追擊 ──
 export const CHASE_BUY_TFDR_LOW = 48; // 追擊區間下限：dTfdr > 48（唔係 Tier 1 回調區）
 export const CHASE_BUY_TFDR_HIGH = 65; // 追擊區間上限：dTfdr ≤ 65（中線強勢區）
@@ -1262,6 +1269,7 @@ export function evaluatePuzzleVerdict(
   let isStructuralStop = false;
   let buyTier: 1 | 2 | null = null; // 分級做 T：本次 GOLDEN_BUY 嘅級別（Tier 1 買 50%／Tier 2 買 100%）
   let isMa3TopExit = false; // 本次 PARTIAL_PROFIT 是否 3MA 觸角逃頂（ma3 刺穿 band90 後拐頭向下）
+  let isBullDipBuy = false; // 本次 BULL_DIP_BUY 是否牛市回踩中線拐頭買入（S1/S2 回踩日線中間線＋ma3 拐頭向上＋dTfdr < 62）
 
   if (isBullRegime) {
     // 轉回上升浪：清除下跌浪的沽空武裝；多單的 lastSellPrice 保留作補回折扣參考
@@ -1321,11 +1329,14 @@ export function evaluatePuzzleVerdict(
       //     （dTfdr ≥ 88）先賣，賣喺最頂尖區域。浮盈門檻（todayOpen ≥ avgCost × 1.05）由回測
       //     分支 E 檢查（isMa3TopExit），引擎呢度只認技術形態。觸發後同樣設定 lastSellPrice，
       //     等日後回調出現新買入武裝先可以補回；同時清除奇點沽武裝（本波段已高拋一次，唔重複減倉）。
+      //     S1 最強主升浪例外（讓利潤奔跑）：只有喺極限泡沫區（dTfdr ≥ 92）先准許逃頂，
+      //     而且最多減倉 25%（死守 75%–80% 核心底倉），唔係泡沫區 S1 死抱唔賣。
       curr.ma3 != null &&
       curr.prevMa3 != null &&
       curr.band90 != null &&
       curr.ma3 > curr.band90 &&
-      curr.ma3 < curr.prevMa3
+      curr.ma3 < curr.prevMa3 &&
+      (marketState !== 'S1' || dTfdr >= S1_BUBBLE_DTFDR)
     ) {
       isMa3TopExit = true;
       trigger.lastSellPrice = close;
@@ -1335,7 +1346,7 @@ export function evaluatePuzzleVerdict(
       trigger.sellDate = null;
       trigger.sellBestHigh = null;
       signal = 'PARTIAL_PROFIT';
-      sizeRatio = PARTIAL_PROFIT_RATIO;
+      sizeRatio = marketState === 'S1' ? S1_BUBBLE_TRIM_RATIO : PARTIAL_PROFIT_RATIO;
     } else if (trigger.buyHigh != null && close > trigger.buyHigh) {
       // (2) 再檢查買入扣扳機：收市升穿早前已武裝的奇點最高位
       firedBuyHigh = trigger.buyHigh;
@@ -1426,6 +1437,31 @@ export function evaluatePuzzleVerdict(
         signal = 'HOLD';
         sizeRatio = 0;
       }
+    } else if (
+      // (2b) 牛市回踩中線拐頭上車（讓利潤奔跑：S1/S2 唔再死等一年先出現一次嘅深跌奇點底）：
+      //     大勢 S1/S2（價錢穩站季／月 50 線之上），且未觸發規則 A 月線過熱、規則 B 月線破底鎖、
+      //     週線突變鎖（maxBuyRatio > 0 已涵蓋規則 B／週線鎖；規則 A 只壓上限到 20%，要額外排除）。
+      //     當日低位回踩到日線中間線（20 日線）附近（low ≤ midline × 1.02），且 ma3 拐頭向上
+      //     （ma3 > prevMa3，短線動能翻多），且 dTfdr < 62（唔追高），即直接買入補滿到四態上限
+      //     （S1/S2 80%）。回測分支 F 用總淨值計倉位補差額；已有倉在手時受「順勢加倉唔攤平」
+      //     規管（開盤價要高過平均成本先補），唔會喺跌勢中加倉接飛刀。唔碰奇點武裝狀態，
+      //     奇點買武裝照常保留，等升穿奇點高再觸發 GOLDEN_BUY。
+      (marketState === 'S1' || marketState === 'S2') &&
+      !monthlyOverheat &&
+      maxBuyRatio > 0 &&
+      curr.midline != null &&
+      low <= curr.midline * BULL_DIP_MIDLINE_TOLERANCE &&
+      curr.ma3 != null &&
+      curr.prevMa3 != null &&
+      curr.ma3 > curr.prevMa3 &&
+      dTfdr < NO_CHASE_BUY_DTFDR
+    ) {
+      isBullDipBuy = true;
+      signal = 'BULL_DIP_BUY';
+      sizeRatio = maxBuyRatio;
+      isPuzzleCross = true;
+      tfdrTurnUp = true;
+      invalidationPrice = Number(Math.min(fullClearLine, Math.min(prior20Low, low) * 0.96).toFixed(2));
     } else {
       // (3) 無扣扳機：只做預警武裝／更新奇點簇極值 K 線（賣出：簇內最高 high 的 K 線；買入：簇內最低 low 的 K 線）
       if (dTfdr >= SINGULARITY_SELL_TFDR) {
@@ -1600,13 +1636,14 @@ export function evaluatePuzzleVerdict(
 
   // 結構突變即離場（Rule 2）：週線大陰跌穿前兩枝低位嗰日（經 2 日確認防抖），唔問盈虧、唔看護盾，
   //   第一時間離場，唔等跌穿月／季 50 線先割肉（AAPL 2012-10 見頂第一時間逃頂，唔拖到 2013-01）。
-  //   權限拆分＋按大勢分級：只有真正跌穿月／季 50 線（S4 大跌浪）先 FULL_CLEAR 100% 全清；
-  //   S1 最強主升浪只減 20%（死守 80% 底倉），S2 牛市洗盤減 40%（死守 60% 底倉）；
-  //   S3 過渡警戒期完全唔觸發 TRIM（避免同「跌穿月 50 減半」雙重疊加砍倉，鎖仍然生效禁買，
-  //   減倉由 S3 減半機制 E2 處理）。只在鎖定由 false→true 嘅觸發日覆寫一次；鎖定持續期間
-  //   其後嗰啲日只係 HOLD（maxBuyRatio=0 禁買），唔重複發離場訊號。回測分支 D／D2 會按
-  //   isWeeklyBreakClear／isWeeklyBreakTrim 改寫 log 原因。TRIM 同 PARTIAL_PROFIT 一樣設定
-  //   lastSellPrice（減倉價），日後回調可補回。
+  //   權限拆分＋按大勢分級（讓利潤奔跑）：只有真正跌穿月／季 50 線（S4 大跌浪）先 FULL_CLEAR 100% 全清；
+  //   S2 牛市洗盤減 40%（死守 60% 底倉）；S1 最強主升浪零 Trim 死抱（完全唔減倉，唔好喺主升浪
+  //   中途站畀週線小波動震落車）；S3 過渡警戒期完全唔觸發 TRIM（避免同「跌穿月 50 減半」雙重疊加
+  //   砍倉，鎖仍然生效禁買，減倉由 S3 減半機制 E2 處理）。S1/S3 唔減倉唔代表唔設防：週線鎖仍然
+  //   生效禁買（maxBuyRatio=0），解鎖要靠第二條路（企返 50 線＋月動能回暖／升穿破位週高）。
+  //   只在鎖定由 false→true 嘅觸發日覆寫一次；鎖定持續期間其後嗰啲日只係 HOLD（maxBuyRatio=0 禁買），
+  //   唔重複發離場訊號。回測分支 D／D2 會按 isWeeklyBreakClear／isWeeklyBreakTrim 改寫 log 原因。
+  //   TRIM 同 PARTIAL_PROFIT 一樣設定 lastSellPrice（減倉價），日後回調可補回。
   let isWeeklyBreakClear = false;
   let isWeeklyBreakTrim = false;
   if (weeklyBreakJustTriggered) {
@@ -1614,15 +1651,10 @@ export function evaluatePuzzleVerdict(
       signal = 'FULL_CLEAR';
       sizeRatio = 1.0;
       isWeeklyBreakClear = true;
-    } else if (marketState === 'S3') {
-      // S3：唔觸發 TRIM（唔覆寫 signal，唔設 lastSellPrice）；鎖仍然生效（maxBuyRatio=0 禁買），
-      // 減倉由 S3 首次跌穿月 50 減半機制（回測分支 E2）處理，避免雙重砍倉。
-    } else if (marketState === 'S1') {
-      signal = 'WEEKLY_BREAK_TRIM';
-      sizeRatio = WEEKLY_BREAK_TRIM_RATIO_S1;
-      isWeeklyBreakTrim = true;
-      trigger.lastSellPrice = close;
-      trigger.lastSellIndex = idx >= 0 ? idx : null;
+    } else if (marketState === 'S3' || marketState === 'S1') {
+      // S1 零 Trim 死抱／S3 唔觸發 TRIM（唔覆寫 signal，唔設 lastSellPrice）；鎖仍然生效
+      // （maxBuyRatio=0 禁買）。S1 唔減倉：主升浪中途嘅週線小波動唔值得交籌碼；
+      // S3 減倉由首次跌穿月 50 減半機制（回測分支 E2）處理，避免雙重砍倉。
     } else {
       signal = 'WEEKLY_BREAK_TRIM';
       sizeRatio = WEEKLY_BREAK_TRIM_RATIO;
@@ -1632,11 +1664,40 @@ export function evaluatePuzzleVerdict(
     }
   }
 
-  const regimeBanner = isBullRegime
-    ? '穩站月/季50之上・上升浪只買不空'
-    : '跌穿月/季50之下・下跌浪禁買只空';
+  // 交易員指令（一行白話，唔使交易員自己由數字推斷通道）：引擎已經計好四態通道（S1/S2 上升、
+  //   S3 過渡、S4 下跌）＋有效買入上限（maxBuyRatio，已扣減規則 A 20%／規則 B 0／週線鎖 0）
+  //   ＋鎖狀態，組合成一句指令，交易員一睇就知而家係咩通道、買得幾多、禁做咩，唔會錯沽／錯買。
+  //   舊版只講二元「穩站月/季50之上・上升浪只買不空」／「跌穿月/季50之下・下跌浪禁買只空」，
+  //   S1/S2/S3 睇落一模一樣，交易員分唔到主升浪（上限 80%）同過渡警戒（上限 30%），
+  //   見到 PARTIAL_PROFIT「減倉45%」又以為見頂清晒倉——而家通道＋上限＋鎖一次過講清楚。
+  //   呢句同時係 compactHint 嘅開頭（交易紀錄 puzzleHint）同專家「大勢定性」行（trendBannerLabel），
+  //   兩邊同一個來源，唔會打架。
+  const channelLabel =
+    marketState === 'S1'
+      ? '🟢 上升通道・主升浪'
+      : marketState === 'S2'
+      ? '🟢 上升通道・牛市洗盤'
+      : marketState === 'S3'
+      ? '🟡 過渡通道・警戒'
+      : '🔴 下跌通道・大跌浪';
+  const directionLabel =
+    marketState === 'S4'
+      ? '禁買，防守為主'
+      : marketState === 'S3'
+      ? '小倉試探，禁重倉'
+      : '只做多，禁沽空';
+  const capLabel =
+    maxBuyRatio <= 0 ? '買入上限 0%・禁買' : `買入上限 ${Math.round(maxBuyRatio * 100)}%`;
+  const lockLabel = monthlyTopLock
+    ? '｜月線大頂鎖'
+    : weeklyBreakLock
+    ? '｜週線突變鎖'
+    : monthlyOverheat
+    ? '｜月線過熱'
+    : '';
+  const traderDirective = `${channelLabel}｜${directionLabel}｜${capLabel}${lockLabel}`;
   const haTag = `日HA:${dBreakUp ? '升穿▲' : dBreakDown ? '跌穿▼' : dHaBull ? '陽' : '陰'}/週HA:${wBreakUp ? '升穿▲' : wBreakDown ? '跌穿▼' : curr.wHaBull ? '陽' : '陰'}`;
-  let compactHint = `${regimeBanner}｜四態:${marketState}｜月50:$${m50Trend.toFixed(2)} 季50:$${q50Trend.toFixed(2)}｜${haTag}｜日TFDR:${dTfdr}`;
+  let compactHint = `${traderDirective}｜四態:${marketState}｜月50:$${m50Trend.toFixed(2)} 季50:$${q50Trend.toFixed(2)}｜${haTag}｜日TFDR:${dTfdr}`;
   if (weeklyBreakLock) {
     compactHint += `｜週線突變禁買鎖`;
   } else if (monthlyTopLock) {
@@ -1666,7 +1727,10 @@ export function evaluatePuzzleVerdict(
     compactHint += `｜企返50線＋月動能回暖解鎖週線鎖`;
   }
   if (isMa3TopExit) {
-    compactHint += `｜3MA刺穿band90拐頭・逃頂高拋45%`;
+    compactHint += `｜3MA刺穿band90拐頭・逃頂高拋${Math.round(sizeRatio * 100)}%${marketState === 'S1' ? '（S1極限泡沫區）' : ''}`;
+  }
+  if (isBullDipBuy) {
+    compactHint += `｜牛市回踩中線拐頭・補滿${Math.round(sizeRatio * 100)}%`;
   }
 
   // 在 compactHint 標註本日扣扳機價位／現正武裝中的奇點價位，方便回測 log 與 UI 對數
@@ -1754,6 +1818,8 @@ export function evaluatePuzzleVerdict(
     weeklyBreakLock,
     isWeeklyBreakClear,
     isWeeklyBreakTrim,
+    isBullDipBuy,
+    traderDirective,
     buyTier,
     isChaseBuy,
     isUnlockCapBuy,
@@ -2355,9 +2421,14 @@ export function computePuzzleDecision(
 
   const isBullRegime = Boolean(verdict.reasons.isBullRegime ?? verdict.regime === 'BULL');
   const isBearRegime = !isBullRegime;
-  const trendBannerLabel = isBullRegime
-    ? '穩站月/季50之上・上升浪只買不空'
-    : '跌穿月/季50之下・下跌浪禁買只空';
+  // 專家「大勢定性」行用 verdict 嘅交易員指令（四態通道＋方向＋有效買入上限＋鎖狀態），
+  // 唔再用二元「穩站月/季50之上・上升浪只買不空」——S1/S2/S3 喺舊版睇落一模一樣，交易員分唔到
+  // 主升浪（上限 80%）同過渡警戒（上限 30%）。fallback 只係防禦（verdict 一定有 traderDirective）。
+  const trendBannerLabel =
+    verdict.traderDirective ??
+    (isBullRegime
+      ? '穩站月/季50之上・上升浪只買不空'
+      : '跌穿月/季50之下・下跌浪禁買只空');
 
   const tol = Math.max(currOverlay.close * 0.005, featD.atr * 0.8);
   const invalidationPrice = verdict.invalidationPrice ?? Number(Math.min(m50Line, q50Line).toFixed(2));
@@ -2433,6 +2504,7 @@ export function computePuzzleDecision(
 
   const actionTitleMap: Record<PuzzleVerdict['signal'], string> = {
     GOLDEN_BUY: '🔥 上升浪升穿奇點高・80% 重倉買入坐貨（只買不空）',
+    BULL_DIP_BUY: '📈 牛市回踩中線拐頭・補滿80%目標倉位（唔等深跌奇點底）',
     ADD_POSITION: '🟢 上升浪低位加倉坐貨',
     PARTIAL_PROFIT: '🟠 奇點沽跌穿奇點低・減倉45%（保留55%核心底倉）',
     FULL_CLEAR: '🚨 跌穿月/季50中間線・100%清倉多單並嚴禁做多',

@@ -1498,7 +1498,7 @@ export function runBacktestEngine(
         verdict.maxBuyRatio ?? 0.8
       );
       const isTopUpCandidate =
-        verdict.signal === 'GOLDEN_BUY' &&
+        (verdict.signal === 'GOLDEN_BUY' || verdict.signal === 'BULL_DIP_BUY') &&
         !suppressGoldenBuy &&
         !isBuybackVerdict &&
         !pendingBuybackReady &&
@@ -1510,7 +1510,9 @@ export function runBacktestEngine(
         shortShares === 0 &&
         isBullRegime &&
         !entryLocked &&
-        ((verdict.signal === 'GOLDEN_BUY' && !suppressGoldenBuy) || pendingBuybackReady) &&
+        ((verdict.signal === 'GOLDEN_BUY' && !suppressGoldenBuy) ||
+          verdict.signal === 'BULL_DIP_BUY' ||
+          pendingBuybackReady) &&
         canAct &&
         !freshBuyBlockedByPosition
       ) {
@@ -1543,6 +1545,15 @@ export function runBacktestEngine(
           const pctLabel = Math.round(labelRatio * 100);
           const inBand = todayOpen <= Math.max(w50 * 1.15, prevBar.high * 1.05);
           const complianceTag = inBand ? '✅ 精準執行' : '⚠️ 偏離區間';
+          // 買入動作標籤（BULL_DIP_BUY 牛市回踩中線拐頭買入獨立標示，唔同奇點升穿買入混淆）
+          const buyActionLabel =
+            verdict.isBullDipBuy === true
+              ? `牛市回踩中線拐頭買入${pctLabel}%（總倉${Math.round(targetPosRatio * 100)}%）`
+              : execBuybackRef != null
+              ? `高拋後補回買入${pctLabel}%`
+              : canTopUp
+              ? `主升浪補齊買入${pctLabel}%（總倉${Math.round(targetPosRatio * 100)}%）`
+              : `上升浪極底重倉買入${pctLabel}%`;
 
           tradeLogs.unshift({
             date: execDate,
@@ -1551,24 +1562,26 @@ export function runBacktestEngine(
             puzzleHint: hintBase,
             complianceTag,
             type: 'STRONG BUY',
-            action: execBuybackRef != null
-              ? `🔥 順勢引擎・高拋後補回買入${pctLabel}%`
-              : canTopUp
-              ? `🔥 順勢引擎・主升浪補齊買入${pctLabel}%（總倉${Math.round(targetPosRatio * 100)}%）`
-              : `🔥 順勢引擎・上升浪極底重倉買入${pctLabel}%`,
+            action: `🔥 順勢引擎・${buyActionLabel}`,
             shares,
             units: `現金池${pctLabel}%坐貨主升浪`,
-            confidence: execBuybackRef != null
-              ? `升穿奇點高 $${execSingularityHigh.toFixed(2)}｜補回單：開盤 $${todayOpen.toFixed(2)} < 上次沽價 $${execBuybackRef.toFixed(2)}×96% ($${(execBuybackRef * 0.96).toFixed(2)})｜週線未穿50`
-              : `穩站月/季50之上｜收市升穿奇點高 $${execSingularityHigh.toFixed(2)}`,
+            confidence:
+              verdict.isBullDipBuy === true
+                ? `回踩日線中間線 $${(prevOverlay.midline ?? 0).toFixed(2)}｜ma3 $${(prevOverlay.ma3 ?? 0).toFixed(2)} 拐頭向上｜日TFDR ${prevOverlay.dTfdr} < 62`
+                : execBuybackRef != null
+                ? `升穿奇點高 $${execSingularityHigh.toFixed(2)}｜補回單：開盤 $${todayOpen.toFixed(2)} < 上次沽價 $${execBuybackRef.toFixed(2)}×96% ($${(execBuybackRef * 0.96).toFixed(2)})｜週線未穿50`
+                : `穩站月/季50之上｜收市升穿奇點高 $${execSingularityHigh.toFixed(2)}`,
             price: todayOpen.toFixed(2),
             totalHolding: longShares,
             holdingType: 'LONG',
-            source: execBuybackRef != null
-              ? `高拋後補回：收市升穿奇點高 $${execSingularityHigh.toFixed(2)}，週線未穿 50 且開盤 $${todayOpen.toFixed(2)} 低於上次沽價 $${execBuybackRef.toFixed(2)} 的 96%，${pctLabel}%補回坐貨`
-              : `上升浪大勢內 (收盤$${prevOverlay.close} ≥ 月50 $${m50.toFixed(2)} 或 季50 $${q50.toFixed(2)})，收市升穿奇點高 $${execSingularityHigh.toFixed(2)}，${pctLabel}%重倉買入坐貨`,
+            source:
+              verdict.isBullDipBuy === true
+                ? `S1/S2 牛市回踩：當日低位靠近日線中間線 $${(prevOverlay.midline ?? 0).toFixed(2)}（誤差 ≤2%），ma3 拐頭向上，日 TFDR ${prevOverlay.dTfdr} < 62，${pctLabel}% 補滿至 ${Math.round(targetPosRatio * 100)}% 目標倉位`
+                : execBuybackRef != null
+                ? `高拋後補回：收市升穿奇點高 $${execSingularityHigh.toFixed(2)}，週線未穿 50 且開盤 $${todayOpen.toFixed(2)} 低於上次沽價 $${execBuybackRef.toFixed(2)} 的 96%，${pctLabel}%補回坐貨`
+                : `上升浪大勢內 (收盤$${prevOverlay.close} ≥ 月50 $${m50.toFixed(2)} 或 季50 $${q50.toFixed(2)})，收市升穿奇點高 $${execSingularityHigh.toFixed(2)}，${pctLabel}%重倉買入坐貨`,
             profitPct: null,
-            msg: `[${execDate}] 🔥 順勢引擎・上升浪極底重倉買入${pctLabel}% ${shares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (現金池${pctLabel}%・含0.25%成本)`
+            msg: `[${execDate}] 🔥 順勢引擎・${buyActionLabel} ${shares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (現金池${pctLabel}%・含0.25%成本)`
           });
         }
       }
