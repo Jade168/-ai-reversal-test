@@ -56,6 +56,11 @@ export interface BacktestStats {
   finalFund: string;
   tradeCount: number;
   annualReturn: string;
+  // 週線突變診斷埋點（文心 AI 診斷）：用數據驗證回補率，唔再靠猜
+  trimmedCashRedeployedRatio?: string; // trim 現金回補率（TRIM 釋放嘅現金有幾多買返入市；0% 即現金凍結）
+  falseFullClearCount?: number; // 假 FULL_CLEAR 次數（非 S4 週線突變誤清倉；應為 0）
+  avgBullRetentionRatio?: string; // 大升浪（S1/S2）平均底倉保留率（目標 >= 60%）
+  cashIdleDays?: number; // 現金凍結日數（週線鎖生效且現金閒置 >20% 總值嘅日數）
 }
 
 export interface TradeLog {

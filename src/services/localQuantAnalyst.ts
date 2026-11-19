@@ -67,6 +67,7 @@ export function evaluatePuzzleExpertSummary(puzzle: PuzzleState): LocalExpertSum
     ADD_POSITION: `🟢【信心 ${puzzle.signalStrength}%・低位加倉坐貨 (${Math.round(puzzle.positionSizingHint * 100)}%)】`,
     PARTIAL_PROFIT: `🟠【信心 ${puzzle.signalStrength}%・跌穿奇點低減倉45% (保留55%核心底倉)】`,
     FULL_CLEAR: `🚨【信心 ${puzzle.signalStrength}%・跌穿月/季50線 100%清倉禁買】`,
+    WEEKLY_BREAK_TRIM: `🚨【信心 ${puzzle.signalStrength}%・週線大陰突變減倉40% (保留60%核心底倉)】`,
     HALT_REDUCE: `🛑【回撤熔斷控險・強制減半持倉】`,
     SHORT_ENTRY: `🟣【信心 ${puzzle.signalStrength}%・下跌浪≥80輕倉沽空 (${Math.round(puzzle.positionSizingHint * 100)}%)】`,
     COVER_SHORT: `💎【信心 ${puzzle.signalStrength}%・空單100%平倉】`,

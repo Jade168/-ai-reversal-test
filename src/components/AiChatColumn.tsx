@@ -58,6 +58,7 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
     ADD_POSITION: '🟢 極底加倉坐貨',
     PARTIAL_PROFIT: '🟠 減倉45%留55%底倉',
     FULL_CLEAR: '🚨 破50線100%清倉禁買',
+    WEEKLY_BREAK_TRIM: '🚨 週線突變減倉40%留60%底倉',
     HALT_REDUCE: '🛑 25%回撤熔斷減半',
     SHORT_ENTRY: '🟣 35%輕倉順勢沽空',
     COVER_SHORT: '💎 100%全數平空',

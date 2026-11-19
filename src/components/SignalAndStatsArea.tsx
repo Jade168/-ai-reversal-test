@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { ModelBar, SymbolInfo, BacktestStats, ResonanceAnalysis, TradeLog } from '../types/quant';
 import { MultiTimeframeTFDR, TFDRPoint } from '../services/tfdrIndicator';
 import { LocalExpertSummary } from '../services/localQuantAnalyst';
@@ -29,6 +29,9 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
   tradeLogs = []
 }) => {
   if (!lastBar || !symbolInfo || !stats) return null;
+
+  // 底部共振分析框預設收合（單行摘要條），把螢幕空間讓畀 K 線圖同交易紀錄框；撳一下先展開全文
+  const [resonanceExpanded, setResonanceExpanded] = useState(false);
 
   const isStrongBuy = lastBar.buySignal || lastBar.reversalSignal === 'STRONG_BUY';
   const isCriticalSell = lastBar.sellSignal || lastBar.reversalSignal === 'CRITICAL_SELL';
@@ -158,7 +161,7 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
         </div>
 
         <div className="text-[10px] text-center text-gray-500 mt-1.5">
-          T-1無未來函數決策｜T日開盤驗假破成交（單邊0.25%成本・四態大勢倉位上限 S1/S2 80%・S3 30%・月線過熱（mTFDR≥85／曾觸90未真正見底反轉）買入上限20%・月線破底100%禁買・週線大陰（實體&gt;1.2倍ATR或≥3.5%＋高位背景）跌穿前兩枝100%禁買＋即時清倉・解鎖後第一筆買入限倉40%（右側確認，唔係底部全倉）・強勢大升浪（季／月TFDR≥60或季月週HA齊升）分級做T（35–48買50%／≤35買100%）・逼空追擊（48–65＋三級HA齊升＋日HA轉陽破前高）買40%・弱勢期只做≤35深回調・護盾過熱期關閉・總回撤&gt;25%暫停開倉・&lt;15%解鎖・單筆 ≥ 5% 本金）
+          T-1無未來函數決策｜T日開盤驗假破成交（單邊0.25%成本・四態大勢倉位上限 S1/S2 80%・S3 30%・月線過熱（mTFDR≥85／曾觸90未真正見底反轉）買入上限20%・月線破底100%禁買・週線大陰（實體&gt;1.2倍ATR或≥3.5%＋高位背景）跌穿前兩枝100%禁買＋即時清倉・解鎖後第一筆買入限倉40%（右側確認，唔係底部全倉）・強勢大升浪（季／月TFDR≥60或季月週HA齊升）分級做T（35–48買50%／≤35買100%）・逼空追擊（48–62＋三級HA齊升＋日HA轉陽破前高）買40%・買入要 ma3 拐頭向上（ma3&gt;prevMa3）＋奇點武裝後 1–7 日內＋日TFDR&lt;62／週TFDR&lt;68（禁追高；S3 收緊到日TFDR&lt;45）・ma3 刺穿 band90 拐頭＋浮盈≥5% 高拋45%・全新買入唔同波段重複加倉・弱勢期只做≤35深回調・護盾過熱期關閉・總回撤&gt;25%暫停開倉・&lt;15%解鎖・單筆 ≥ 5% 本金）
         </div>
 
         {/* 整合於決策中樞底部的雙核回測交易紀錄 */}
@@ -169,7 +172,7 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
             </span>
             <span className="text-[11px] text-slate-400">共 {tradeLogs.length} 筆操盤指令</span>
           </div>
-          <div className="max-h-64 overflow-y-auto pr-1 space-y-1.5 overscroll-contain">
+          <div className="max-h-[520px] min-h-[450px] overflow-y-auto pr-1 space-y-1.5 overscroll-contain">
             {tradeLogs.length > 0 ? (
               tradeLogs.map((log, idx) => {
                 const actionColor =
@@ -276,14 +279,30 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
         </span>
       </div>
 
-      {/* 🔮 369 + 142857 複合共振分析顯示區 */}
+      {/* 🔮 369 + 142857 複合共振分析顯示區（預設收合為單行摘要條，撳一下展開全文） */}
       {resonance && (
-        <div className="mt-1.5 p-2 bg-linear-to-br from-[#1a0b2e] to-[#0d1b2a] rounded-md border border-[#8b5cf6] text-xs">
-          <div className="text-[#8b5cf6] font-bold mb-1.5 flex items-center justify-between">
-            <span>🔮 369 + 142857 複合共振分析</span>
-            <span className="text-[10px] text-gray-400 font-normal">江恩循環 × 數律樞紐</span>
-          </div>
+        <div
+          className={`mt-1.5 rounded-md border border-[#8b5cf6] bg-linear-to-br from-[#1a0b2e] to-[#0d1b2a] text-xs overflow-hidden ${
+            resonanceExpanded ? '' : 'max-h-[72px]'
+          }`}
+        >
+          <button
+            type="button"
+            onClick={() => setResonanceExpanded(v => !v)}
+            className="w-full flex items-center justify-between gap-2 px-2 py-1.5 text-left"
+            title={resonanceExpanded ? '收合複合共振分析' : '展開複合共振分析'}
+          >
+            <span className="text-[#8b5cf6] font-bold truncate">
+              🔮 369 + 142857 複合共振分析｜{resonance.signal}｜現價 ${lastBar.c.toFixed(2)}｜支撐 $
+              {resonance.suggestions.strongBuy}｜阻力 ${resonance.suggestions.sellZone}
+            </span>
+            <span className="text-[10px] text-gray-400 font-normal shrink-0">
+              {resonanceExpanded ? '▲ 收合' : '▼ 展開'}
+            </span>
+          </button>
 
+          {resonanceExpanded && (
+            <div className="p-2 pt-0">
           <div className="grid grid-cols-3 gap-1 mb-1.5">
             <div className="bg-[#111] p-1 rounded-sm text-center border border-[#222]">
               <div className="text-[#666] text-[9px]">現價</div>
@@ -354,6 +373,8 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
                   ? '✅ 錯價機會！現價低於買入成本，可於溝貨區分批攤平'
                   : '❌ 現價高於買入價，注意逢高鎖利'}
               </div>
+            </div>
+          )}
             </div>
           )}
         </div>

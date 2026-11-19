@@ -1107,6 +1107,15 @@ export function runBacktestEngine(
   // 高拋補回單延期狀態：T 開盤價未低過上次沽價 ×96% 而未成交時保留，之後交易日再驗（轉入下跌浪即取消）
   let pendingBuyback: { singularityHigh: number; lastSellPrice: number; date: string } | null = null;
 
+  // 週線突變診斷埋點（文心 AI 診斷）：用數據驗證回補率，唔再靠猜
+  let totalTrimProceeds = 0; // TRIM 釋放嘅現金總額
+  let totalRedeployed = 0; // TRIM 之後買返入市嘅現金總額（未回補嗰部分即凍結現金）
+  let trimCashPending = 0; // 已 TRIM 釋放但未回補嘅現金（凍結中）
+  let falseFullClearCount = 0; // 非 S4 週線突變誤 FULL_CLEAR 次數（應為 0；S1/S2/S3 應為 TRIM）
+  let bullRetentionSum = 0; // S1/S2 日子嘅倉位比例累加
+  let bullDayCount = 0; // S1/S2 日子數
+  let cashIdleDays = 0; // 週線鎖生效且現金閒置 >20% 總值嘅日數
+
   const trades: { profit: number }[] = [];
   const tradeLogs: TradeLog[] = [];
   const minOrderValue = initialFund * 0.05;
@@ -1201,6 +1210,10 @@ export function runBacktestEngine(
       // D. 跌入下跌浪大勢 (isBearRegime: 同時跌穿月50與季50中間線) → 立即 100% 清倉多單並嚴禁抄底；
       //    或週線結構突變（週線大陰跌穿前兩枝低位，isWeeklyBreakClear）→ 同樣立即 100% 清倉，唔等破 50 線。
       if (longShares > 0 && avgLongCost > 0 && verdict.signal === 'FULL_CLEAR') {
+        // 診斷埋點：非 S4 週線突變誤 FULL_CLEAR（應為 0；S1/S2/S3 週線突變應為 TRIM）
+        if (verdict.isWeeklyBreakClear === true && verdict.marketState !== 'S4') {
+          falseFullClearCount += 1;
+        }
         const sellShares = longShares;
         const netExitPrice = todayOpen * (1 - FEE_RATE);
         const pnlRatio = (netExitPrice - avgLongCost) / avgLongCost;
@@ -1243,11 +1256,66 @@ export function runBacktestEngine(
         });
       }
 
-      // E. 上升浪高位止盈 45% (PARTIAL_PROFIT：日線>=88 奇點沽預警後，收市跌穿奇點 K 線最低位，保留 55% 核心底倉)
+      // D2. 週線突變減倉 40% (WEEKLY_BREAK_TRIM：S1/S2/S3 未跌穿月／季 50 線，週線大陰跌穿前兩枝低位，
+      //     經 2 日確認，減倉 40% 死守 60% 核心底倉吃主升浪；只有 S4 先 FULL_CLEAR 100%)。
+      //     強制防守分支：唔受 canAct 操作間距、partialTakenInLeg 限制（同 FULL_CLEAR 一樣），
+      //     減倉價記錄為 lastSellPriceExec，供日後補回單 96% 折扣驗證。
+      if (longShares > 0 && avgLongCost > 0 && verdict.signal === 'WEEKLY_BREAK_TRIM') {
+        const trimRatio = verdict.sizeRatio > 0 ? Math.min(0.4, verdict.sizeRatio) : 0.4;
+        const sellShares = Math.floor(longShares * trimRatio);
+        const orderValue = sellShares * todayOpen;
+
+        if (sellShares > 0 && orderValue >= minOrderValue) {
+          const netExitPrice = todayOpen * (1 - FEE_RATE);
+          const pnlRatio = (netExitPrice - avgLongCost) / avgLongCost;
+          const trimProceeds = sellShares * netExitPrice;
+          cashPool += trimProceeds;
+          trades.push({ profit: pnlRatio });
+
+          longShares -= sellShares;
+          if (longShares === 0) avgLongCost = 0;
+          lastActionBarIndex = i;
+          partialTakenInLeg = true;
+          // 診斷埋點：TRIM 釋放嘅現金計入待回補池（凍結現金）；之後買入會逐筆回補
+          totalTrimProceeds += trimProceeds;
+          trimCashPending += trimProceeds;
+          // 記錄實際減倉成交價（T 開盤價）與成交日索引，供其後補回單 96% 折扣驗證與 30 日過期判斷
+          lastSellPriceExec = todayOpen;
+          lastSellIndexExec = i;
+          const profitPct = Number((pnlRatio * 100).toFixed(2));
+          const trimPct = Math.round(trimRatio * 100);
+          const keepPct = 100 - trimPct;
+
+          tradeLogs.unshift({
+            date: execDate,
+            signalDate,
+            execDate,
+            puzzleHint: hintBase,
+            complianceTag: '✅ 精準執行',
+            type: 'SELL',
+            action: `🚨 順勢引擎・週線突變減倉${trimPct}%留${keepPct}%底倉`,
+            shares: sellShares,
+            units: `減倉${trimPct}%保留${keepPct}%核心底倉`,
+            confidence: `週線平均K線大陰跌穿前兩枝低位（收盤$${prevOverlay.close}），2 日確認｜未跌穿月／季 50 線，死守 ${keepPct}% 底倉`,
+            price: todayOpen.toFixed(2),
+            totalHolding: longShares,
+            holdingType: longShares > 0 ? 'LONG' : 'EMPTY',
+            source: `週線平均K線出現大陰燭跌穿前面兩枝週線低位（2 日確認），結構突變轉弱，開盤減倉 ${trimPct}%；價錢未跌穿月／季 50 線，保留 ${keepPct}% 核心底倉吃主升浪`,
+            profitPct,
+            profit: profitPct,
+            msg: `[${execDate}] 🚨 順勢引擎・週線突變減倉${trimPct}%留${keepPct}%底倉 ${sellShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+          });
+        }
+      }
+
+      // E. 上升浪高位止盈 45% (PARTIAL_PROFIT：日線>=88 奇點沽預警後，收市跌穿奇點 K 線最低位，保留 55% 核心底倉；
+      //     或 3MA 觸角逃頂：ma3 向上刺穿 band90 後拐頭向下，賣喺最頂尖區域)
       //     長牛護盾＋盈利鎖利：護盾開啟時（isLongBullShield：四態 S1 主升浪或 S2 牛市洗盤），
       //     必須浮盈 >= +8%（todayOpen >= avgCost * 1.08）先可以高拋鎖利；未達標跳過本次減倉（奇點武裝已由引擎
       //     喺 PARTIAL_PROFIT 觸發時清除，等下一個奇點頂再評估），徹底消滅慢牛股低賣高買內耗。
       //     護盾關閉時（狀態③過渡／震盪／熊市）保命優先，破位即減倉，唔等盈利。
+      //     3MA 觸角逃頂（isMa3TopExit）唔受護盾 +8% 限制：浮盈 >= +5%（todayOpen >= avgCost * 1.05）
+      //     即執行（ma3 刺穿 band90 拐頭係頂部確認，唔等 +8%）；未夠 +5% 跳過，唔賣住。
       if (
         longShares > 0 &&
         avgLongCost > 0 &&
@@ -1255,7 +1323,9 @@ export function runBacktestEngine(
         verdict.signal === 'PARTIAL_PROFIT' &&
         !partialTakenInLeg &&
         canAct &&
-        !(verdict.isLongBullShield === true && todayOpen < avgLongCost * 1.08)
+        (verdict.isMa3TopExit === true
+          ? todayOpen >= avgLongCost * 1.05
+          : !(verdict.isLongBullShield === true && todayOpen < avgLongCost * 1.08))
       ) {
         const ratio = verdict.sizeRatio > 0 ? Math.min(0.6, verdict.sizeRatio) : 0.45;
         const sellShares = Math.floor(longShares * ratio);
@@ -1285,17 +1355,28 @@ export function runBacktestEngine(
             puzzleHint: hintBase,
             complianceTag: '✅ 精準執行',
             type: 'SELL',
-            action: `🟠 順勢引擎・跌穿奇點低減倉${lockPct}%留${keepPct}%底倉`,
+            action:
+              verdict.isMa3TopExit === true
+                ? `🟠 順勢引擎・3MA刺穿band90拐頭減倉${lockPct}%留${keepPct}%底倉`
+                : `🟠 順勢引擎・跌穿奇點低減倉${lockPct}%留${keepPct}%底倉`,
             shares: sellShares,
             units: `減倉${lockPct}%保留${keepPct}%核心底倉`,
-            confidence: `跌穿奇點低 $${(verdict.singularityLow ?? prevBar.low).toFixed(2)}｜日TFDR ${prevOverlay.dTfdr}≥88 奇點沽預警後扣扳機`,
+            confidence:
+              verdict.isMa3TopExit === true
+                ? `3MA $${(prevOverlay.ma3 ?? 0).toFixed(2)} 刺穿 band90 $${(prevOverlay.band90 ?? 0).toFixed(2)} 後拐頭向下｜浮盈 ≥ +5% 即高拋`
+                : `跌穿奇點低 $${(verdict.singularityLow ?? prevBar.low).toFixed(2)}｜日TFDR ${prevOverlay.dTfdr}≥88 奇點沽預警後扣扳機`,
             price: todayOpen.toFixed(2),
             totalHolding: longShares,
             holdingType: longShares > 0 ? 'LONG' : 'EMPTY',
-            source: `上升浪內日TFDR達到 ${prevOverlay.dTfdr} (≥88) 觸發奇點沽預警後，收市跌穿奇點 K 線最低位 $${(verdict.singularityLow ?? prevBar.low).toFixed(2)}，減倉 ${lockPct}% 鎖利並死抱 ${keepPct}% 核心底倉`,
+            source:
+              verdict.isMa3TopExit === true
+                ? `3MA 觸角逃頂：3 日平均線 $${(prevOverlay.ma3 ?? 0).toFixed(2)} 向上刺穿日線最高軌道 band90 $${(prevOverlay.band90 ?? 0).toFixed(2)} 後拐頭向下，浮盈 ≥ +5%，減倉 ${lockPct}% 鎖利並死抱 ${keepPct}% 核心底倉`
+                : `上升浪內日TFDR達到 ${prevOverlay.dTfdr} (≥88) 觸發奇點沽預警後，收市跌穿奇點 K 線最低位 $${(verdict.singularityLow ?? prevBar.low).toFixed(2)}，減倉 ${lockPct}% 鎖利並死抱 ${keepPct}% 核心底倉`,
             profitPct,
             profit: profitPct,
-            msg: `[${execDate}] 🟠 順勢引擎・跌穿奇點低減倉${lockPct}%留${keepPct}%底倉 ${sellShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
+            msg: `[${execDate}] 🟠 順勢引擎・${
+              verdict.isMa3TopExit === true ? '3MA刺穿band90拐頭' : '跌穿奇點低'
+            }減倉${lockPct}%留${keepPct}%底倉 ${sellShares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本) | 淨盈虧: ${profitPct >= 0 ? '+' : ''}${profitPct}%`
           });
         }
       }
@@ -1402,26 +1483,54 @@ export function runBacktestEngine(
 
       // F. 上升浪低位買入 (GOLDEN_BUY：收市升穿奇點最高位；補回單另須週線未穿 50 且成交價 < 上次沽價 ×96%，未滿足則延期而非取消)
       //     買入倉位跟四態大勢上限（S1/S2 80%，S3 30%），並受全局峰值開倉暫停鎖約束（鎖定期間唔開新倉）。
+      //     倉位計算基準（文心 AI 缺陷二）：一律按帳戶總淨值 totalValue = cashPool + 持倉市值 計目標總倉位，
+      //     再減去現有持倉市值先係補買差額。舊版用 cashPool * ratio：高拋減倉後現金池變細，下次再乘
+      //     80% 買入股數越縮越小（倉位漂移縮水），永遠補唔滿 80% 魚身。全新買入／補齊／補回單一律用
+      //     同一公式：補買金額 = totalValue × targetPosRatio − 現有持倉市值；<= 0 即唔買（已到目標）。
+      //     全新買入補齊：已有長倉在手時，全新 GOLDEN_BUY 可以補齊到四態上限（S1/S2 80%），
+      //     前提係 (a) 目標倉位高過現有倉位比例，(b) 今日開盤價高過平均成本（順勢加倉，唔攤平）。
+      //     總倉位到 80% 即鎖死，唔再追高。
+      const totalValue = cashPool + longShares * todayOpen;
+      const currentPosValue = longShares * todayOpen;
+      const currentPosRatio = totalValue > 0 ? currentPosValue / totalValue : 0;
+      const targetPosRatio = Math.min(
+        verdict.sizeRatio > 0 ? Math.min(1, verdict.sizeRatio) : 0.8,
+        verdict.maxBuyRatio ?? 0.8
+      );
+      const isTopUpCandidate =
+        verdict.signal === 'GOLDEN_BUY' &&
+        !suppressGoldenBuy &&
+        !isBuybackVerdict &&
+        !pendingBuybackReady &&
+        longShares > 0;
+      const topUpPosRatio = targetPosRatio - currentPosRatio;
+      const canTopUp = isTopUpCandidate && topUpPosRatio > 0.005 && todayOpen > avgLongCost;
+      const freshBuyBlockedByPosition = isTopUpCandidate && !canTopUp;
       if (
         shortShares === 0 &&
         isBullRegime &&
         !entryLocked &&
         ((verdict.signal === 'GOLDEN_BUY' && !suppressGoldenBuy) || pendingBuybackReady) &&
-        canAct
+        canAct &&
+        !freshBuyBlockedByPosition
       ) {
         // 四態上限雙重保障：引擎已按 marketState 設 sizeRatio，回測再以 verdict.maxBuyRatio 設上限
-        const stateCap = verdict.maxBuyRatio ?? 0.8;
-        const ratio = Math.min(
-          verdict.sizeRatio > 0 ? Math.min(1, verdict.sizeRatio) : 0.8,
-          stateCap
-        );
-        const targetCash = cashPool * ratio;
-        const shares = Math.floor(targetCash / (todayOpen * (1 + FEE_RATE)));
+        // 補買金額 = 目標總倉位市值（totalValue × targetPosRatio）− 現有持倉市值；
+        // 標籤顯示補買嘅倉位增幅（例如由 40% 補到 80% 顯示 40%），唔係現金池比例。
+        // （targetPosRatio ≤ 1 保證補買金額唔會超過現金池，唔會透支。）
+        const targetPosValue = totalValue * targetPosRatio;
+        const buyValue = targetPosValue - currentPosValue;
+        const labelRatio = Math.max(0, targetPosRatio - currentPosRatio);
+        const shares = buyValue > 0 ? Math.floor(buyValue / (todayOpen * (1 + FEE_RATE))) : 0;
         const orderValue = shares * todayOpen;
 
         if (shares > 0 && orderValue >= minOrderValue) {
           const totalCost = orderValue * (1 + FEE_RATE);
           cashPool -= totalCost;
+          // 診斷埋點：買入現金優先回補 TRIM 凍結現金（回補率 = 已回補 / TRIM 釋放總額）
+          const redeployed = Math.min(totalCost, trimCashPending);
+          trimCashPending -= redeployed;
+          totalRedeployed += redeployed;
           avgLongCost = (longShares * avgLongCost + totalCost) / (longShares + shares);
           longShares += shares;
           lastActionBarIndex = i;
@@ -1431,7 +1540,7 @@ export function runBacktestEngine(
           lastSellPriceExec = null;
           lastSellIndexExec = null;
 
-          const pctLabel = Math.round(ratio * 100);
+          const pctLabel = Math.round(labelRatio * 100);
           const inBand = todayOpen <= Math.max(w50 * 1.15, prevBar.high * 1.05);
           const complianceTag = inBand ? '✅ 精準執行' : '⚠️ 偏離區間';
 
@@ -1444,6 +1553,8 @@ export function runBacktestEngine(
             type: 'STRONG BUY',
             action: execBuybackRef != null
               ? `🔥 順勢引擎・高拋後補回買入${pctLabel}%`
+              : canTopUp
+              ? `🔥 順勢引擎・主升浪補齊買入${pctLabel}%（總倉${Math.round(targetPosRatio * 100)}%）`
               : `🔥 順勢引擎・上升浪極底重倉買入${pctLabel}%`,
             shares,
             units: `現金池${pctLabel}%坐貨主升浪`,
@@ -1505,6 +1616,16 @@ export function runBacktestEngine(
             msg: `[${execDate}] 🟣 順勢引擎・下跌浪輕倉沽空${shortPct}% ${shares.toLocaleString()}股 @ 開盤$${todayOpen.toFixed(2)} (含0.25%成本)`
           });
         }
+      }
+
+      // 每日診斷埋點（文心 AI 診斷）：大升浪底倉保留率＋現金凍結日數（用收市後倉位計）
+      const dayTotalValue = cashPool + longShares * currBar.close;
+      if (verdict.marketState === 'S1' || verdict.marketState === 'S2') {
+        bullRetentionSum += dayTotalValue > 0 ? (longShares * currBar.close) / dayTotalValue : 0;
+        bullDayCount += 1;
+      }
+      if (verdict.weeklyBreakLock === true && dayTotalValue > 0 && cashPool / dayTotalValue > 0.2) {
+        cashIdleDays += 1;
       }
     }
 
@@ -1569,7 +1690,14 @@ export function runBacktestEngine(
     maxDrawdown: maxDrawdown.toFixed(2),
     finalFund: finalEquity.toFixed(2),
     tradeCount: tradeLogs.length,
-    annualReturn: annualReturn.toFixed(2)
+    annualReturn: annualReturn.toFixed(2),
+    // 週線突變診斷埋點（文心 AI 診斷）
+    trimmedCashRedeployedRatio:
+      totalTrimProceeds > 0 ? ((totalRedeployed / totalTrimProceeds) * 100).toFixed(2) : '100.00',
+    falseFullClearCount,
+    avgBullRetentionRatio:
+      bullDayCount > 0 ? ((bullRetentionSum / bullDayCount) * 100).toFixed(2) : '0.00',
+    cashIdleDays
   };
 
   return { stats, logs: tradeLogs };

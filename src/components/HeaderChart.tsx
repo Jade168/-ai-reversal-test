@@ -497,12 +497,16 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     return data;
   }, [data, isReplay, replayIndex]);
 
-  // 從完整日線（fallback 至 activeData）構建無未來函數一年期 (~252日) L1~L4 嵌套 50% 平衡切線拼圖
+  // 從完整日線（fallback 至 activeData）構建無未來函數一年期 (~250日) L1~L4 嵌套 50% 平衡切線拼圖
+  // 嚴格鎖定主圖最新日：拼圖窗口錨定 activeData 最後一枝 K 線日期（近 250 個交易日正序），
+  // 同主圖最新走勢 100% 實時對齊，唔再出現走勢倒掛。
   const nestedPiPData = useMemo<NestedPuzzlePiPData | null>(() => {
     const base: RawKline[] = dailyKlines.length > 0 ? dailyKlines : activeData;
     if (!base.length) return null;
     const replayCutoff =
       isReplay && activeData.length > 0 ? (activeData[activeData.length - 1].date || '').slice(0, 10) : null;
+    const anchorDate =
+      activeData.length > 0 ? (activeData[activeData.length - 1].date || '').slice(0, 10) : null;
     const ohlc: OHLCBar[] = base
       .map(b => ({
         date: (b.date || '').slice(0, 10),
@@ -523,7 +527,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       .sort((a, b) => a.date.localeCompare(b.date));
 
     if (ohlc.length < 2) return null;
-    return buildNestedPuzzlePiP(ohlc, 252);
+    return buildNestedPuzzlePiP(ohlc, 250, anchorDate);
   }, [dailyKlines, activeData, isReplay]);
 
   // Reset or adjust viewRange on data changes (預設顯示最近約 35%，保留過往歷史供向左平移查看)
