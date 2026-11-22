@@ -43,6 +43,7 @@ import {
   buildLocalAnalysisInput,
   evaluateLocalExpertSummary
 } from './services/localQuantAnalyst';
+import { runSleeveBacktest, SleeveBacktestResult } from './services/sleeveBacktest';
 
 import { HeaderChart } from './components/HeaderChart';
 import { ApiConfigCard } from './components/ApiConfigCard';
@@ -83,6 +84,7 @@ export const App: React.FC = () => {
   const [tfdr, setTfdr] = useState<MultiTimeframeTFDR | null>(null);
   const [latestTfdrPoint, setLatestTfdrPoint] = useState<TFDRPoint | null>(null);
   const [expertSummary, setExpertSummary] = useState<LocalExpertSummary | null>(null);
+  const [sleeveResult, setSleeveResult] = useState<SleeveBacktestResult | null>(null);
 
   // UI Status
   const [isLoading, setIsLoading] = useState(false);
@@ -276,6 +278,14 @@ export const App: React.FC = () => {
       );
       setStats(bStats);
       setTradeLogs(logs);
+
+      // 雙袖版回測（2026-11-22 最終方案）：同現行版並存、獨立計算；出錯只會冇咗雙袖版，唔影響現行版
+      try {
+        setSleeveResult(runSleeveBacktest(dailyKlinesForTfdr, fund));
+      } catch (sleeveErr) {
+        console.warn('Sleeve backtest error:', sleeveErr);
+        setSleeveResult(null);
+      }
 
       // Last bar info
       const lastBar = computedModel[computedModel.length - 1];
@@ -651,6 +661,7 @@ export const App: React.FC = () => {
             latestTfdrPoint={latestTfdrPoint}
             expertSummary={expertSummary}
             tradeLogs={tradeLogs}
+            sleeveResult={sleeveResult}
           />
 
           {/* Fourier Z-Axis Component */}
