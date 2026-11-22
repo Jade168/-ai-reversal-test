@@ -1,6 +1,12 @@
 import { RawKline } from '../types/quant';
 import { MultiTimeframeTFDR, TFDRPoint } from './tfdrIndicator';
-import { computePuzzleDecision, OHLCBar, PuzzleState } from './puzzleDecisionEngine';
+import {
+  buildFullPuzzleTimeline,
+  computePuzzleDecision,
+  OHLCBar,
+  OverlayPoint,
+  PuzzleState
+} from './puzzleDecisionEngine';
 
 export interface LocalAnalysisInput {
   symbol: string;
@@ -15,6 +21,7 @@ export interface LocalAnalysisInput {
   band90: number;
   band15: number;
   puzzle?: PuzzleState;
+  haStructure?: HaStructureContext | null;
 }
 
 export interface LocalExpertSummary {
@@ -26,6 +33,108 @@ export interface LocalExpertSummary {
   coreAction: string;
   fullReport: string;
   puzzle?: PuzzleState;
+}
+
+/**
+ * HA 趨勢結構上下文（2026-11-22 新增）：全部數字直接讀取決策引擎 buildFullPuzzleTimeline 嘅輸出
+ * （單層 HA overlay + 最新一日裁決），唔另行發明任何公式。目的係令 AI 專家看板同圖表、引擎三者
+ * 睇住同一套 HA 轉折結構，同時將真實市場價位（原始 OHLC）分開標註，建議可以直接按真實價掛單。
+ */
+export interface HaStructureContext {
+  asOfDate: string;
+  haBull: boolean;
+  haStreak: number; // 連陽／連陰第幾根（日線 HA）
+  haOpen: number;
+  haClose: number;
+  justBrokeUp: boolean; // 最新一日日線 HA 破梯向上（currHa.high > prevHa.high 且陽）
+  justBrokeDown: boolean; // 最新一日日線 HA 破梯向下
+  flippedBull: boolean; // 最新一日 HA 由陰轉陽
+  flippedBear: boolean; // 最新一日 HA 由陽轉陰
+  haSteps: Array<{ date: string; haLow: number; haHigh: number }>; // 最近 3 日 HA 梯級（引擎 haLowOf/haHighOf 公式）
+  stepsDirection: 'UP' | 'DOWN' | 'MIXED'; // 級級上／級級落／混合
+  sellTrigger: number | null; // 引擎沽方扣扳機線（奇點燭 HA 低位，收市跌穿先觸發）
+  buyTrigger: number | null; // 引擎買方扣扳機線（奇點燭 HA 高位，收市升穿先觸發）
+  singularityDate: string | null;
+  invalidationPrice: number | null;
+  lastBar: { date: string; open: number; high: number; low: number; close: number }; // 最新一日真實 OHLC
+}
+
+export function buildHaStructureContext(dailyData: OHLCBar[]): HaStructureContext | null {
+  if (!dailyData || dailyData.length < 70) return null;
+  try {
+    const timeline = buildFullPuzzleTimeline(dailyData);
+    const overlays = timeline.overlays;
+    const n = overlays.length;
+    if (n === 0) return null;
+    const bullOf = (op: OverlayPoint): boolean => op.dHaBull ?? op.haClose >= op.haOpen;
+    const haLowOf = (op: OverlayPoint): number => Math.min(op.low, op.haOpen, op.haClose);
+    const haHighOf = (op: OverlayPoint): number => Math.max(op.high, op.haOpen, op.haClose);
+    const last = overlays[n - 1];
+    const prev = n > 1 ? overlays[n - 2] : null;
+    const haBull = bullOf(last);
+    let streak = 0;
+    for (let i = n - 1; i >= 0; i--) {
+      if (bullOf(overlays[i]) === haBull) streak++;
+      else break;
+    }
+    const steps = overlays.slice(-3).map(op => ({
+      date: op.date,
+      haLow: Number(haLowOf(op).toFixed(2)),
+      haHigh: Number(haHighOf(op).toFixed(2))
+    }));
+    const lowsUp = steps.length >= 2 && steps.every((st, i) => i === 0 || st.haLow > steps[i - 1].haLow);
+    const lowsDown = steps.length >= 2 && steps.every((st, i) => i === 0 || st.haLow < steps[i - 1].haLow);
+    const verdict = timeline.verdicts[n - 1];
+    return {
+      asOfDate: last.date,
+      haBull,
+      haStreak: streak,
+      haOpen: Number(last.haOpen.toFixed(2)),
+      haClose: Number(last.haClose.toFixed(2)),
+      justBrokeUp: Boolean(last.dHaBreakUp),
+      justBrokeDown: Boolean(last.dHaBreakDown),
+      flippedBull: Boolean(prev && !bullOf(prev) && haBull),
+      flippedBear: Boolean(prev && bullOf(prev) && !haBull),
+      haSteps: steps,
+      stepsDirection: lowsUp ? 'UP' : lowsDown ? 'DOWN' : 'MIXED',
+      sellTrigger: verdict?.singularityLow ?? null,
+      buyTrigger: verdict?.singularityHigh ?? null,
+      singularityDate: verdict?.singularityDate ?? null,
+      invalidationPrice: verdict?.invalidationPrice ?? null,
+      lastBar: { date: last.date, open: last.open, high: last.high, low: last.low, close: last.close }
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function formatHaStructureBlocks(
+  ctx: HaStructureContext,
+  zones: { buyLow: number; buyHigh: number; tpLow: number; tpHigh: number }
+): string[] {
+  const fmt = (x: number): number => Number(x.toFixed(2));
+  const turnParts: string[] = [];
+  if (ctx.flippedBull || ctx.justBrokeUp) turnParts.push('今日 HA 由陰轉陽／破梯向上（低買轉折）');
+  if (ctx.flippedBear || ctx.justBrokeDown) turnParts.push('今日 HA 由陽轉陰／破梯向下（高沽轉折）');
+  const turnText = turnParts.length > 0 ? turnParts.join('；') : '今日無 HA 轉折';
+  const stepsText = ctx.haSteps.map(st => `$${st.haLow}`).join(' → ');
+  const stepsLabel =
+    ctx.stepsDirection === 'UP' ? '級級上（梯級向上）' : ctx.stepsDirection === 'DOWN' ? '級級落（梯級向下）' : '梯級橫行混合';
+  const armParts: string[] = [];
+  if (ctx.sellTrigger != null)
+    armParts.push(
+      `沽方扣扳機線 $${fmt(ctx.sellTrigger)}（收市跌穿先減倉${ctx.singularityDate ? `，奇點燭 ${ctx.singularityDate}` : ''}）`
+    );
+  if (ctx.buyTrigger != null)
+    armParts.push(
+      `買方扣扳機線 $${fmt(ctx.buyTrigger)}（收市升穿先買入${ctx.singularityDate ? `，奇點燭 ${ctx.singularityDate}` : ''}）`
+    );
+  const armText = armParts.length > 0 ? armParts.join('｜') : '目前無奇點武裝（中區觀望）';
+  return [
+    `• 【HA 趨勢結構・單層平均K（引擎推導）】${ctx.haBull ? '連陽' : '連陰'}第 ${ctx.haStreak} 根（HA 開 $${ctx.haOpen}／HA 收 $${ctx.haClose}）｜近3日 HA 梯級低位 ${stepsText}・${stepsLabel}｜${turnText}`,
+    `• 【奇點武裝・引擎觸發位（真實價）】${armText}${ctx.invalidationPrice != null ? `｜失效位 $${fmt(ctx.invalidationPrice)}` : ''}`,
+    `• 【真實執行價位・原始 OHLC（可直接掛單）】最新一日（${ctx.lastBar.date}）開 $${fmt(ctx.lastBar.open)}／高 $${fmt(ctx.lastBar.high)}／低 $${fmt(ctx.lastBar.low)}／收 $${fmt(ctx.lastBar.close)}｜低吸區 $${fmt(zones.buyLow)}–$${fmt(zones.buyHigh)}｜高拋區 $${fmt(zones.tpLow)}–$${fmt(zones.tpHigh)}｜註：全部價位均為真實市場價，引擎以次日開市價執行`
+  ];
 }
 
 /**
@@ -105,12 +214,31 @@ export function evaluatePuzzleExpertSummary(puzzle: PuzzleState): LocalExpertSum
 export function generatePuzzleExpertReport(symbol: string, dailyData: OHLCBar[]): string {
   if (!dailyData || dailyData.length === 0) return '';
   const puzzle = computePuzzleDecision(symbol, dailyData, dailyData.length - 1);
-  return evaluatePuzzleExpertSummary(puzzle).fullReport;
+  const summary = evaluatePuzzleExpertSummary(puzzle);
+  const haCtx = buildHaStructureContext(dailyData);
+  if (!haCtx) return summary.fullReport;
+  const blocks = formatHaStructureBlocks(haCtx, {
+    buyLow: puzzle.levels.buyZone.low,
+    buyHigh: puzzle.levels.buyZone.high,
+    tpLow: puzzle.levels.takeProfitZone.low,
+    tpHigh: puzzle.levels.takeProfitZone.high
+  });
+  return [...summary.fullReport.split('\n'), ...blocks].join('\n');
 }
 
 export function evaluateLocalExpertSummary(input: LocalAnalysisInput): LocalExpertSummary {
   if (input.puzzle) {
-    return evaluatePuzzleExpertSummary(input.puzzle);
+    const summary = evaluatePuzzleExpertSummary(input.puzzle);
+    if (input.haStructure) {
+      const blocks = formatHaStructureBlocks(input.haStructure, {
+        buyLow: input.puzzle.levels.buyZone.low,
+        buyHigh: input.puzzle.levels.buyZone.high,
+        tpLow: input.puzzle.levels.takeProfitZone.low,
+        tpHigh: input.puzzle.levels.takeProfitZone.high
+      });
+      return { ...summary, fullReport: [...summary.fullReport.split('\n'), ...blocks].join('\n') };
+    }
+    return summary;
   }
   const todayStr = new Date().toISOString().slice(0, 10);
   const invPrice = Number(input.monthlyMidline.toFixed(2));
@@ -245,6 +373,7 @@ export function buildLocalAnalysisInput(params: {
     monthlyTFDR: puzzle.timeframes.M.tfdr,
     band90: latestTfdrPoint?.band90 ?? puzzle.levels.takeProfitZone.high,
     band15: latestTfdrPoint?.band15 ?? puzzle.levels.buyZone.low,
-    puzzle
+    puzzle,
+    haStructure: buildHaStructureContext(dailyData)
   };
 }

@@ -1811,10 +1811,44 @@ function normalizeSortedDaily(allDailyBars: OHLCBar[]): OHLCBar[] {
 }
 
 /**
+ * ⚠️ 架構鐵律（防呆護欄）：本引擎只接受【原始 OHLC】輸入。
+ * Heikin Ashi（平均K線）係引擎內部由原始燭單層推導嘅訊號視圖，唔係輸入格式。
+ * 嚴禁將已轉換嘅 HA 燭餵入 buildFullPuzzleTimeline／computePuzzleDecision：
+ * 引擎會對 HA 再算一次 HA（雙重平滑），TFDR 分子、ATR、奇點觸發價全部被扭曲，
+ * 回測撮合亦會變成用從未成交過嘅 HA 平均價計價（幻影成交、虛假回報）。
+ * HA 視覺顯示只可以喺圖表渲染層由原始燭即時推導（或讀取 OverlayPoint.haOpen/haClose），永不回寫數據管線。
+ * 以下指紋檢查只發警告、唔改任何決策行為：HA 燭嚴格滿足 open[i] = (open[i-1] + close[i-1]) / 2 遞歸；
+ * 真實市場數據連續 20 日精確命中呢條遞歸嘅機會近乎零，命中即代表輸入已被 HA 轉換。
+ */
+function warnIfHeikinAshiInput(bars: OHLCBar[]): void {
+  if (!bars || bars.length < 30) return;
+  let run = 0;
+  let maxRun = 0;
+  for (let i = 1; i < bars.length; i++) {
+    const expected = (bars[i - 1].open + bars[i - 1].close) / 2;
+    const tol = Math.max(1e-9, Math.abs(expected) * 1e-9);
+    if (Math.abs(bars[i].open - expected) <= tol) {
+      run++;
+      if (run > maxRun) maxRun = run;
+    } else {
+      run = 0;
+    }
+  }
+  if (maxRun >= 20) {
+    console.warn(
+      '[puzzleDecisionEngine] ⚠️ 偵測到輸入疑似已轉換為 Heikin Ashi 燭（open 遞歸指紋連續命中 ' +
+        maxRun +
+        ' 日）。本引擎只接受原始 OHLC：餵入 HA 會造成雙重平滑＋幻影撮合價，請改回原始 K 線。'
+    );
+  }
+}
+
+/**
  * O(N) 單趟無未來函數構建全歷史 OverlayPoint + PuzzleVerdict 時間軸
  * 嚴格計算每根日線截至當日之季/月/週真實箱體與 50% 平衡切線 (qMid50 / mMid50 / wMid50)
  */
 export function buildFullPuzzleTimeline(allDailyBars: OHLCBar[]): FullTimelineResult {
+  warnIfHeikinAshiInput(allDailyBars);
   const sorted = normalizeSortedDaily(allDailyBars);
   const n = sorted.length;
   const overlays: OverlayPoint[] = new Array(n);

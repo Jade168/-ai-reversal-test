@@ -3,6 +3,7 @@ import { ModelBar, RawKline } from '../types/quant';
 import { calculateDynamicReversals } from '../services/quantCalculations';
 import { calculateTFDRSeries } from '../services/tfdrIndicator';
 import {
+  buildFullPuzzleTimeline,
   buildNestedPuzzlePiP,
   NestedPuzzlePiPData,
   OHLCBar,
@@ -445,6 +446,10 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
   // 奇點文字標籤顯示開關：只隱藏 TFDR 模式下「奇點買／奇點沽」細字標籤（小三角箭頭保留），K 線本身不受影響
   const [showSingularityLabels, setShowSingularityLabels] = useState<boolean>(true);
 
+  // 主圖燭體來源：HA＝引擎單層平均K（預設；燭身讀引擎 OverlayPoint.haOpen/haClose、影線用原始高低）；
+  // RAW＝原始陰陽燭。純渲染切換——數據管線與引擎永遠只用原始 OHLC，呢個 state 唔會回寫任何數據。
+  const [candleSource, setCandleSource] = useState<'HA' | 'RAW'>('HA');
+
   // Viewport / zoom / pan state
   const [viewRange, setViewRange] = useState<{ start: number; end: number } | null>(null);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
@@ -496,6 +501,74 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     }
     return data;
   }, [data, isReplay, replayIndex]);
+
+  // 引擎對齊數據（純讀取引擎輸出，唔改任何數據管線）：以原始 OHLC 跑一次 buildFullPuzzleTimeline，取得
+  // (1) 每日單層 HA 開/收（主圖 HA 燭身，與 PiP L4 層同一來源）、(2) 引擎奇點武裝點、扣扳機參考線區間、
+  // 實際觸發日。主圖奇點標籤改讀呢份引擎狀態，同系統實際買賣 100% 同步，唔再用 tfdrIndicator 另一套公式。
+  // 只喺日線圖啟用；週/月線圖維持舊行為，避免日期對唔齊畫錯值。引擎數據唔可用時回退舊標籤。
+  const engineChartData = useMemo(() => {
+    if (!(timeframe === 'daily' || timeframe === '1d')) return null;
+    const base: RawKline[] = dailyKlines.length > 0 ? dailyKlines : (activeData as unknown as RawKline[]);
+    if (!base || base.length < 70 || activeData.length === 0) return null;
+    try {
+      const ohlc: OHLCBar[] = base.map(b => ({
+        date: (b.date || '').slice(0, 10),
+        open: Number(b.o),
+        high: Number(b.h),
+        low: Number(b.l),
+        close: Number(b.c)
+      }));
+      const timeline = buildFullPuzzleTimeline(ohlc);
+      const idxByDate = new Map<string, number>();
+      activeData.forEach((b, i) => idxByDate.set((b.date || '').slice(0, 10), i));
+      const haByDate = new Map<string, { haOpen: number; haClose: number }>();
+      timeline.overlays.forEach(op => haByDate.set(op.date, { haOpen: op.haOpen, haClose: op.haClose }));
+      const highs: Array<{ index: number; price: number }> = [];
+      const lows: Array<{ index: number; price: number }> = [];
+      const spans: Array<{ from: number; to: number; price: number; kind: 'SELL' | 'BUY' }> = [];
+      const triggers: Array<{ index: number; price: number; kind: 'SELL' | 'BUY' }> = [];
+      const armedDays: Array<{ idx: number; low: number | null; high: number | null }> = [];
+      timeline.verdicts.forEach((v, i) => {
+        const idx = idxByDate.get(timeline.sorted[i].date);
+        if (idx == null) return;
+        const prev = i > 0 ? timeline.verdicts[i - 1] : null;
+        // 武裝點：觸發價首次出現或改變嗰日，就係設定該價嘅奇點燭本身
+        if (v.singularityLow != null && (!prev || prev.singularityLow !== v.singularityLow)) {
+          highs.push({ index: idx, price: activeData[idx].h });
+        }
+        if (v.singularityHigh != null && (!prev || prev.singularityHigh !== v.singularityHigh)) {
+          lows.push({ index: idx, price: activeData[idx].l });
+        }
+        armedDays.push({ idx, low: v.singularityLow ?? null, high: v.singularityHigh ?? null });
+        // 實際觸發日：引擎嗰日真係出咗奇點扣扳機裁決
+        if (v.signal === 'PARTIAL_PROFIT') triggers.push({ index: idx, price: activeData[idx].h, kind: 'SELL' });
+        if (v.signal === 'GOLDEN_BUY') triggers.push({ index: idx, price: activeData[idx].l, kind: 'BUY' });
+      });
+      // 扣扳機參考線區間：同一觸發價連續生效嘅日子
+      const buildSpans = (key: 'low' | 'high', kind: 'SELL' | 'BUY') => {
+        let cur: { from: number; price: number } | null = null;
+        for (let k = 0; k < armedDays.length; k++) {
+          const d = armedDays[k];
+          const price = d[key];
+          if (price != null) {
+            if (!cur || cur.price !== price) {
+              if (cur) spans.push({ from: cur.from, to: armedDays[k - 1].idx, price: cur.price, kind });
+              cur = { from: d.idx, price };
+            }
+          } else if (cur) {
+            spans.push({ from: cur.from, to: armedDays[k - 1].idx, price: cur.price, kind });
+            cur = null;
+          }
+        }
+        if (cur) spans.push({ from: cur.from, to: armedDays[armedDays.length - 1].idx, price: cur.price, kind });
+      };
+      buildSpans('low', 'SELL');
+      buildSpans('high', 'BUY');
+      return { haByDate, highs, lows, spans, triggers };
+    } catch {
+      return null;
+    }
+  }, [dailyKlines, activeData, timeframe]);
 
   // 從完整日線（fallback 至 activeData）構建無未來函數一年期 (~250日) L1~L4 嵌套 50% 平衡切線拼圖
   // 嚴格鎖定主圖最新日：拼圖窗口錨定 activeData 最後一枝 K 線日期（近 250 個交易日正序），
@@ -659,6 +732,18 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     // Price Extents
     let minPrice = Math.min(...visibleBars.map(b => b.l));
     let maxPrice = Math.max(...visibleBars.map(b => b.h));
+    // HA 視圖：價格範圍要包埋 HA 燭身（HA 開/收可略出當日原始高低之外，避免燭身被裁走）
+    if (candleSource === 'HA' && engineChartData) {
+      visibleBars.forEach(b => {
+        const ha = engineChartData.haByDate.get((b.date || '').slice(0, 10));
+        if (ha) {
+          if (ha.haOpen < minPrice) minPrice = ha.haOpen;
+          if (ha.haClose < minPrice) minPrice = ha.haClose;
+          if (ha.haOpen > maxPrice) maxPrice = ha.haOpen;
+          if (ha.haClose > maxPrice) maxPrice = ha.haClose;
+        }
+      });
+    }
 
     const lastTfdr = tfdrSeries.length > 0 ? tfdrSeries[tfdrSeries.length - 1] : null;
     const isLatestInView = endIdx === activeData.length - 1;
@@ -900,16 +985,19 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       ctx.restore();
     }
 
-    // 5. Candlestick Bars
+    // 5. Candlestick Bars（HA 模式：燭身用引擎單層 HA 開/收，影線維持原始高低；RAW 模式：原始陰陽燭）
     visibleBars.forEach((bar, i) => {
       const x = getX(i);
-      const isUp = bar.c >= bar.o;
+      const ha = candleSource === 'HA' ? engineChartData?.haByDate.get((bar.date || '').slice(0, 10)) : undefined;
+      const bodyOpen = ha ? ha.haOpen : bar.o;
+      const bodyClose = ha ? ha.haClose : bar.c;
+      const isUp = bodyClose >= bodyOpen;
       const color = isUp ? '#10b981' : '#ef4444';
 
       const highY = getY(bar.h);
       const lowY = getY(bar.l);
-      const openY = getY(bar.o);
-      const closeY = getY(bar.c);
+      const openY = getY(bodyOpen);
+      const closeY = getY(bodyClose);
 
       // Wick
       ctx.strokeStyle = color;
@@ -1167,9 +1255,54 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
         ctx.restore();
       }
     } else {
-      // TFDR 模式：(c) 在高位(score >= 90)標出「奇點沽」，低位(score <= 20 或 low <= band15)對稱標出「奇點買」
+      // TFDR 模式：(c) 奇點標籤改讀決策引擎狀態——武裝點（singularityLow/High 首次設定嗰日）標「奇點沽／奇點買」，
+      // 武裝期間畫扣扳機參考線，引擎實際扣扳機嗰日標「觸發」；同系統買賣 100% 同步。引擎數據唔可用先退回舊標籤。
+      const singHighs = engineChartData ? engineChartData.highs : tfdrTurningPoints.highs;
+      const singLows = engineChartData ? engineChartData.lows : tfdrTurningPoints.lows;
+      if (engineChartData) {
+        ctx.save();
+        ctx.setLineDash([5, 4]);
+        ctx.lineWidth = 1;
+        engineChartData.spans.forEach(sp => {
+          if (sp.to < startIdx || sp.from > endIdx) return;
+          const from = Math.max(sp.from, startIdx);
+          const to = Math.min(sp.to, endIdx);
+          const y = getY(sp.price);
+          ctx.strokeStyle = sp.kind === 'SELL' ? 'rgba(239, 68, 68, 0.75)' : 'rgba(16, 185, 129, 0.75)';
+          ctx.beginPath();
+          ctx.moveTo(getX(from - startIdx) - stepX / 2, y);
+          ctx.lineTo(getX(to - startIdx) + stepX / 2, y);
+          ctx.stroke();
+        });
+        ctx.restore();
+        engineChartData.triggers.forEach(tr => {
+          if (tr.index < startIdx || tr.index > endIdx) return;
+          const x = getX(tr.index - startIdx);
+          const isSell = tr.kind === 'SELL';
+          const tipY = isSell ? getY(tr.price) - 16 : getY(tr.price) + 16;
+          ctx.beginPath();
+          if (isSell) {
+            ctx.moveTo(x, tipY + 8);
+            ctx.lineTo(x - 5, tipY);
+            ctx.lineTo(x + 5, tipY);
+          } else {
+            ctx.moveTo(x, tipY - 8);
+            ctx.lineTo(x - 5, tipY);
+            ctx.lineTo(x + 5, tipY);
+          }
+          ctx.closePath();
+          ctx.fillStyle = isSell ? '#f97316' : '#22c55e';
+          ctx.fill();
+          if (showSingularityLabels) {
+            ctx.font = 'bold 9px -apple-system, BlinkMacSystemFont, sans-serif';
+            ctx.fillStyle = isSell ? '#fdba74' : '#86efac';
+            ctx.textAlign = 'center';
+            ctx.fillText('觸發', x, isSell ? tipY - 3 : tipY + 11);
+          }
+        });
+      }
       let lastHighSingularityX = -999;
-      tfdrTurningPoints.highs.forEach(tp => {
+      singHighs.forEach(tp => {
         if (tp.index >= startIdx && tp.index <= endIdx) {
           const x = getX(tp.index - startIdx);
           if (x - lastHighSingularityX < 36) return;
@@ -1213,7 +1346,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       });
 
       let lastLowSingularityX = -999;
-      tfdrTurningPoints.lows.forEach(tp => {
+      singLows.forEach(tp => {
         if (tp.index >= startIdx && tp.index <= endIdx) {
           const x = getX(tp.index - startIdx);
           if (x - lastLowSingularityX < 36) return;
@@ -1343,6 +1476,8 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     crosshairDismissed,
     tfdrSeries,
     tfdrTurningPoints,
+    engineChartData,
+    candleSource,
     chartMode,
     showSingularityLabels,
     formatShortSignalLabel
@@ -1783,6 +1918,14 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           >
             {`奇點標籤: ${showSingularityLabels ? '顯示' : '隱藏'}`}
           </button>
+
+          <button
+            onClick={() => setCandleSource(prev => (prev === 'HA' ? 'RAW' : 'HA'))}
+            className="px-2 py-1 text-xs font-bold rounded bg-[#222] hover:bg-[#333] text-gray-200 border border-[#444] transition"
+            title="主圖燭體切換：HA 平均燭＝引擎單層平均K線（燭身 HA 開/收＋原始高低影線）；原始陰陽燭＝真實 OHLC。只影響顯示，數據管線與引擎永遠用原始 OHLC"
+          >
+            {`主圖: ${candleSource === 'HA' ? 'HA 平均燭' : '原始陰陽燭'}`}
+          </button>
         </div>
       </div>
 
@@ -1790,10 +1933,10 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       <div className="px-3 py-1 bg-[#0a0a0a] border-b border-[#1c1c1c] flex items-center justify-between text-[11px] text-gray-400 select-none flex-wrap gap-2">
         <div className="flex items-center gap-3 flex-wrap">
           <span className="flex items-center gap-1 font-bold text-white">
-            <span className="w-2.5 h-2.5 inline-block bg-[#10b981] rounded-xs"></span> 陽線
+            <span className="w-2.5 h-2.5 inline-block bg-[#10b981] rounded-xs"></span> {candleSource === 'HA' ? 'HA 陽線' : '陽線'}
           </span>
           <span className="flex items-center gap-1 font-bold text-white">
-            <span className="w-2.5 h-2.5 inline-block bg-[#ef4444] rounded-xs"></span> 陰線
+            <span className="w-2.5 h-2.5 inline-block bg-[#ef4444] rounded-xs"></span> {candleSource === 'HA' ? 'HA 陰線' : '陰線'}
           </span>
           {chartMode === 'CLASSIC' ? (
             <>
