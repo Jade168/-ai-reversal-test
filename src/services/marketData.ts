@@ -1,5 +1,5 @@
 import { RawKline, NewsItem, ApiConfig } from '../types/quant';
-import { sanitizeKlineData } from './quantCalculations';
+import { sanitizeKlineData, guardKlineSeriesIntegrity } from './quantCalculations';
 
 export function formatSymbolCode(symbol: string, assetType: string): string {
   const clean = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -93,21 +93,50 @@ export async function fetchMarketData(
 }
 
 /**
- * 【檢測拆股跳空並自動前復權回溯調整函數】
- * 
+ * 【檢測拆股跳空並自動前復權回溯調整函數】（2026-11-22 已大幅收緊，見下）
+ *
  * 核心邏輯：
  * 1. 檢測相鄰交易日之間因拆股（Stock Split）導致的超過 40% 的非自然價格暴跌（如 1:2, 1:3, 1:4, 1:5, 1:10 等），
  *    或因合股（Reverse Split）導致的超過 66% 的非自然暴漲。
- * 2. 計算精確拆股比率 (factor = curr.open / prev.close)，優先對齊標準金融拆股比例（容錯 ±6%）。
+ * 2. 計算精確拆股比率 (factor = curr.open / prev.close)，優先對齊標準金融拆股比例。
  * 3. 確保價格連續性：將拆股發生日之前的所有歷史 K 線 (0 到 i-1) 的開高低收價格統一乘以該比例進行前復權 (Backward-Adjusted)，
  *    並將成交量做等比反向調整，維持成交總市值守恆。
  * 4. 徹底消除圖表垂直斷裂線，保證 1836.15 及 142857 重力容錯計算不受斷層偽信號干擾。
+ *
+ * 【2026-11-22 收緊】網站主數據源係東方財富 fqt=1（本身已經係前復權，真拆股
+ * 喺源頭已經平滑咗），呢個守衛喺乾淨數據上面永遠唔會觸發；但舊版只睇隔夜
+ * 開市比率、容差 ±6%、唔驗收市同企穩，喺腐爛數據上面反覆誤觸，累積亂縮放
+ * 整出比例拼布同幻影成交（NVDA 累積 ×20.4、005 觸發 28 次）。而家改為三重
+ * 證據齊全先准郁：(1) 隔夜比率同標準拆股比例誤差 ≤2%；(2) 收市比率同隔夜
+ * 比率一致（誤差 ≤10%，即成支棒一齊搬去新水平，唔係得開市一支亂跳）；
+ * (3) 其後 5 支收市中位數企穩喺新水平 ±10% 內。用標準比例做 factor。
+ * 主要防線改由 guardKlineSeriesIntegrity 負責（抓取層剔除/截斷腐爛段），
+ * 呢個函數只留作未復權數據源嘅最後安全網。quantCalculations.ts 有一份
+ * 孖生函數，邏輯必須保持一致。
  */
 export function adjustKlinesForSplits(klines: RawKline[]): RawKline[] {
   if (!Array.isArray(klines) || klines.length < 2) return klines;
 
   // 淺拷貝對象以確保數據不被外部引用的意外修改
   const adjusted: RawKline[] = klines.map(k => ({ ...k }));
+
+  // 常見標準拆股倍數清單 (2:1, 3:1, 4:1, 5:1, 7:1, 8:1, 10:1, 20:1 及反向合股 1:2, 1:3, 1:4, 1:5, 1:10)
+  const commonSplitRatios = [
+    1 / 2,   // 2-for-1 (0.50)
+    1 / 3,   // 3-for-1 (0.3333)
+    1 / 4,   // 4-for-1 (0.25)
+    1 / 5,   // 5-for-1 (0.20 如 TSLA 2020)
+    1 / 7,   // 7-for-1 (0.1428 如 AAPL 2014)
+    1 / 8,   // 8-for-1 (0.125)
+    1 / 10,  // 10-for-1 (0.10 如 NVDA 2024)
+    1 / 15,  // 15-for-1 (0.0667)
+    1 / 20,  // 20-for-1 (0.05 如 AMZN / GOOGL 2022)
+    2 / 1,   // 1-for-2 反向合股
+    3 / 1,   // 1-for-3 反向合股
+    4 / 1,   // 1-for-4 反向合股
+    5 / 1,   // 1-for-5 反向合股
+    10 / 1   // 1-for-10 反向合股
+  ];
 
   // 按時間從舊到新（升序）逐根掃描相鄰兩日的價格比率
   for (let i = 1; i < adjusted.length; i++) {
@@ -125,32 +154,33 @@ export function adjustKlinesForSplits(klines: RawKline[]): RawKline[] {
     const isReverseSplit = ratio > 1.66;
 
     if (isSplitDrop || isReverseSplit) {
-      // 常見標準拆股倍數清單 (2:1, 3:1, 4:1, 5:1, 7:1, 8:1, 10:1, 20:1 及反向合股 1:2, 1:3, 1:4, 1:5, 1:10)
-      const commonSplitRatios = [
-        1 / 2,   // 2-for-1 (0.50)
-        1 / 3,   // 3-for-1 (0.3333)
-        1 / 4,   // 4-for-1 (0.25)
-        1 / 5,   // 5-for-1 (0.20 如 TSLA 2020)
-        1 / 7,   // 7-for-1 (0.1428 如 AAPL 2014)
-        1 / 8,   // 8-for-1 (0.125)
-        1 / 10,  // 10-for-1 (0.10 如 NVDA 2024)
-        1 / 15,  // 15-for-1 (0.0667)
-        1 / 20,  // 20-for-1 (0.05 如 AMZN / GOOGL 2022)
-        2 / 1,   // 1-for-2 反向合股
-        3 / 1,   // 1-for-3 反向合股
-        4 / 1,   // 1-for-4 反向合股
-        5 / 1,   // 1-for-5 反向合股
-        10 / 1   // 1-for-10 反向合股
-      ];
-
-      // 若實際跳空比例接近標準拆股比例（誤差在 ±6% 以內），採用標準比率；否則採用實際隔夜比率保證絕對平滑閉合
-      let factor = ratio;
+      // 證據一：隔夜比率必須同標準拆股比例吻合（誤差 ≤2%）；唔吻合一律當數據
+      // 斷層處理，唔准用實際比率亂縮（舊版就係死喺呢度）
+      let factor: number | null = null;
       for (const stdRatio of commonSplitRatios) {
-        if (Math.abs(ratio - stdRatio) / stdRatio <= 0.06) {
+        if (Math.abs(ratio - stdRatio) / stdRatio <= 0.02) {
           factor = stdRatio;
           break;
         }
       }
+      if (factor === null) continue;
+
+      // 證據二：收市比率要同隔夜比率一致（成支棒搬去新水平）
+      const closeRatio = curr.c / prev.c;
+      if (Math.abs(closeRatio - ratio) / ratio > 0.1) continue;
+
+      // 證據三：新水平要企穩——其後 5 支（連當日）收市中位數同當日收市相差 ≤10%
+      const nextCloses = adjusted
+        .slice(i, i + 5)
+        .map(b => b.c)
+        .sort((a, b) => a - b);
+      if (nextCloses.length < 3) continue;
+      const medianClose = nextCloses[Math.floor(nextCloses.length / 2)];
+      if (Math.abs(medianClose / curr.c - 1) > 0.1) continue;
+
+      console.warn(
+        `[拆股守衛] ${curr.date} 確認拆股/合股（隔夜比率 ${ratio.toFixed(4)} ≈ 標準比例 ${factor}），回溯調整之前 ${i} 支`
+      );
 
       // 將當前拆股事件之前的所有歷史 K 線 (從 0 到 i-1) 統一進行前復權比例縮放
       for (let j = 0; j < i; j++) {
@@ -238,8 +268,12 @@ function parseEastMoneyKlines(rawKlines: any[], cycle: string): RawKline[] {
 
   // 1. 先進行基礎數據有效性與排序清洗
   const cleanKlines = sanitizeKlineData(klines);
-  // 2. 檢測並自動修正非自然拆股跳空，生成平滑的前復權連續序列
-  const splitAdjusted = adjustKlinesForSplits(cleanKlines);
+  // 2. 系列完整性守衛（只限日線）：剔除孤立壞棒＋截斷腐爛段，唔畀東方財富
+  //    早期腐爛歷史入到引擎整出幻影成交（2026-11-22 數據層修法）
+  const integrityChecked =
+    mapPeriod(cycle) === 101 ? guardKlineSeriesIntegrity(cleanKlines) : cleanKlines;
+  // 3. 檢測並自動修正非自然拆股跳空（已收緊：三重證據先准郁），生成平滑的前復權連續序列
+  const splitAdjusted = adjustKlinesForSplits(integrityChecked);
 
   return splitAdjusted.slice(-5000);
 }
