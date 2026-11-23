@@ -20,6 +20,112 @@ export function mapPeriod(period: string): number {
   return 101;
 }
 
+/**
+ * 【Yahoo 烘焙檔代碼正規化】網站代碼 → 烘焙檔名（跟 data-symbols.json 清單格式）：
+ * 港股純數字補齊 4 位（'005'/'00700' → '0005'/'0700'），美股用大寫代號；
+ * 其他型式（指數/外匯等）回傳 null，唔試烘焙檔。
+ */
+function normalizeBakedCode(cleanSym: string): string | null {
+  if (/^\d+$/.test(cleanSym)) {
+    const digits = cleanSym.replace(/^0+/, '') || '0';
+    return digits.padStart(4, '0');
+  }
+  if (/^[A-Z]{1,6}$/.test(cleanSym)) return cleanSym;
+  return null;
+}
+
+/**
+ * 【日線優先序 1：Yahoo 烘焙檔】（2026-11-23 數據層主修 B2）
+ *
+ * GitHub Actions 每日將 Yahoo 調整價全史日線烘焙成同源靜態檔
+ * （public/data/<代碼>.json），解決東方財富 fqt=1 早期「水平型腐爛」
+ * （成段得真值 0.4–0.8 倍、逐年斜坡爬返 1.0，日波動正常、守衛捉唔到；
+ * 見審計報告 hk-data-audit-2026-11-23）。
+ *
+ * 讀到而且最後一棒距今 ≤14 日先用成條系列；讀唔到/過期/唔喺清單 →
+ * 回傳 null，由呼叫方跌返東方財富＋守衛全套後備（行為同修法前一模一樣）。
+ * Yahoo 調整價本身已乾淨：只行 sanitize（剔結構上唔可能嘅棒＋排序），
+ * 唔行拆股調整、亦唔行完整性守衛——守衛係為 EM 腐爛而設，喺 Yahoo 數上面
+ * 對 1986 呢類真・高波動細價股會誤截（實測 1986 全史畀守衛截走 884 棒，
+ * 2015–2019 段係真波動唔係腐爛；其餘 15 隻零作用、MSFT 誤剔 1 棒）。
+ */
+async function fetchBakedDailyKlines(cleanSym: string): Promise<RawKline[] | null> {
+  const code = normalizeBakedCode(cleanSym);
+  if (!code) return null;
+  try {
+    const res = await fetch(`${import.meta.env.BASE_URL}data/${code}.json`);
+    if (!res.ok) return null;
+    const json = await res.json();
+    const bars: RawKline[] = Array.isArray(json?.bars) ? json.bars : [];
+    if (bars.length < 100) return null;
+    const lastBarDate = String(json?.lastBarDate || bars[bars.length - 1]?.date || '');
+    const lastTs = Date.parse(`${lastBarDate}T00:00:00`);
+    if (!Number.isFinite(lastTs)) return null;
+    const ageDays = (Date.now() - lastTs) / 86400000;
+    if (ageDays > 14) {
+      console.info(
+        `[數據源] ${cleanSym} 烘焙檔已過期（最後一棒 ${lastBarDate}，${ageDays.toFixed(0)} 日前），改用東方財富後備`
+      );
+      return null;
+    }
+    const clean = sanitizeKlineData(bars);
+    if (clean.length < 100) return null;
+    console.info(
+      `[數據源] ${cleanSym} 日線：Yahoo 烘焙檔（烘焙時間 ${json?.bakedAt || '—'}，最後一棒 ${lastBarDate}，共 ${clean.length} 棒）`
+    );
+    return clean.slice(-5000);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 【週/月線聚合】（2026-11-23 審計 A(i)）
+ *
+ * 週/月線唔再獨立向 EM 攞冇守衛嘅系列（嗰條路水平腐爛比日線更勁），
+ * 改由「實際用緊嗰條日線系列」聚合：週線用 ISO 週（星期一起）、月線用
+ * 自然月。每期棒：日期/時間戳 = 期內最後一個交易日，開 = 首日開，
+ * 高 = 期內最高，低 = 期內最低，收 = 尾日收，量 = 期內總和。
+ */
+export function aggregateDailyKlines(daily: RawKline[], cycle: string): RawKline[] {
+  const klt = mapPeriod(cycle);
+  if (klt !== 102 && klt !== 103) return daily;
+  const groups = new Map<string, RawKline[]>();
+  for (const bar of daily) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(bar.date || '');
+    if (!m) continue;
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const d = Number(m[3]);
+    let key: string;
+    if (klt === 103) {
+      key = `${y}-${String(mo).padStart(2, '0')}`;
+    } else {
+      const dow = (new Date(Date.UTC(y, mo - 1, d)).getUTCDay() + 6) % 7; // 星期一 = 0
+      key = new Date(Date.UTC(y, mo - 1, d - dow)).toISOString().slice(0, 10);
+    }
+    const g = groups.get(key);
+    if (g) g.push(bar);
+    else groups.set(key, [bar]);
+  }
+  const out: RawKline[] = [];
+  for (const g of groups.values()) {
+    const first = g[0];
+    const last = g[g.length - 1];
+    let h = -Infinity;
+    let l = Infinity;
+    let vol = 0;
+    for (const b of g) {
+      if (b.h > h) h = b.h;
+      if (b.l < l) l = b.l;
+      vol += b.vol || 0;
+    }
+    out.push({ timestamp: last.timestamp, date: last.date, o: first.o, h, l, c: last.c, vol });
+  }
+  out.sort((a, b) => a.timestamp - b.timestamp);
+  return out;
+}
+
 export async function fetchMarketData(
   symbol: string,
   _assetType: string = 'stock',
@@ -33,6 +139,26 @@ export async function fetchMarketData(
   // 1. 如果切換為免費數據源模式或作為後備
   if (source === 'free') {
     return generateSyntheticKline(cleanSym, normCycle);
+  }
+
+  // 1b. 日線優先讀 Yahoo 烘焙檔（B2 主修）；讀唔到/過期先跌落下面東方財富後備全套
+  if (klt === 101) {
+    const baked = await fetchBakedDailyKlines(cleanSym);
+    if (baked && baked.length > 0) return baked;
+  } else if (klt === 102 || klt === 103) {
+    // 1c. 週/月線改由實際用緊嘅日線系列聚合（審計 A(i)），唔再獨立攞冇守衛嘅 EM 週/月線
+    try {
+      const dailySeries = await fetchMarketData(symbol, _assetType, 'daily', source);
+      if (dailySeries.length > 0) {
+        const aggregated = aggregateDailyKlines(dailySeries, normCycle);
+        if (aggregated.length > 0) {
+          console.info(`[數據源] ${cleanSym} ${normCycle}：由日線系列聚合（${aggregated.length} 棒）`);
+          return aggregated;
+        }
+      }
+    } catch (aggErr) {
+      console.warn('Weekly/monthly aggregation from daily failed, fallback to legacy fetch path:', aggErr);
+    }
   }
 
   // 2. 先嘗試後端代理 (支持本機與雲端環境)

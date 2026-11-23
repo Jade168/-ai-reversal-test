@@ -1,0 +1,1 @@
+{"comment":"Yahoo 烘焙清單（scripts/bake-data.mjs 用）：純數字 = 港股（補齊 4 位 + .HK），英文字母 = 美股代號。網站會優先讀 public/data/<代碼>.json，讀唔到/過期就用返東方財富＋守衛後備。","symbols":["0002","0005","0016","0700","1833","1986","2380","3690","9988","AAPL","NVDA","TSLA","MSFT","FUTU","GOOGL","DIS"]}
