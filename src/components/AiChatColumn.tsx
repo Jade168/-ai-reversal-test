@@ -7,9 +7,7 @@ interface AiChatColumnProps {
   aiReady: boolean;
   onInitAi: () => void;
   onSendLocal: (text: string) => void;
-  onSendExpert: (text: string, forceRefresh?: boolean) => void;
   onRunZeroTokenDiagnosis?: () => void;
-  isSendingExpert?: boolean;
   latestPuzzle?: PuzzleState | null;
 }
 
@@ -18,13 +16,10 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
   aiReady,
   onInitAi,
   onSendLocal,
-  onSendExpert,
   onRunZeroTokenDiagnosis,
-  isSendingExpert = false,
   latestPuzzle = null
 }) => {
   const [inputText, setInputText] = useState('');
-  const [forceRefreshCloud, setForceRefreshCloud] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -44,12 +39,6 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
   const handleLocalClick = () => {
     if (!inputText.trim()) return;
     onSendLocal(inputText.trim());
-    setInputText('');
-  };
-
-  const handleExpertClick = () => {
-    const query = inputText.trim() || '請結合月線通道、週線生命線與 TFDR 奇點給我完整實戰操盤報告';
-    onSendExpert(query, forceRefreshCloud);
     setInputText('');
   };
 
@@ -280,11 +269,6 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
             </div>
           );
         })}
-        {isSendingExpert && (
-          <div className="text-center p-2 text-purple-300 text-[11px] animate-pulse">
-            🌐 正在聯網調用專家大模型進行深度多維度推演...
-          </div>
-        )}
         <div ref={chatEndRef} />
       </div>
 
@@ -317,23 +301,7 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
             ⚡ 零流量診斷
           </button>
         )}
-        <button
-          onClick={handleExpertClick}
-          disabled={isSendingExpert}
-          className="flex-1 h-8 px-2 text-xs font-bold rounded bg-[#8b5cf6] text-white hover:bg-[#7c3aed] transition active:scale-98 disabled:opacity-50"
-        >
-          🌐 專家分析
-        </button>
       </div>
-      <label className="flex items-center justify-end gap-1.5 text-[10px] text-slate-400 cursor-pointer select-none">
-        <input
-          type="checkbox"
-          checked={forceRefreshCloud}
-          onChange={(e) => setForceRefreshCloud(e.target.checked)}
-          className="accent-purple-500 w-3 h-3"
-        />
-        <span>強制刷新雲端報告（跳過 4 小時省流快取）</span>
-      </label>
     </div>
   );
 };

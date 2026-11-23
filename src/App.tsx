@@ -29,7 +29,6 @@ import {
 import {
   generateLocalAiResponse,
   generateZeroTokenDiagnosis,
-  callExpertAi,
   QuantContext
 } from './services/aiChat';
 import {
@@ -90,7 +89,6 @@ export const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('⚡ 系統就緒，請輸入代碼啟動分析');
   const [aiModelReady, setAiModelReady] = useState(false);
-  const [isSendingExpert, setIsSendingExpert] = useState(false);
   const [isScanningBatch, setIsScanningBatch] = useState(false);
   const [isFetchingNews, setIsFetchingNews] = useState(false);
   const [globalHotNews, setGlobalHotNews] = useState<NewsItem[]>([]);
@@ -113,7 +111,7 @@ export const App: React.FC = () => {
     {
       id: 'init-1',
       role: 'system',
-      text: '🚀 終極系統已加載 | 雙核驅動：\n🔘 AI對話（本地大腦，秒回應）\n🔘 專家對話（自建Gemini / Claude AI，深度分析）\n✅ 已接入東方財富真實即日/歷史數據接口',
+      text: '🚀 終極系統已加載 | 本地雙核驅動：\n🔘 AI對話（本地大腦，秒回應）\n🔘 零流量診斷（本地專家，完整操盤報告）\n✅ 已接入東方財富真實即日/歷史數據接口',
       timestamp: Date.now()
     }
   ]);
@@ -517,38 +515,6 @@ export const App: React.FC = () => {
     addChatMessage('ai', report);
   };
 
-  // Expert AI Chat
-  const handleSendExpert = async (text: string, forceRefresh: boolean = false) => {
-    if (!aiModelReady) {
-      addChatMessage('error', '請先點擊上方「初始化AI」連接大腦！');
-      return;
-    }
-    addChatMessage('user', text);
-    setIsSendingExpert(true);
-
-    const context: QuantContext = {
-      symbolInfo,
-      modelData,
-      dailyKlines,
-      stats,
-      batchScanResults,
-      newsList,
-      sentiment,
-      globalHotNews,
-      tfdr,
-      latestTfdrPoint
-    };
-
-    try {
-      const reply = await callExpertAi(text, context, apiConfig, forceRefresh);
-      addChatMessage('expert', reply);
-    } catch (err: any) {
-      addChatMessage('error', `❌ 專家分析調用失敗: ${err.message}`);
-    } finally {
-      setIsSendingExpert(false);
-    }
-  };
-
   // Global News
   const handleFetchGlobalNews = async () => {
     setIsFetchingNews(true);
@@ -615,9 +581,7 @@ export const App: React.FC = () => {
               aiReady={aiModelReady}
               onInitAi={handleInitAi}
               onSendLocal={handleSendLocal}
-              onSendExpert={handleSendExpert}
               onRunZeroTokenDiagnosis={handleRunZeroTokenDiagnosis}
-              isSendingExpert={isSendingExpert}
               latestPuzzle={expertSummary?.puzzle ?? null}
             />
           </div>
