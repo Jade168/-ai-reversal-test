@@ -136,7 +136,7 @@ export async function fetchMarketData(
   const normCycle = String(cycle || 'daily').toLowerCase();
   const klt = mapPeriod(normCycle);
 
-  // 1. 如果切換為免費數據源模式或作為後備
+  // 1. 用家主動切換為免費數據源模式（合成數據，行為保留；唔再做 eastmoney 失敗嘅靜默後備）
   if (source === 'free') {
     return generateSyntheticKline(cleanSym, normCycle);
   }
@@ -182,7 +182,15 @@ export async function fetchMarketData(
     const fetchDirectFqt = async (id: string) => {
       try {
         const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${id}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56&klt=${klt}&fqt=1&end=20500101&lmt=5000`;
-        const res = await fetch(url);
+        // 每次嘗試加 8 秒時限：網絡齋拖住嗰陣唔好等幾分鐘先死，等失敗快啲浮上畫面
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 8000);
+        let res: Response;
+        try {
+          res = await fetch(url, { signal: controller.signal });
+        } finally {
+          clearTimeout(timer);
+        }
         const d = await res.json();
         if (d?.data?.klines && d.data.klines.length > 0) {
           return d.data.klines;
@@ -213,9 +221,10 @@ export async function fetchMarketData(
     console.warn('Direct EastMoney fetch failed:', directErr);
   }
 
-  // 4. 若網絡受限，生成高度逼真的量化K線以保證回測與分析可用 (涵蓋 10-20 年長週期)
-  console.info(`生成 ${symbol} 基準行情數據供量化回測`);
-  return generateSyntheticKline(cleanSym, normCycle);
+  // 4. 全部真數據源（烘焙檔／代理／東方財富直連）都失敗：明確報錯，
+  //    唔再靜默回合成假數冒充真數據（2026-11-23 Peter 拍板：假圖比冇數據更危險；
+  //    合成數據只保留喺用家主動揀嘅 'free' 模式，唔再做 eastmoney 失敗後備）
+  throw new Error(`東方財富抓取 ${cleanSym} 數據失敗：網絡連唔到或回空數據，請檢查網絡後再試`);
 }
 
 /**

@@ -975,7 +975,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           const y10 = getY(rightMostTfdr.band10);
           const y15 = Math.min(y10 - 14, getY(rightMostTfdr.band15));
           const y25 = Math.min(y15 - 14, getY(rightMostTfdr.band25));
-          drawEndTag(y25, '20 警戒', '#86efac', 'rgba(5, 46, 22, 0.78)');
+          drawEndTag(y25, '25 警戒', '#86efac', 'rgba(5, 46, 22, 0.78)');
           drawEndTag(y15, '15 黃金底', '#4ade80', 'rgba(5, 46, 22, 0.84)');
           drawEndTag(y10, '10 極底', '#22c55e', 'rgba(5, 46, 22, 0.88)');
         } else {
@@ -1868,7 +1868,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
             : puzzleState?.timeSpacePrompt.singularityStatus === 'UPPER_EXPANSION'
             ? '目前顯示：TFDR 動態奇點軌道 ⚠️ 上方三線展開 (85/90/95 警戒)'
             : puzzleState?.timeSpacePrompt.singularityStatus === 'LOWER_EXPANSION'
-            ? '目前顯示：TFDR 動態奇點軌道 🟢 下方三線展開 (20/15/10 黃金底)'
+            ? '目前顯示：TFDR 動態奇點軌道 🟢 下方三線展開 (25/15/10 黃金底)'
             : '目前顯示：TFDR 動態奇點軌道 (安全中區雙線邊界：85 壓力 · 15 支撐)'}
         </div>
         <div className="flex items-center gap-2">
