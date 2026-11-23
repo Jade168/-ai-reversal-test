@@ -9,6 +9,7 @@ import {
   OHLCBar,
   PuzzleState
 } from '../services/puzzleDecisionEngine';
+import { computeEnginePeriodSingularityLabels } from '../services/enginePeriodLabels';
 import { ZoomIn, ZoomOut, RotateCcw, ChevronDown, ChevronUp } from 'lucide-react';
 
 // L1 季線白/淺藍半透明箱體 + 50% 虛線 ｜ L2 月線黑 K 棒 + 50% 橫槓 ｜ L3 週線綠 K 棒 + 50% 橫槓 ｜ L4 日線黃色 HA K 棒 + 金星買點
@@ -505,7 +506,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
   // 引擎對齊數據（純讀取引擎輸出，唔改任何數據管線）：以原始 OHLC 跑一次 buildFullPuzzleTimeline，取得
   // (1) 每日單層 HA 開/收（主圖 HA 燭身，與 PiP L4 層同一來源）、(2) 引擎奇點武裝點、扣扳機參考線區間、
   // 實際觸發日。主圖奇點標籤改讀呢份引擎狀態，同系統實際買賣 100% 同步，唔再用 tfdrIndicator 另一套公式。
-  // 只喺日線圖啟用；週/月線圖維持舊行為，避免日期對唔齊畫錯值。引擎數據唔可用時回退舊標籤。
+  // 只喺日線圖啟用；週/月線圖改用下面 enginePeriodLabels（引擎週/月 TFDR＋85/15），兩者都唔可用時回退舊標籤。
   const engineChartData = useMemo(() => {
     if (!(timeframe === 'daily' || timeframe === '1d')) return null;
     const base: RawKline[] = dailyKlines.length > 0 ? dailyKlines : (activeData as unknown as RawKline[]);
@@ -568,6 +569,26 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     } catch {
       return null;
     }
+  }, [dailyKlines, activeData, timeframe]);
+
+  // 週/月線圖奇點標籤（丙方案＋85/15）：改讀引擎週/月 TFDR——每支期燭攞嗰個週期最後一個交易日
+  // 嘅引擎 overlay 值（收口嗰刻已知、零未來函數），≥85／≤15 連續入區為一簇，標籤貼簇內極值燭。
+  // 只限週/月線圖；日線圖用上面 engineChartData。引擎數據唔可用時回 null，繪圖退回舊標籤。
+  const enginePeriodLabels = useMemo(() => {
+    if (!(timeframe === 'weekly' || timeframe === 'monthly')) return null;
+    if (dailyKlines.length === 0 || activeData.length === 0) return null;
+    const ohlc: OHLCBar[] = dailyKlines.map(b => ({
+      date: (b.date || '').slice(0, 10),
+      open: Number(b.o),
+      high: Number(b.h),
+      low: Number(b.l),
+      close: Number(b.c)
+    }));
+    return computeEnginePeriodSingularityLabels(
+      ohlc,
+      activeData.map(b => ({ date: (b.date || '').slice(0, 10), h: b.h, l: b.l })),
+      timeframe
+    );
   }, [dailyKlines, activeData, timeframe]);
 
   // 從完整日線（fallback 至 activeData）構建無未來函數一年期 (~250日) L1~L4 嵌套 50% 平衡切線拼圖
@@ -636,7 +657,8 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     );
   }, [activeData]);
 
-  // 計算 TFDR 歷史奇點轉折點（高位：score >= 90；低位：score <= 20 或最低價觸及/跌穿 band15 地板線）
+  // 計算 TFDR 歷史奇點轉折點（展示公式版：高位 score >= 90；低位 score <= 20 或最低價觸及/跌穿 band15 地板線）
+  // 而家只做後備：日線圖用引擎 verdict、週/月線圖用引擎週/月 TFDR＋85/15，兩者都唔可用先退回呢份。
   const tfdrTurningPoints = useMemo(() => {
     const highs: Array<{ index: number; price: number }> = [];
     const lows: Array<{ index: number; price: number }> = [];
@@ -1255,10 +1277,19 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
         ctx.restore();
       }
     } else {
-      // TFDR 模式：(c) 奇點標籤改讀決策引擎狀態——武裝點（singularityLow/High 首次設定嗰日）標「奇點沽／奇點買」，
-      // 武裝期間畫扣扳機參考線，引擎實際扣扳機嗰日標「觸發」；同系統買賣 100% 同步。引擎數據唔可用先退回舊標籤。
-      const singHighs = engineChartData ? engineChartData.highs : tfdrTurningPoints.highs;
-      const singLows = engineChartData ? engineChartData.lows : tfdrTurningPoints.lows;
+      // TFDR 模式：(c) 奇點標籤改讀決策引擎狀態——日線圖：武裝點（singularityLow/High 首次設定嗰日）標「奇點沽／奇點買」，
+      // 武裝期間畫扣扳機參考線，引擎實際扣扳機嗰日標「觸發」；同系統買賣 100% 同步。
+      // 週/月線圖：改讀引擎週/月 TFDR（≥85／≤15 入區、簇極值貼標，丙方案＋85/15）。引擎數據唔可用先退回舊標籤。
+      const singHighs = engineChartData
+        ? engineChartData.highs
+        : enginePeriodLabels
+          ? enginePeriodLabels.highs
+          : tfdrTurningPoints.highs;
+      const singLows = engineChartData
+        ? engineChartData.lows
+        : enginePeriodLabels
+          ? enginePeriodLabels.lows
+          : tfdrTurningPoints.lows;
       if (engineChartData) {
         ctx.save();
         ctx.setLineDash([5, 4]);
@@ -1477,6 +1508,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     tfdrSeries,
     tfdrTurningPoints,
     engineChartData,
+    enginePeriodLabels,
     candleSource,
     chartMode,
     showSingularityLabels,
