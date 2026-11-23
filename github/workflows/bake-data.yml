@@ -1,0 +1,44 @@
+name: Bake Market Data (Yahoo)
+
+# 每日定時（UTC 23:35 = 香港 07:35，港股前一日已收、美股啱啱收市）＋手動觸發。
+# 只聽 schedule / workflow_dispatch，唔聽 push，避免烘焙 commit 自我觸發無限循環。
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '35 23 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bake-data
+  cancel-in-progress: false
+
+jobs:
+  bake:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Bake Yahoo data
+        run: node scripts/bake-data.mjs
+
+      - name: Commit & push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public/data
+          if git diff --cached --quiet; then
+            echo "烘焙數據冇變動，唔使 commit"
+            exit 0
+          fi
+          git commit -m "數據烘焙 $(date -u +%F)"
+          # 防撞 Peter 自己嘅 push：push 前先 rebase，撞咗重試一次
+          git pull --rebase origin main
+          git push origin main || { git pull --rebase origin main; git push origin main; }
