@@ -1,0 +1,64 @@
+# ============================================================
+# 畀 Peter 嘅手動上架步驟（約 2 分鐘，喺 GitHub 網頁做）
+#
+# 點解要手動：Muse 呢邊登入 GitHub 嘅 token 冇 `workflow` 權限，
+# GitHub 規定唔准程式改 .github/workflows/ 嘅檔案（已實試，畀佢拒絕咗）。
+# 你自己喺網頁貼一次就得，之後唔使再理。
+#
+# 步驟：
+# 1. 開 https://github.com/Jade168/-ai-reversal-test
+# 2. 撳「Add file」→「Create new file」
+# 3. 檔名欄打：.github/workflows/bake-data.yml
+#    （打完 `.github/` 佢會自動跳下一格，照打埋 `workflows/` 同 `bake-data.yml`）
+# 4. 將下面由「name: Bake Market Data (Yahoo)」開始、去到檔尾嘅全部內容
+#    複製貼入去（唔使貼呢段 # 註解）
+# 5. 撳右上角「Commit changes...」→ 再撳「Commit changes」
+# 6. 驗證：去倉庫「Actions」分頁 → 左邊「Bake Market Data (Yahoo)」
+#    →「Run workflow」→ 綠色「Run workflow」；行完變綠剔 = 成功。
+#    之後每日香港時間 07:35 自動烘焙新數據，唔使再做任何嘢。
+# ============================================================
+
+name: Bake Market Data (Yahoo)
+
+# 每日定時（UTC 23:35 = 香港 07:35，港股前一日已收、美股啱啱收市）＋手動觸發。
+# 只聽 schedule / workflow_dispatch，唔聽 push，避免烘焙 commit 自我觸發無限循環。
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '35 23 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bake-data
+  cancel-in-progress: false
+
+jobs:
+  bake:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Bake Yahoo data
+        run: node scripts/bake-data.mjs
+
+      - name: Commit & push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public/data
+          if git diff --cached --quiet; then
+            echo "烘焙數據冇變動，唔使 commit"
+            exit 0
+          fi
+          git commit -m "數據烘焙 $(date -u +%F)"
+          # 防撞 Peter 自己嘅 push：push 前先 rebase，撞咗重試一次
+          git pull --rebase origin main
+          git push origin main || { git pull --rebase origin main; git push origin main; }
