@@ -6,6 +6,8 @@ export interface RawKline {
   l: number;
   c: number;
   vol?: number;
+  /** 即日未完成棒（顯示專用）：只由 fetchLiveTodayBar 標記，永不入引擎／模型／回測 */
+  isLiveToday?: boolean;
 }
 
 export interface ModelBar extends RawKline {

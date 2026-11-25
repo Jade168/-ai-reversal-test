@@ -410,9 +410,65 @@ const FourTimeframeOverlayPiP: React.FC<{
   );
 };
 
+/**
+ * 【即日價・顯示專用】即日未完成棒可唔可以畫上圖（純函數，方便測試）：
+ * 只限日線圖、非回放、日期新過最後一支烘焙棒。週／月／5 分鐘圖唔畫（即日棒係日線棒）。
+ * 呢個判斷只影響蠟燭顯示，唔掂任何引擎／模型／指標計算（嗰啲全部繼續用 activeData）。
+ */
+export function getLiveDisplayBar(
+  activeData: Array<{ date?: string }>,
+  liveTodayBar: RawKline | null | undefined,
+  timeframe: string | undefined,
+  isReplay: boolean
+): RawKline | null {
+  if (!liveTodayBar || isReplay) return null;
+  const tf = String(timeframe || '1d').toLowerCase();
+  if (tf !== 'daily' && tf !== '1d') return null;
+  const liveDate = (liveTodayBar.date || '').slice(0, 10);
+  const lastDate = (activeData[activeData.length - 1]?.date || '').slice(0, 10);
+  if (!liveDate || !lastDate || liveDate <= lastDate) return null;
+  if (
+    !Number.isFinite(liveTodayBar.o) ||
+    !Number.isFinite(liveTodayBar.h) ||
+    !Number.isFinite(liveTodayBar.l) ||
+    !Number.isFinite(liveTodayBar.c)
+  ) {
+    return null;
+  }
+  return liveTodayBar;
+}
+
+/** 【即日價・顯示專用】即日棒轉做圖表 ModelBar：中性指標欄位，唔生任何訊號／標記／線。 */
+export function toLiveModelBar(live: RawKline): ModelBar {
+  return {
+    timestamp: live.timestamp,
+    date: live.date,
+    o: live.o,
+    h: live.h,
+    l: live.l,
+    c: live.c,
+    vol: live.vol ?? 0,
+    coreGravityLine: 0,
+    supportLine1: 0,
+    supportLine2: 0,
+    resistanceLine: 0,
+    pivot: 0,
+    dateGuiYuan: 0,
+    priceGuiYuan: 0,
+    buySignal: false,
+    sellSignal: false,
+    isResonance: false,
+    deviation: 0,
+    sentiment: '',
+    isLiveToday: true
+  };
+}
+
 interface HeaderChartProps {
   data: ModelBar[];
   dailyKlines?: RawKline[];
+  /** 即日未完成棒（顯示專用）：只畫多一支蠟燭，唔入任何計算 */
+  liveTodayBar?: RawKline | null;
   isLoading: boolean;
   loadingMessage: string;
   isReplay: boolean;
@@ -428,6 +484,7 @@ interface HeaderChartProps {
 export const HeaderChart: React.FC<HeaderChartProps> = ({
   data,
   dailyKlines = [],
+  liveTodayBar = null,
   isLoading,
   loadingMessage,
   isReplay,
@@ -506,6 +563,19 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     }
     return data;
   }, [data, isReplay, replayIndex]);
+
+  // 【即日價・顯示專用】畫圖嗰陣先喺尾部加多一支即日蠟燭。activeData 本身一字唔郁：
+  // tfdrSeries／boxMarkers／engineChartData／enginePeriodLabels／qqpModelLayer／
+  // nestedPiPData 全部繼續讀 activeData（烘焙版），即日棒只入下面 drawChart 嘅
+  // visibleBars，唔影響任何訊號／指標／引擎數字。
+  const liveBar = useMemo(
+    () => getLiveDisplayBar(activeData, liveTodayBar, timeframe, isReplay),
+    [activeData, liveTodayBar, timeframe, isReplay]
+  );
+  const displayBars = useMemo<ModelBar[]>(
+    () => (liveBar ? [...activeData, toLiveModelBar(liveBar)] : activeData),
+    [activeData, liveBar]
+  );
 
   // 引擎對齊數據（純讀取引擎輸出，唔改任何數據管線）：以原始 OHLC 跑一次 buildFullPuzzleTimeline，取得
   // (1) 每日單層 HA 開/收（主圖 HA 燭身，與 PiP L4 層同一來源）、(2) 引擎奇點武裝點、扣扳機參考線區間、
@@ -783,8 +853,14 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     }
 
     const startIdx = Math.max(0, viewRange?.start ?? Math.max(0, activeData.length - 80));
-    const endIdx = Math.min(activeData.length - 1, viewRange?.end ?? activeData.length - 1);
-    const visibleBars = activeData.slice(startIdx, endIdx + 1);
+    // 即日棒：睇緊尾段嗰陣（viewRange 尾＝最後一支烘焙棒），endIdx 伸多一格包埋即日棒；
+    // 已經向左平移咗嘅話唔伸，唔好將未完成棒畫入歷史窗口。
+    const baseEnd = viewRange?.end ?? activeData.length - 1;
+    const endIdx = Math.min(
+      displayBars.length - 1,
+      baseEnd + (liveBar && baseEnd >= activeData.length - 1 ? 1 : 0)
+    );
+    const visibleBars = displayBars.slice(startIdx, endIdx + 1);
     const visibleTfdr = tfdrSeries.slice(startIdx, endIdx + 1);
 
     if (visibleBars.length === 0) {
@@ -814,7 +890,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     }
 
     const lastTfdr = tfdrSeries.length > 0 ? tfdrSeries[tfdrSeries.length - 1] : null;
-    const isLatestInView = endIdx === activeData.length - 1;
+    const isLatestInView = endIdx >= activeData.length - 1;
     const activeTfdrScore =
       (isLatestInView && lastTfdr ? lastTfdr.score : visibleTfdr[visibleTfdr.length - 1]?.score) ?? 50;
     const expandTopBands = activeTfdrScore >= 80;
@@ -1081,6 +1157,21 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       ctx.fillStyle = color;
       ctx.fillRect(x - barWidth / 2, topY, barWidth, bodyH);
 
+      // 即日未完成棒：虛線框＋「即日」標記，睇得出係未收市（HA 模式下佢冇 HA 燭身，
+      // 上面已經退回原始 OHLC 燭身，唔會扮成一支已確認嘅 HA 蠟燭）
+      if ((bar as ModelBar).isLiveToday) {
+        ctx.save();
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = '#facc15';
+        ctx.lineWidth = 1.2;
+        ctx.strokeRect(x - barWidth / 2 - 0.5, topY - 0.5, barWidth + 1, bodyH + 1);
+        ctx.restore();
+        ctx.fillStyle = '#facc15';
+        ctx.font = 'bold 9px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('即日', x, Math.max(margin.top + 8, highY - 6));
+      }
+
       // Date ticks across multi-year timeline
       if (i % Math.max(1, Math.floor(visibleBars.length / 8)) === 0) {
         ctx.fillStyle = '#888888';
@@ -1236,13 +1327,15 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       });
 
       // 8. Fourier Hologram Prediction Line (CLASSIC 模式保留全息線)
-      if (hologramLine.length > 0 && endIdx === activeData.length - 1) {
-        const lastX = getX(visibleBars.length - 1);
+      // 全息線錨定最後一支烘焙棒（唔係即日棒——預測線係由烘焙收市價計出嚟，唔可以用未完成棒做錨）
+      if (hologramLine.length > 0 && endIdx >= activeData.length - 1) {
+        const lastBakedIdx = Math.max(0, activeData.length - 1 - startIdx);
+        const lastX = getX(lastBakedIdx);
         ctx.beginPath();
         ctx.setLineDash([4, 3]);
         ctx.strokeStyle = '#d8b4fe';
         ctx.lineWidth = 2;
-        ctx.moveTo(lastX, getY(visibleBars[visibleBars.length - 1].c));
+        ctx.moveTo(lastX, getY(visibleBars[lastBakedIdx].c));
 
         hologramLine.forEach((val, fIdx) => {
           const fx = lastX + (fIdx + 1) * stepX;
@@ -1655,6 +1748,8 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     ctx.restore();
   }, [
     activeData,
+    displayBars,
+    liveBar,
     viewRange,
     boxMarkers,
     hologramLine,

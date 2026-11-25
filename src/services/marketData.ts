@@ -228,6 +228,157 @@ export async function fetchMarketData(
 }
 
 /**
+ * 【即日價】市場「今日」日期（按市場時區取本地曆日）：
+ * 港股／滬深用 Asia/Hong_Kong（同 UTC+8，曆日一樣），美股用 America/New_York。
+ * 用 Intl 取時區曆日，唔靠瀏覽器本地時區（Peter 喺香港，美股日期唔可以直接用本地日期）。
+ */
+function todayStrInTimeZone(tz: string): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date());
+  const get = (t: string) => parts.find(p => p.type === t)?.value ?? '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
+/**
+ * 【即日價】由東方財富 kline 字串解析最後一棒，並驗證佢係咪「今日」嘅有效棒。
+ * EM kline 格式：`日期,開,收,高,低,量,...`。唔係今日／OHLC 唔合理一律回 null
+ * （未開市、假期、舊數據全部唔要——唔好將舊棒扮今日棒）。
+ */
+function parseLiveTodayBar(klines: unknown, todayStr: string): RawKline | null {
+  if (!Array.isArray(klines) || klines.length === 0) return null;
+  const last = klines[klines.length - 1];
+  if (typeof last !== 'string') return null;
+  const p = last.split(',');
+  const date = (p[0] || '').slice(0, 10);
+  if (date !== todayStr) return null;
+  const o = Number(p[1]);
+  const c = Number(p[2]);
+  const h = Number(p[3]);
+  const l = Number(p[4]);
+  const vol = Number(p[5]) || 0;
+  if (![o, h, l, c].every(Number.isFinite) || o <= 0 || h <= 0 || l <= 0 || c <= 0) return null;
+  if (h < Math.max(o, c) || l > Math.min(o, c)) return null;
+  if (vol < 0) return null;
+  const ts = Date.parse(`${date}T00:00:00`);
+  if (!Number.isFinite(ts)) return null;
+  return { timestamp: ts, date, o, h, l, c, vol, isLiveToday: true };
+}
+
+/**
+ * 【即日價】輕量抓今日未完成棒（顯示專用，2026-11-26 Peter 拍板加返即日價顯示）。
+ *
+ * B2 之前網站每次開都直接抓東方財富日線，開市嗰陣睇到即日價；B2 改做烘焙檔優先
+ * 之後，烘焙檔新鮮嗰陣完全唔掂東方財富，只睇到上日收市。呢個函數補返嗰一棒：
+ * 只攞最後 5 棒（lmt=5，唔好攞 5000 棒），先試後端代理再試直接 push2his
+ * （同 fetchMarketData 嘅後備次序），成個函數共用一個 8 秒總時限。
+ *
+ * Fail-soft：唔通／超時／回傳唔係今日／格式唔啱——一律回 null，唔 throw，
+ * 呼叫方靜靜跌返烘焙版。絕對唔用合成數據頂替。呢個函數唔掂任何引擎／模型。
+ */
+export async function fetchLiveTodayBar(
+  symbol: string,
+  _assetType: string = 'stock',
+  source: string = 'eastmoney'
+): Promise<RawKline | null> {
+  if (source === 'free') return null;
+  const cleanSym = symbol
+    .trim()
+    .toUpperCase()
+    .replace('.US', '')
+    .replace('.HK', '')
+    .replace('.N', '')
+    .replace('.O', '');
+  // 市場時區：純數字＝港股／滬深（UTC+8），英文字母＝美股（紐約）；其他型式（指數／外匯等）唔做即日價
+  let tz: string | null = null;
+  if (/^\d+$/.test(cleanSym)) tz = 'Asia/Hong_Kong';
+  else if (/^[A-Z]{1,6}$/.test(cleanSym)) tz = 'America/New_York';
+  else return null;
+  const todayStr = todayStrInTimeZone(tz);
+  const deadline = Date.now() + 8000;
+  const remainingMs = () => deadline - Date.now();
+
+  const fetchWithDeadline = async (url: string): Promise<Response | null> => {
+    const ms = remainingMs();
+    if (ms <= 0) return null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    try {
+      return await fetch(url, { signal: controller.signal });
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  // 1. 後端代理（本地／雲端先有；GitHub Pages 會 404，靜靜跌落直連）
+  try {
+    const res = await fetchWithDeadline(
+      `/api/kline?symbol=${encodeURIComponent(cleanSym)}&klt=101&period=daily`
+    );
+    if (res && res.ok) {
+      const json = await res.json().catch(() => null);
+      const bar = parseLiveTodayBar(json?.data, todayStr);
+      if (bar) return bar;
+    }
+  } catch {
+    // 跌落直連
+  }
+
+  // 2. 直接 push2his（lmt=5 輕量）：主 secid 先，唔得先試美股後綴（同舊版次序）
+  const secids: string[] = /^\d+$/.test(cleanSym)
+    ? [`116.${cleanSym.padStart(5, '0')}`]
+    : [`105.${cleanSym}`, `105.${cleanSym}.N`, `105.${cleanSym}.O`, `105.${cleanSym}.A`, `105.${cleanSym}.K`];
+  for (const id of secids) {
+    if (remainingMs() <= 0) break;
+    try {
+      const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${id}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56&klt=101&fqt=1&end=20500101&lmt=5`;
+      const res = await fetchWithDeadline(url);
+      if (!res || !res.ok) continue;
+      const d = await res.json().catch(() => null);
+      const bar = parseLiveTodayBar(d?.data?.klines, todayStr);
+      if (bar) return bar;
+    } catch {
+      continue;
+    }
+  }
+
+  console.warn(
+    `[即日價] ${cleanSym} 抓唔到今日棒（東方財富唔通／未開市／假期），圖表沿用烘焙收市價`
+  );
+  return null;
+}
+
+/**
+ * 【即日價】顯示專用數據：烘焙系列（fetchMarketData 原樣，完全唔郁）＋有效嘅今日棒。
+ * 有今日棒而且新過烘焙最後一棒先加；冇、舊咗、重複咗就原樣返烘焙版。
+ * 今日棒帶 isLiveToday: true 標記。引擎／模型／回測唔應該食呢個函數嘅輸出，
+ * 嗰啲繼續用 fetchMarketData（烘焙版）——見 App.tsx runQuantAnalysis 分流。
+ */
+export async function fetchMarketDataForDisplay(
+  symbol: string,
+  assetType: string = 'stock',
+  cycle: string = 'daily',
+  source: string = 'eastmoney'
+): Promise<RawKline[]> {
+  const baked = await fetchMarketData(symbol, assetType, cycle, source);
+  if (mapPeriod(cycle) !== 101 || source === 'free') return baked;
+  try {
+    const live = await fetchLiveTodayBar(symbol, assetType, source);
+    if (!live) return baked;
+    const lastDate = (baked[baked.length - 1]?.date || '').slice(0, 10);
+    if (!live.date || live.date <= lastDate) return baked;
+    return [...baked, live];
+  } catch {
+    return baked;
+  }
+}
+
+/**
  * 【檢測拆股跳空並自動前復權回溯調整函數】（2026-11-22 已大幅收緊，見下）
  *
  * 核心邏輯：

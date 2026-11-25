@@ -21,6 +21,7 @@ import {
 } from './services/quantCalculations';
 import {
   fetchMarketData,
+  fetchLiveTodayBar,
   fetchSymbolNews,
   analyzeNewsSentiment,
   fetchGlobalHotNews,
@@ -67,6 +68,10 @@ export const App: React.FC = () => {
   const [rawData, setRawData] = useState<RawKline[]>([]);
   const [dailyKlines, setDailyKlines] = useState<RawKline[]>([]);
   const [modelData, setModelData] = useState<ModelBar[]>([]);
+  // 即日未完成棒（顯示專用）：只畫上日線圖做多一支蠟燭，永不入引擎／模型／回測
+  const [liveTodayBar, setLiveTodayBar] = useState<RawKline | null>(null);
+  // 即日價請求序號：轉股／再分析嗰陣舊請求返嚟唔好寫入新股嘅圖
+  const liveTodayReqRef = useRef(0);
   const [symbolInfo, setSymbolInfo] = useState<SymbolInfo | null>(null);
   const [stats, setStats] = useState<BacktestStats | null>(null);
   const [resonance, setResonance] = useState<ResonanceAnalysis | null>(null);
@@ -224,6 +229,22 @@ export const App: React.FC = () => {
         return;
       }
       setRawData(klines);
+
+      // 【即日價・顯示專用分流】烘焙 klines 上面已經餵晒 calculateModel／回測引擎／
+      // TFDR／專家報告（以下全部繼續用烘焙版，一字不變）；呢度另外 fire-and-forget
+      // 攞今日未完成棒，只畀 HeaderChart 畫多一支蠟燭。唔 await（唔阻載入，東方財富
+      // 唔通／未開市就靜靜冇咗支棒）；只限日線圖＋非 free 模式；批量掃描唔攞。
+      const liveReqId = ++liveTodayReqRef.current;
+      setLiveTodayBar(null);
+      if (period === 'daily' && dataSource !== 'free') {
+        fetchLiveTodayBar(sym, assetType, dataSource)
+          .then(bar => {
+            if (liveReqId === liveTodayReqRef.current) setLiveTodayBar(bar);
+          })
+          .catch(() => {
+            /* fetchLiveTodayBar 本身唔 throw，呢度只係防萬一 */
+          });
+      }
 
       setLoadingMessage(`📰 抓取相關財經新聞並分析情緒...`);
       const news = await fetchSymbolNews(sym, assetType);
@@ -552,6 +573,7 @@ export const App: React.FC = () => {
       <HeaderChart
         data={modelData}
         dailyKlines={dailyKlines}
+        liveTodayBar={liveTodayBar}
         isLoading={isLoading}
         loadingMessage={loadingMessage}
         isReplay={isReplaying}
