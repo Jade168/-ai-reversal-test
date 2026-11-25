@@ -45,7 +45,7 @@ import {
 } from './services/localQuantAnalyst';
 import { runSleeveBacktest, SleeveBacktestResult } from './services/sleeveBacktest';
 
-import { HeaderChart } from './components/HeaderChart';
+import { HeaderChart, getLiveDisplayBar } from './components/HeaderChart';
 import { ApiConfigCard } from './components/ApiConfigCard';
 import { AiChatColumn } from './components/AiChatColumn';
 import { QuantControlPanel } from './components/QuantControlPanel';
@@ -188,6 +188,27 @@ export const App: React.FC = () => {
     // Auto load multi-year data depth for TSLA
     runQuantAnalysis('TSLA');
   }, []);
+
+  // 【即日價・顯示專用】當前日期／最新價嗰幾格用嘅即日棒：只限日線＋非回放＋新過
+  // 烘焙最後一棒先有；其餘情況（週／月線、回放、無即日棒、舊棒）一律 null，
+  // 顯示同而家一字不變。引擎／模型／回測／專家指令唔食呢個值。
+  const displayLiveBar = getLiveDisplayBar(modelData, liveTodayBar, period, isReplaying);
+
+  // 【即日價・顯示專用】symbolInfo.latestPrice 跟即日價行：有即日棒嗰陣顯示即日收市價，
+  // 無嗰陣跌返烘焙最後一棒收市價。只改 latestPrice 呢格——核心線／支撐／阻力位、
+  // 專家指令、TFDR、回測全部繼續食烘焙版，一字不變。
+  useEffect(() => {
+    setSymbolInfo(prev => {
+      if (!prev) return prev;
+      const bakedLast = modelData[modelData.length - 1];
+      const price = displayLiveBar
+        ? displayLiveBar.c.toFixed(2)
+        : bakedLast
+          ? bakedLast.c.toFixed(2)
+          : prev.latestPrice;
+      return prev.latestPrice === price ? prev : { ...prev, latestPrice: price };
+    });
+  }, [displayLiveBar, modelData]);
 
   const handleSaveApiConfig = (cfg: ApiConfig) => {
     localStorage.setItem('ai_provider', cfg.provider);
@@ -605,6 +626,7 @@ export const App: React.FC = () => {
               onSendLocal={handleSendLocal}
               onRunZeroTokenDiagnosis={handleRunZeroTokenDiagnosis}
               latestPuzzle={expertSummary?.puzzle ?? null}
+              displayLiveBar={displayLiveBar}
             />
           </div>
         </div>
@@ -638,6 +660,7 @@ export const App: React.FC = () => {
           {/* Signals, Statistics & Integrated Trade Logs */}
           <SignalAndStatsArea
             lastBar={modelData.length > 0 ? modelData[modelData.length - 1] : null}
+            displayLiveBar={displayLiveBar}
             symbolInfo={symbolInfo}
             stats={stats}
             resonance={resonance}

@@ -1,11 +1,14 @@
 import React, { useState } from 'react';
-import { ModelBar, SymbolInfo, BacktestStats, ResonanceAnalysis, TradeLog } from '../types/quant';
+import { ModelBar, RawKline, SymbolInfo, BacktestStats, ResonanceAnalysis, TradeLog } from '../types/quant';
+import { resolveDisplayQuote } from '../services/marketData';
 import { MultiTimeframeTFDR, TFDRPoint } from '../services/tfdrIndicator';
 import { LocalExpertSummary } from '../services/localQuantAnalyst';
 import { SleeveBacktestResult } from '../services/sleeveBacktest';
 
 interface SignalAndStatsAreaProps {
   lastBar: ModelBar | null;
+  /** 【即日價・顯示專用】合資格即日棒（App 已閘好：日線＋非回放＋新過烘焙棒先有）；淨係用嚟顯示當前日期／價錢 */
+  displayLiveBar?: RawKline | null;
   symbolInfo: SymbolInfo | null;
   stats: BacktestStats | null;
   resonance: ResonanceAnalysis | null;
@@ -20,6 +23,7 @@ interface SignalAndStatsAreaProps {
 
 export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
   lastBar,
+  displayLiveBar = null,
   symbolInfo,
   stats,
   resonance,
@@ -32,6 +36,11 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
   sleeveResult = null
 }) => {
   if (!lastBar || !symbolInfo || !stats) return null;
+
+  // 【即日價・顯示專用】當前日期／價錢顯示值：有即日棒就用即日日期＋收市價＋「即日」標記，
+  // 否則原樣用烘焙最後一棒。以下只係顯示——買賣訊號／核心線／支撐阻力／TFDR 參考價／
+  // 回測數字全部繼續用 lastBar（烘焙版），一字不變。
+  const quote = resolveDisplayQuote(lastBar, displayLiveBar);
 
   // 底部共振分析框預設收合（單行摘要條），把螢幕空間讓畀 K 線圖同交易紀錄框；撳一下先展開全文
   const [resonanceExpanded, setResonanceExpanded] = useState(false);
@@ -72,10 +81,12 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
       {/* Date & Live Price Header */}
       <div className="flex items-center justify-between text-xs">
         <span className="px-1.5 py-0.5 rounded-xs bg-[#1f2937] text-gray-400 text-[10px]">
-          日期：{lastBar.date?.split(' ')[0]}
+          日期：{quote.date}
+          {quote.isLive && <span className="text-amber-300 font-bold ml-1">即日</span>}
         </span>
         <span className="px-2 py-0.5 rounded-xs bg-emerald-500/20 text-emerald-400 font-bold text-sm">
-          最新價：${lastBar.c.toFixed(2)}
+          最新價：${quote.close.toFixed(2)}
+          {quote.isLive && <span className="text-amber-300 text-[10px] ml-1">即日</span>}
         </span>
       </div>
 
@@ -487,7 +498,8 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
             title={resonanceExpanded ? '收合複合共振分析' : '展開複合共振分析'}
           >
             <span className="text-[#8b5cf6] font-bold truncate">
-              🔮 369 + 142857 複合共振分析｜{resonance.signal}｜現價 ${lastBar.c.toFixed(2)}｜支撐 $
+              🔮 369 + 142857 複合共振分析｜{resonance.signal}｜現價 ${quote.close.toFixed(2)}
+              {quote.isLive && '（即日）'}｜支撐 $
               {resonance.suggestions.strongBuy}｜阻力 ${resonance.suggestions.sellZone}
             </span>
             <span className="text-[10px] text-gray-400 font-normal shrink-0">
@@ -499,8 +511,8 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
             <div className="p-2 pt-0">
           <div className="grid grid-cols-3 gap-1 mb-1.5">
             <div className="bg-[#111] p-1 rounded-sm text-center border border-[#222]">
-              <div className="text-[#666] text-[9px]">現價</div>
-              <div className="text-white font-bold">${lastBar.c.toFixed(2)}</div>
+              <div className="text-[#666] text-[9px]">現價{quote.isLive ? '（即日）' : ''}</div>
+              <div className="text-white font-bold">${quote.close.toFixed(2)}</div>
               <div className="text-[#8b5cf6] text-[9px]">歸元 {resonance.guiYuan.current}</div>
             </div>
             <div className="bg-[#111] p-1 rounded-sm text-center border border-[#222]">
@@ -561,9 +573,9 @@ export const SignalAndStatsArea: React.FC<SignalAndStatsAreaProps> = ({
               </div>
               <div
                 className="font-bold mt-0.5"
-                style={{ color: lastBar.c < numericBuyPrice ? '#10b981' : '#ef4444' }}
+                style={{ color: quote.close < numericBuyPrice ? '#10b981' : '#ef4444' }}
               >
-                {lastBar.c < numericBuyPrice
+                {quote.close < numericBuyPrice
                   ? '✅ 錯價機會！現價低於買入成本，可於溝貨區分批攤平'
                   : '❌ 現價高於買入價，注意逢高鎖利'}
               </div>

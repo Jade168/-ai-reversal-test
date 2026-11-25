@@ -379,6 +379,25 @@ export async function fetchMarketDataForDisplay(
 }
 
 /**
+ * 【即日價・顯示專用】當前日期／價錢顯示值（純函數，方便測試）：
+ * 有合資格即日棒（新過烘焙最後一棒）就顯示即日日期＋收市價＋isLive=true，
+ * 否則原樣顯示烘焙最後一棒。只供「當前日期／價錢」顯示位用——引擎／模型／
+ * 回測／專家指令／價位水平唔應該食呢個函數。防守：即日棒日期唔新過烘焙棒
+ * 都當無（閘門本身喺 getLiveDisplayBar，不過呢度再驗一次）。
+ */
+export function resolveDisplayQuote(
+  baked: { date?: string; c: number },
+  liveBar: RawKline | null | undefined
+): { date: string; close: number; isLive: boolean } {
+  const bakedDate = (baked.date || '').slice(0, 10);
+  const liveDate = (liveBar?.date || '').slice(0, 10);
+  if (liveBar && liveDate && bakedDate && liveDate > bakedDate && Number.isFinite(liveBar.c)) {
+    return { date: liveDate, close: liveBar.c, isLive: true };
+  }
+  return { date: bakedDate, close: baked.c, isLive: false };
+}
+
+/**
  * 【檢測拆股跳空並自動前復權回溯調整函數】（2026-11-22 已大幅收緊，見下）
  *
  * 核心邏輯：

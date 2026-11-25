@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { ChatMessage } from '../types/quant';
+import { ChatMessage, RawKline } from '../types/quant';
+import { resolveDisplayQuote } from '../services/marketData';
 import { PuzzleState } from '../services/puzzleDecisionEngine';
 
 interface AiChatColumnProps {
@@ -9,6 +10,8 @@ interface AiChatColumnProps {
   onSendLocal: (text: string) => void;
   onRunZeroTokenDiagnosis?: () => void;
   latestPuzzle?: PuzzleState | null;
+  /** 【即日價・顯示專用】合資格即日棒（App 已閘好）；淨係用嚟顯示提示單頭嗰格日期／價錢 */
+  displayLiveBar?: RawKline | null;
 }
 
 export const AiChatColumn: React.FC<AiChatColumnProps> = ({
@@ -17,7 +20,8 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
   onInitAi,
   onSendLocal,
   onRunZeroTokenDiagnosis,
-  latestPuzzle = null
+  latestPuzzle = null,
+  displayLiveBar = null
 }) => {
   const [inputText, setInputText] = useState('');
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -95,9 +99,20 @@ export const AiChatColumn: React.FC<AiChatColumnProps> = ({
               <span className="font-bold text-amber-300">
                 🎯 {latestPuzzle.symbol} 最新時空提示單
               </span>
-              <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
-                {latestPuzzle.timeSpacePrompt.triggerDate} · ${latestPuzzle.currentPrice}
-              </span>
+              {(() => {
+                // 【即日價・顯示專用】提示單頭嗰格日期／價錢：有即日棒就顯示即日日期＋收市價＋「即日」，
+                // 否則原樣顯示拼圖觸發日＋現價。卡入面其他嘢（訊號／大勢／HA 狀態）繼續用烘焙版。
+                const quote = resolveDisplayQuote(
+                  { date: latestPuzzle.timeSpacePrompt.triggerDate, c: latestPuzzle.currentPrice },
+                  displayLiveBar
+                );
+                return (
+                  <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+                    {quote.date} · ${quote.close.toFixed(2)}
+                    {quote.isLive && <span className="text-amber-300 font-bold"> 即日</span>}
+                  </span>
+                );
+              })()}
             </div>
             <span
               className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${

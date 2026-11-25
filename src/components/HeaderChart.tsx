@@ -17,7 +17,9 @@ import { ZoomIn, ZoomOut, RotateCcw, ChevronDown, ChevronUp } from 'lucide-react
 const FourTimeframeOverlayPiP: React.FC<{
   puzzleState: PuzzleState;
   nestedData: NestedPuzzlePiPData | null;
-}> = ({ puzzleState, nestedData }) => {
+  /** 【即日價・顯示專用】合資格即日棒（HeaderChart 已閘好）；淨係用嚟顯示標籤嗰格日期／收市價 */
+  liveBar?: RawKline | null;
+}> = ({ puzzleState, nestedData, liveBar = null }) => {
   // 桌面預設展開、手機版預設收合以免遮擋主圖
   const [pipCollapsed, setPipCollapsed] = useState<boolean>(() =>
     typeof window !== 'undefined' ? window.innerWidth < 768 : false
@@ -80,6 +82,12 @@ const FourTimeframeOverlayPiP: React.FC<{
 
   const tsp = puzzleState.timeSpacePrompt;
 
+  // 【即日價・顯示專用】未 hover 嗰陣，標籤顯示即日日期＋收市價＋「即日」；hover 緊就顯示返
+  // hover 緊嗰支蠟燭（烘焙版）。小窗入面幅迷你圖本身繼續用烘焙數據，唔郁。
+  const labelIsLive = hoverIdx == null && !!liveBar;
+  const labelDate = labelIsLive ? (liveBar!.date || '').slice(0, 10) : activeCandle?.date;
+  const labelClose = labelIsLive ? liveBar!.c : activeCandle?.close;
+
   return (
     <div
       className="absolute top-2 left-2 z-20 w-[328px] sm:w-[392px] max-w-[94vw] bg-slate-950/92 backdrop-blur-md border border-indigo-500/50 rounded-lg p-2 shadow-2xl select-none"
@@ -123,7 +131,8 @@ const FourTimeframeOverlayPiP: React.FC<{
               <div className="flex justify-between text-[8.5px] font-mono text-slate-400 px-0.5 mb-0.5">
                 <span>高 ${nestedData.maxPrice.toFixed(2)}</span>
                 <span className="text-slate-200">
-                  {activeCandle.date} · 收 ${activeCandle.close.toFixed(2)}
+                  {labelDate} · 收 ${labelClose != null ? labelClose.toFixed(2) : '--'}
+                  {labelIsLive && <span className="text-amber-300 font-bold"> 即日</span>}
                 </span>
               </div>
 
@@ -2321,7 +2330,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
 
         {/* 左上角：一年期四週期 50% 平衡切線嵌套拼圖 (SVG Overlay Canvas) */}
         {puzzleState && (
-          <FourTimeframeOverlayPiP puzzleState={puzzleState} nestedData={nestedPiPData} />
+          <FourTimeframeOverlayPiP puzzleState={puzzleState} nestedData={nestedPiPData} liveBar={liveBar} />
         )}
 
         {/* Loading Overlay */}
