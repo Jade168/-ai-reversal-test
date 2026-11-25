@@ -7,6 +7,7 @@ import {
   OverlayPoint,
   PuzzleState
 } from './puzzleDecisionEngine';
+import { qqpModelOverlapLines } from './qqpModelSignals';
 
 export interface LocalAnalysisInput {
   symbol: string;
@@ -215,15 +216,37 @@ export function generatePuzzleExpertReport(symbol: string, dailyData: OHLCBar[])
   if (!dailyData || dailyData.length === 0) return '';
   const puzzle = computePuzzleDecision(symbol, dailyData, dailyData.length - 1);
   const summary = evaluatePuzzleExpertSummary(puzzle);
+  // (v5 應用版第 4 項，純文字標記——唔改任何決策欄位／閾值／數字／verdict)：
+  // 最新一個引擎沽出日／買入日喺 ±5 日內撞到模型頂／底嗰陣，加一行「模型確認」標記
+  // （確認頂／底做主標記，快頂／底做輔助）；撞唔到就唔加行。計唔到就當無事發生。
+  let overlapLines: string[] = [];
+  try {
+    const timeline = buildFullPuzzleTimeline(dailyData);
+    const sellDates: string[] = [];
+    const buyDates: string[] = [];
+    timeline.verdicts.forEach((v, i) => {
+      if (v.signal === 'PARTIAL_PROFIT') sellDates.push(timeline.sorted[i].date);
+      if (v.signal === 'GOLDEN_BUY') buyDates.push(timeline.sorted[i].date);
+    });
+    overlapLines = qqpModelOverlapLines(
+      dailyData.map(b => ({ date: b.date, o: b.open, h: b.high, l: b.low, c: b.close })),
+      sellDates,
+      buyDates
+    );
+  } catch {
+    overlapLines = [];
+  }
+  const withOverlap = (report: string): string =>
+    overlapLines.length > 0 ? `${report}\n${overlapLines.join('\n')}` : report;
   const haCtx = buildHaStructureContext(dailyData);
-  if (!haCtx) return summary.fullReport;
+  if (!haCtx) return withOverlap(summary.fullReport);
   const blocks = formatHaStructureBlocks(haCtx, {
     buyLow: puzzle.levels.buyZone.low,
     buyHigh: puzzle.levels.buyZone.high,
     tpLow: puzzle.levels.takeProfitZone.low,
     tpHigh: puzzle.levels.takeProfitZone.high
   });
-  return [...summary.fullReport.split('\n'), ...blocks].join('\n');
+  return withOverlap([...summary.fullReport.split('\n'), ...blocks].join('\n'));
 }
 
 export function evaluateLocalExpertSummary(input: LocalAnalysisInput): LocalExpertSummary {

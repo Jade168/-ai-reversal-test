@@ -10,6 +10,7 @@ import {
   PuzzleState
 } from '../services/puzzleDecisionEngine';
 import { computeEnginePeriodSingularityLabels } from '../services/enginePeriodLabels';
+import { computeQqpModelLayer, QqpModelLayer } from '../services/qqpModelSignals';
 import { ZoomIn, ZoomOut, RotateCcw, ChevronDown, ChevronUp } from 'lucide-react';
 
 // L1 季線白/淺藍半透明箱體 + 50% 虛線 ｜ L2 月線黑 K 棒 + 50% 橫槓 ｜ L3 週線綠 K 棒 + 50% 橫槓 ｜ L4 日線黃色 HA K 棒 + 金星買點
@@ -447,6 +448,9 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
   // 奇點文字標籤顯示開關：只隱藏 TFDR 模式下「奇點買／奇點沽」細字標籤（小三角箭頭保留），K 線本身不受影響
   const [showSingularityLabels, setShowSingularityLabels] = useState<boolean>(true);
 
+  // QQP R7 模型頂／底顯示層開關（v5 應用版，純顯示）：快訊號空心三角＋確認訊號實心三角
+  const [showModelSignals, setShowModelSignals] = useState<boolean>(true);
+
   // 主圖燭體來源：HA＝引擎單層平均K（預設；燭身讀引擎 OverlayPoint.haOpen/haClose、影線用原始高低）；
   // RAW＝原始陰陽燭。純渲染切換——數據管線與引擎永遠只用原始 OHLC，呢個 state 唔會回寫任何數據。
   const [candleSource, setCandleSource] = useState<'HA' | 'RAW'>('HA');
@@ -589,6 +593,48 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       activeData.map(b => ({ date: (b.date || '').slice(0, 10), h: b.h, l: b.l })),
       timeframe
     );
+  }, [dailyKlines, activeData, timeframe]);
+
+  // QQP R7 模型頂／底層（v5 應用版，純顯示——唔改任何引擎／交易判定）：
+  // 日線圖用日線 K 線計 D 模型，週線圖用週線 K 線計 W 模型；月線圖無 R7 模型，唔顯示。
+  // 訊號點先按日期對返 activeData 嘅 index（replay 切片下，未來訊號自動唔見）。
+  // 數據唔夠（<70 棒）或者計唔到就回 null，唔顯示、唔報錯。
+  const qqpModelLayer = useMemo((): QqpModelLayer | null => {
+    if (timeframe === 'monthly') return null;
+    const period = timeframe === 'weekly' ? 'W' : 'D';
+    const base: RawKline[] = period === 'D'
+      ? (dailyKlines.length > 0 ? dailyKlines : (activeData as unknown as RawKline[]))
+      : (activeData as unknown as RawKline[]);
+    if (!base || base.length === 0 || activeData.length === 0) return null;
+    const layer = computeQqpModelLayer(
+      base.map(b => ({
+        date: (b.date || '').slice(0, 10),
+        o: Number(b.o),
+        h: Number(b.h),
+        l: Number(b.l),
+        c: Number(b.c),
+        vol: b.vol
+      })),
+      period
+    );
+    if (!layer) return null;
+    const idxByDate = new Map<string, number>();
+    activeData.forEach((b, i) => idxByDate.set((b.date || '').slice(0, 10), i));
+    const remap = (pts: Array<{ index: number; price: number; date: string }>) => {
+      const out: Array<{ index: number; price: number; date: string }> = [];
+      for (const p of pts) {
+        const idx = idxByDate.get(p.date);
+        if (idx != null) out.push({ index: idx, price: p.price, date: p.date });
+      }
+      return out;
+    };
+    return {
+      ...layer,
+      fastHighs: remap(layer.fastHighs),
+      fastLows: remap(layer.fastLows),
+      confirmedHighs: remap(layer.confirmedHighs),
+      confirmedLows: remap(layer.confirmedLows)
+    };
   }, [dailyKlines, activeData, timeframe]);
 
   // 從完整日線（fallback 至 activeData）構建無未來函數一年期 (~250日) L1~L4 嵌套 50% 平衡切線拼圖
@@ -1421,6 +1467,116 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       });
     }
 
+    // 8b. QQP R7 模型頂／底顯示層（v5 應用版，純顯示）：快訊號＝空心三角（早期預警），
+    // 確認訊號＝實心三角＋「確認頂／確認底」標籤（R7＋C3b，滯後 6 棒、假穿率約 1%、漏 7 個底）。
+    // 同一棒同時係快＋確認嗰陣只畫確認標記，唔重疊。月線圖無模型，qqpModelLayer 係 null。
+    if (showModelSignals && qqpModelLayer) {
+      const confHighIdx = new Set(qqpModelLayer.confirmedHighs.map(p => p.index));
+      const confLowIdx = new Set(qqpModelLayer.confirmedLows.map(p => p.index));
+      const drawModelTri = (
+        pt: { index: number; price: number },
+        isHigh: boolean,
+        filled: boolean,
+        color: string
+      ) => {
+        if (pt.index < startIdx || pt.index > endIdx) return false;
+        const x = getX(pt.index - startIdx);
+        const tipY = isHigh ? getY(pt.price) - 4 : getY(pt.price) + 4;
+        ctx.beginPath();
+        if (isHigh) {
+          ctx.moveTo(x, tipY);
+          ctx.lineTo(x - 5, tipY - 8);
+          ctx.lineTo(x + 5, tipY - 8);
+        } else {
+          ctx.moveTo(x, tipY);
+          ctx.lineTo(x - 5, tipY + 8);
+          ctx.lineTo(x + 5, tipY + 8);
+        }
+        ctx.closePath();
+        if (filled) {
+          ctx.fillStyle = color;
+          ctx.fill();
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 0.8;
+          ctx.stroke();
+        } else {
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+        return true;
+      };
+      const drawModelLabel = (
+        pt: { index: number; price: number },
+        isHigh: boolean,
+        label: string,
+        boxBg: string,
+        boxBorder: string,
+        textColor: string,
+        lastX: number
+      ): number => {
+        const x = getX(pt.index - startIdx);
+        if (x - lastX < 36) return lastX;
+        const tipY = isHigh ? getY(pt.price) - 4 : getY(pt.price) + 4;
+        ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
+        const tw = ctx.measureText(label).width;
+        const bw = tw + 10;
+        const bh = 17;
+        const bx = Math.max(margin.left + 2, Math.min(margin.left + plotW - bw - 2, x - bw / 2));
+        const by = isHigh
+          ? Math.max(margin.top + 2, tipY - 12 - bh)
+          : Math.min(margin.top + plotH - bh - 2, tipY + 12);
+        ctx.fillStyle = boxBg;
+        ctx.strokeStyle = boxBorder;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.roundRect(bx, by, bw, bh, 4);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = textColor;
+        ctx.textAlign = 'center';
+        ctx.fillText(label, bx + bw / 2, by + 12);
+        return x;
+      };
+      // 快訊號（空心）：確認點唔重畫
+      let lastFastHighX = -999;
+      qqpModelLayer.fastHighs.forEach(pt => {
+        if (confHighIdx.has(pt.index)) return;
+        const x = getX(pt.index - startIdx);
+        if (pt.index < startIdx || pt.index > endIdx || x - lastFastHighX < 36) return;
+        if (drawModelTri(pt, true, false, '#f87171')) lastFastHighX = x;
+      });
+      let lastFastLowX = -999;
+      qqpModelLayer.fastLows.forEach(pt => {
+        if (confLowIdx.has(pt.index)) return;
+        const x = getX(pt.index - startIdx);
+        if (pt.index < startIdx || pt.index > endIdx || x - lastFastLowX < 36) return;
+        if (drawModelTri(pt, false, false, '#4ade80')) lastFastLowX = x;
+      });
+      // 確認訊號（實心＋標籤）
+      let lastConfHighX = -999;
+      qqpModelLayer.confirmedHighs.forEach(pt => {
+        if (pt.index < startIdx || pt.index > endIdx) return;
+        const x = getX(pt.index - startIdx);
+        if (x - lastConfHighX < 36) return;
+        if (!drawModelTri(pt, true, true, '#dc2626')) return;
+        lastConfHighX = x;
+        if (showSingularityLabels) {
+          lastConfHighX = drawModelLabel(pt, true, '確認頂', 'rgba(127, 29, 29, 0.92)', '#dc2626', '#fee2e2', lastConfHighX);
+        }
+      });
+      let lastConfLowX = -999;
+      qqpModelLayer.confirmedLows.forEach(pt => {
+        if (pt.index < startIdx || pt.index > endIdx) return;
+        const x = getX(pt.index - startIdx);
+        if (x - lastConfLowX < 36) return;
+        if (!drawModelTri(pt, false, true, '#059669')) return;
+        lastConfLowX = x;
+        if (showSingularityLabels) {
+          lastConfLowX = drawModelLabel(pt, false, '確認底', 'rgba(6, 78, 59, 0.92)', '#059669', '#d1fae5', lastConfLowX);
+        }
+      });
+    }
     // 9. Interactive Crosshair & Tooltip (支援點擊空白處或白色數據條立即隱藏 / 再點一下重新查看)
     const activePointer =
       !crosshairDismissed &&
@@ -1509,9 +1665,11 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     tfdrTurningPoints,
     engineChartData,
     enginePeriodLabels,
+    qqpModelLayer,
     candleSource,
     chartMode,
     showSingularityLabels,
+    showModelSignals,
     formatShortSignalLabel
   ]);
 
@@ -1952,6 +2110,14 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           </button>
 
           <button
+            onClick={() => setShowModelSignals(prev => !prev)}
+            className="px-2 py-1 text-xs font-bold rounded bg-[#222] hover:bg-[#333] text-gray-200 border border-[#444] transition"
+            title="顯示／隱藏 QQP R7 模型頂／底層：空心三角＝快訊號（早期預警），實心三角＝確認訊號（R7＋C3b，滯後6棒，假穿率約1%，漏7個底）。純顯示，唔影響任何交易判定；月線圖無模型"
+          >
+            {`模型頂/底: ${showModelSignals ? '顯示' : '隱藏'}`}
+          </button>
+
+          <button
             onClick={() => setCandleSource(prev => (prev === 'HA' ? 'RAW' : 'HA'))}
             className="px-2 py-1 text-xs font-bold rounded bg-[#222] hover:bg-[#333] text-gray-200 border border-[#444] transition"
             title="主圖燭體切換：HA 平均燭＝引擎單層平均K線（燭身 HA 開/收＋原始高低影線）；原始陰陽燭＝真實 OHLC。只影響顯示，數據管線與引擎永遠用原始 OHLC"
@@ -1970,6 +2136,23 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           <span className="flex items-center gap-1 font-bold text-white">
             <span className="w-2.5 h-2.5 inline-block bg-[#ef4444] rounded-xs"></span> {candleSource === 'HA' ? 'HA 陰線' : '陰線'}
           </span>
+          {qqpModelLayer && (
+            <>
+              <span className="flex items-center gap-1 font-bold" title="QQP R7 快訊號：早期預警，空心三角">
+                <span className="text-[#f87171]">▽</span>
+                <span className="text-[#4ade80]">△</span>
+                <span className="text-slate-300">快頂/快底</span>
+              </span>
+              <span
+                className="flex items-center gap-1 font-bold"
+                title="QQP R7＋C3b 確認訊號：分型窗口外 i+4..i+6 無新極值先確認，訊號滯後 6 棒，假穿率約 1%，代價係漏 7 個底（全部係底，頂一個都冇漏）"
+              >
+                <span className="text-[#dc2626]">▼</span>
+                <span className="text-[#059669]">▲</span>
+                <span className="text-slate-300">確認頂/確認底（滯後6棒，漏7個底，假穿率約1%）</span>
+              </span>
+            </>
+          )}
           {chartMode === 'CLASSIC' ? (
             <>
               <span className="flex items-center gap-1 text-[#8b5cf6] font-bold">
@@ -1998,7 +2181,29 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
             </>
           )}
         </div>
-        <div className="text-[10px] text-gray-500 font-mono">
+        <div className="text-[10px] text-gray-500 font-mono flex items-center gap-2">
+          {qqpModelLayer && (
+            <span
+              className={`px-1.5 py-0.5 rounded font-bold ${
+                qqpModelLayer.leg === 'up'
+                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/60'
+                  : qqpModelLayer.leg === 'down'
+                  ? 'bg-red-500/20 text-red-300 border border-red-400/60'
+                  : 'bg-slate-500/20 text-slate-300 border border-slate-400/60'
+              }`}
+              title={`大周期腿向（25% zigzag，只做牛熊定性，唔做預測過濾）${
+                qqpModelLayer.legPivotDate
+                  ? `；最新確認拐點 ${qqpModelLayer.legPivotDate} @ $${qqpModelLayer.legPivotPrice}`
+                  : ''
+              }`}
+            >
+              {qqpModelLayer.leg === 'up'
+                ? '▲ 大周期：上升腿'
+                : qqpModelLayer.leg === 'down'
+                ? '▼ 大周期：下跌腿'
+                : '大周期：腿向未明'}
+            </span>
+          )}
           區間：{sliderMetrics.startDate} ~ {sliderMetrics.endDate}
         </div>
       </div>
