@@ -1,4 +1,5 @@
-// QQP v1.2＋b10 模型頂／底顯示層（2026-11-26，取代已死嘅 R7 版；純顯示——唔參與任何交易判定）
+// QQP v1.2＋tfdr55 模型頂／底顯示層（2026-11-26，取代已死嘅 R7 版；純顯示——唔參與任何交易判定）
+// （2026-11-26 第二輪：b10 升級做 tfdr55——反轉棒 TFDR proxy >55 跳過嗰次沽；買入唔郁。）
 //
 // 基底 v1.2（同 Python qqp-fit-v3 一字不差，TS 交叉檢查 508 個訊號 0 差異）：
 //   hl3 日線（頂 ×0.98／底 ×1.02）＋週線 price-agree（±1 週、移咗價差 ≤5%）＋C3b 確認（+6 棒）
@@ -8,6 +9,11 @@
 //   （含武裝棒）等第一支 HA 梯級反轉棒（買：haHigh 破上支高；沽：haLow 破上支低，引擎定義，
 //   唔加陰陽條件）先確認；10 棒內無反轉就作廢，唔顯示。顯示出嚟嘅確認頂／底全部係 HA 確認過嘅，
 //   唔會早沽早買。快訊號＝v1.2 武裝訊號（早期預警，未經 HA 確認）。
+// 確認頂再加 tfdr55 過濾（同 qqp-b10-followup-test.ts 一字不差，OOS 最穩嗰個；唔用 45，
+//   45 係 in-sample 掃描最高值）：反轉棒嗰陣 TFDR proxy >55 就跳過嗰次沽——價錢未跌返
+//   20 日 HA 中線，唔好喺強勢腿入面沽局部頂。TFDR proxy＝raw 公式（中線＝20 日 HA 中線
+//   ((haH+haL)/2) 均值；TFDR＝50+((收市−中線)/(ATR14×2.2))×22，夾 0–100；無引擎 pin
+//   規則）；只濾沽出（確認頂），確認底唔郁。快頂／快底唔郁。
 // 大周期層：25% zigzag 只做牛熊定性（上升腿／下跌腿），唔做任何過濾。
 //
 // 計算方法：瀏覽器即場計（路線 a）。網站係 GitHub Pages 純靜態，圖表手頭已有
@@ -15,6 +21,8 @@
 // 一樣計到。數據唔夠（<70 棒）或者計唔到就回 null，呼叫方唔顯示、唔報錯。
 //
 // 硬邊界：b10 回報 $65,517,483 仲差引擎 $89,011,104 達 −26.4%，只入顯示層，絕對唔入引擎。
+// tfdr55 單獨策略 $101,477,383（贏引擎 +$12.47M，OOS 贏引擎 +$1.73M）係研究數字——
+// 顯示層濾走熱頂，唔等於引擎換咗呢條規則；引擎整合要另外設計＋A/B 驗。
 // 呢個檔唔 import 任何引擎／回測／verdict 檔案，只讀 K 線計顯示標記。
 
 export interface QqpBar {
@@ -39,7 +47,7 @@ export interface QqpModelLayer {
   /** 快訊號（v1.2 武裝訊號）：早期預警，未經 HA 反轉確認 */
   fastHighs: QqpSignalPoint[];
   fastLows: QqpSignalPoint[];
-  /** 確認訊號（v1.2＋b10）：武裝後 10 棒內有 HA 梯級反轉先確認 */
+  /** 確認訊號（v1.2＋b10＋tfdr55）：武裝後 10 棒內有 HA 梯級反轉先確認；確認頂反轉棒 TFDR>55 跳過 */
   confirmedHighs: QqpSignalPoint[];
   confirmedLows: QqpSignalPoint[];
   /** 25% zigzag 大周期腿向（最新已確認拐點）：上升腿／下跌腿／未明 */
@@ -152,6 +160,8 @@ interface V12Sig {
   knownDate: string | null;
   /** 移咗價訊號價（頂 ×topMul／底 ×botMul） */
   price: number;
+  /** b10Confirm 搵到嘅第一支 HA 梯級反轉棒 index（未確認嗰陣 undefined；供 tfdr55 過濾用） */
+  revIdx?: number;
 }
 
 function computeV12Signals(
@@ -253,12 +263,42 @@ function b10Confirm(bars: QqpBar[], sigs: V12Sig[], haH: number[], haL: number[]
     if (t == null) continue;
     const last = Math.min(t + n - 1, bars.length - 1);
     let ok = false;
+    let revIdx = -1;
     for (let r = t; r <= last; r++) {
       if (r <= 0) continue;
-      if (s.side === 'low' && haH[r] > haH[r - 1]) { ok = true; break; }
-      if (s.side === 'high' && haL[r] < haL[r - 1]) { ok = true; break; }
+      if (s.side === 'low' && haH[r] > haH[r - 1]) { ok = true; revIdx = r; break; }
+      if (s.side === 'high' && haL[r] < haL[r - 1]) { ok = true; revIdx = r; break; }
     }
-    if (ok) out.push(s);
+    if (ok) out.push({ ...s, revIdx });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- TFDR proxy（同 qqp-b10-followup-test.ts 一字不差；raw 公式，無引擎 pin 規則）
+// 中線＝20 日 HA 中線 ((haH+haL)/2) 均值；ATR＝14 日 TR 平均（raw 棒計）；
+// TFDR＝50+((收市−中線)/(ATR×2.2))×22，夾 0–100。供 tfdr55 過濾確認頂用。
+function tfdrProxy(bars: QqpBar[], haH: number[], haL: number[]): number[] {
+  const n = bars.length;
+  const tr: number[] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    tr[i] = i === 0
+      ? bars[i].h - bars[i].l
+      : Math.max(bars[i].h - bars[i].l, Math.abs(bars[i].h - bars[i - 1].c), Math.abs(bars[i].l - bars[i - 1].c));
+  }
+  const atr: number[] = new Array(n);
+  let s = 0;
+  for (let i = 0; i < n; i++) {
+    s += tr[i];
+    if (i >= 14) s -= tr[i - 14];
+    atr[i] = Math.max(1e-9, s / Math.min(i + 1, 14));
+  }
+  const out: number[] = new Array(n);
+  let m = 0;
+  for (let i = 0; i < n; i++) {
+    m += (haH[i] + haL[i]) / 2;
+    if (i >= 20) m -= (haH[i - 20] + haL[i - 20]) / 2;
+    const mid = m / Math.min(i + 1, 20);
+    out[i] = Math.max(0, Math.min(100, 50 + ((bars[i].c - mid) / (atr[i] * 2.2)) * 22));
   }
   return out;
 }
@@ -422,11 +462,16 @@ export function computeQqpModelLayer(
     }
     const { haH, haL } = haHighLow(bars);
     const conf = b10Confirm(bars, sigs, haH, haL, 10);
+    // tfdr55：確認頂反轉棒嗰陣 TFDR proxy >55 就跳過嗰次沽（唔顯示）；確認底／快訊號唔郁。
+    // revIdx 缺失嗰陣保守保留（唔濾）。週線層同日線層用同一條規則。
+    const tfdr = tfdrProxy(bars, haH, haL);
+    const confHighs = conf.filter(
+      o => o.side === 'high' && (o.revIdx == null || o.revIdx < 0 || tfdr[o.revIdx] <= 55)
+    );
+    const confLows = conf.filter(o => o.side === 'low');
 
     const highs = sigs.filter(o => o.side === 'high');
     const lows = sigs.filter(o => o.side === 'low');
-    const confHighs = conf.filter(o => o.side === 'high');
-    const confLows = conf.filter(o => o.side === 'low');
 
     const pivots = zigzagPivots(bars, 0.25);
     const { leg, pivot } = legAt(bars.length - 1, pivots);
@@ -494,7 +539,7 @@ export function qqpModelOverlapLines(
     const fast = nearestWithin(layer.fastHighs.map(p => p.date), sellDay, 5);
     if (conf) {
       lines.push(
-        `• 最新沽出日 ${sellDay} ±5日內有模型確認頂（${conf.date}，相差${conf.diffDays}日）｜v1.2＋HA 反轉確認（武裝後 10 棒內，訊號精確約 0.64）`
+        `• 最新沽出日 ${sellDay} ±5日內有模型確認頂（${conf.date}，相差${conf.diffDays}日）｜v1.2＋HA 反轉確認＋TFDR>55 跳過沽（武裝後 10 棒內，訊號精確約 0.64）`
       );
     } else if (fast) {
       lines.push(

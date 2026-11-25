@@ -44,6 +44,7 @@ import {
   evaluateLocalExpertSummary
 } from './services/localQuantAnalyst';
 import { runSleeveBacktest, SleeveBacktestResult } from './services/sleeveBacktest';
+import { appendChatMessage } from './services/chatLog';
 
 import { HeaderChart, getLiveDisplayBar } from './components/HeaderChart';
 import { ApiConfigCard } from './components/ApiConfigCard';
@@ -124,53 +125,9 @@ export const App: React.FC = () => {
   const didInitRef = useRef(false);
 
   const addChatMessage = useCallback((role: ChatMessage['role'], text: string) => {
-    const trimmed = text.trim();
-    setChatMessages((prev) => {
-      // 1. 若最新一條訊息與即將寫入的內容相同，直接覆蓋更新而非重複新增一條
-      if (
-        prev.length > 0 &&
-        prev[prev.length - 1].role === role &&
-        prev[prev.length - 1].text.trim() === trimmed
-      ) {
-        const updated = [...prev];
-        updated[updated.length - 1] = {
-          ...updated[updated.length - 1],
-          text,
-          timestamp: Date.now()
-        };
-        return updated;
-      }
-
-      // 2. 若為拼圖最新單日預警報告或重複報告（📊 【...），覆蓋最近一筆同類報告避免翻舊帳堆疊
-      if (role === 'ai' && trimmed.startsWith('📊 【')) {
-        const isPuzzleCard = trimmed.includes('拼圖量化引擎');
-        for (let i = prev.length - 1; i >= 0; i--) {
-          const prevText = prev[i].text.trim();
-          if (
-            prev[i].role === 'ai' &&
-            (prevText === trimmed || (isPuzzleCard && prevText.includes('拼圖量化引擎')))
-          ) {
-            const updated = [...prev];
-            updated[i] = {
-              ...updated[i],
-              text,
-              timestamp: Date.now()
-            };
-            return updated;
-          }
-        }
-      }
-
-      return [
-        ...prev,
-        {
-          id: `${Date.now()}-${Math.random()}`,
-          role,
-          text,
-          timestamp: Date.now()
-        }
-      ];
-    });
+    // 去重邏輯喺 services/chatLog.ts（純函數，可 mock 測試）：最新一條相同就地覆蓋；
+    // 提示單報告覆蓋最近一筆同類提示單（即日版取代烘焙版）。
+    setChatMessages((prev) => appendChatMessage(prev, role, text));
   }, []);
 
   // Load API config from localStorage on mount and auto-load 2-3 years historical analysis
@@ -209,6 +166,43 @@ export const App: React.FC = () => {
       return prev.latestPrice === price ? prev : { ...prev, latestPrice: price };
     });
   }, [displayLiveBar, modelData]);
+
+  // 【即日價・顯示專用】即日棒返到嗰陣，如果 log 入面已經有份烘焙版提示單報告
+  // （撳診斷嗰陣即日棒未返——runQuantAnalysis 係 fire-and-forget，8 秒內撳掣
+  // 都只會出烘焙版），重新產生即日版取代佢。未撳過診斷就唔彈報告；
+  // 每（股票｜即日日期）最多刷新一次。指令／水平／TFDR／回測繼續食烘焙版。
+  const diagLiveRefreshedKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!displayLiveBar) {
+      diagLiveRefreshedKeyRef.current = null;
+      return;
+    }
+    const liveDate = (displayLiveBar.date || '').slice(0, 10);
+    if (!liveDate) return;
+    const key = `${symbol}|${liveDate}`;
+    if (diagLiveRefreshedKeyRef.current === key) return;
+    const hasBakedCard = chatMessages.some(
+      (m) => m.role === 'ai' && m.text.trim().startsWith('📊 【') && m.text.includes('最新時空提示單')
+    );
+    if (!hasBakedCard) return;
+    const context: QuantContext = {
+      symbolInfo,
+      modelData,
+      dailyKlines,
+      stats,
+      batchScanResults,
+      newsList,
+      sentiment,
+      globalHotNews,
+      tfdr,
+      latestTfdrPoint,
+      displayLiveBar
+    };
+    const report = generateZeroTokenDiagnosis(context);
+    if (!report) return;
+    diagLiveRefreshedKeyRef.current = key;
+    addChatMessage('ai', report);
+  }, [displayLiveBar, chatMessages, symbol, symbolInfo, modelData, dailyKlines, stats, batchScanResults, newsList, sentiment, globalHotNews, tfdr, latestTfdrPoint, addChatMessage]);
 
   const handleSaveApiConfig = (cfg: ApiConfig) => {
     localStorage.setItem('ai_provider', cfg.provider);
@@ -526,7 +520,8 @@ export const App: React.FC = () => {
       sentiment,
       globalHotNews,
       tfdr,
-      latestTfdrPoint
+      latestTfdrPoint,
+      displayLiveBar
     };
 
     setTimeout(() => {

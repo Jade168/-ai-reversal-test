@@ -26,3 +26,33 @@ export function movingAverage(values: number[], period: number): number[] {
   }
   return out;
 }
+
+// ── 即日棒・顯示專用：畫圖／撳格／滑桿共用同一條「顯示長度」（烘焙棒＋即日棒）──
+// 之前畫圖用 displayBars 長度計 endIdx，撳格用 viewRange（烘焙）長度計，
+// 滑桿尾日期又用烘焙棒——三者唔一致，先至撳即日棒嗰格會選中最後一支烘焙棒、
+// 條軸停喺烘焙日期（問題 3 根因）。
+
+/** 顯示 endIdx：睇緊尾段（viewRange 尾＝最後一支烘焙棒）嗰陣伸多一格包埋即日棒；已向左平移就唔伸。 */
+export function displayEndIdx(baseEnd: number, hasLiveBar: boolean, activeLen: number, displayLen: number): number {
+  const ext = hasLiveBar && baseEnd >= activeLen - 1 ? 1 : 0;
+  return Math.min(displayLen - 1, baseEnd + ext);
+}
+
+/** 撳／hover 格位 → 絕對棒 index（用顯示長度計，同畫圖一致；唔再用 viewRange 長度）。 */
+export function clickBarIndex(viewRangeStart: number, relX: number, plotW: number, visibleCount: number): number {
+  if (visibleCount <= 0 || plotW <= 0) return viewRangeStart;
+  const stepX = plotW / visibleCount;
+  const localIdx = Math.min(visibleCount - 1, Math.max(0, Math.floor(relX / stepX)));
+  return viewRangeStart + localIdx;
+}
+
+/** 滑桿「區間」尾日期：即日棒喺視野尾嗰陣顯示即日日期，否則烘焙尾日期。 */
+export function sliderRangeEndDate(
+  viewRangeEnd: number,
+  activeLen: number,
+  lastBakedDate: string,
+  liveDate: string | null
+): string {
+  if (liveDate && viewRangeEnd >= activeLen - 1) return liveDate;
+  return lastBakedDate;
+}

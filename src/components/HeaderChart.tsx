@@ -11,7 +11,7 @@ import {
 } from '../services/puzzleDecisionEngine';
 import { computeEnginePeriodSingularityLabels } from '../services/enginePeriodLabels';
 import { computeQqpModelLayer, QqpModelLayer, aggregateMonthlyBars } from '../services/qqpModelSignals';
-import { movingAverage } from '../services/chartMath';
+import { movingAverage, displayEndIdx, clickBarIndex, sliderRangeEndDate } from '../services/chartMath';
 import { ZoomIn, ZoomOut, RotateCcw, ChevronDown, ChevronUp } from 'lucide-react';
 
 // L1 季線白/淺藍半透明箱體 + 50% 虛線 ｜ L2 月線黑 K 棒 + 50% 橫槓 ｜ L3 週線綠 K 棒 + 50% 橫槓 ｜ L4 日線黃色 HA K 棒 + 金星買點
@@ -515,7 +515,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
   // 奇點文字標籤顯示開關：只隱藏 TFDR 模式下「奇點買／奇點沽」細字標籤（小三角箭頭保留），K 線本身不受影響
   const [showSingularityLabels, setShowSingularityLabels] = useState<boolean>(true);
 
-  // QQP v1.2＋b10 模型頂／底顯示層開關（純顯示）：快訊號空心三角＋確認訊號實心三角
+  // QQP v1.2＋tfdr55 模型頂／底顯示層開關（純顯示）：快訊號空心三角＋確認訊號實心三角
   const [showModelSignals, setShowModelSignals] = useState<boolean>(true);
 
   // 主圖燭體來源：HA＝引擎單層平均K（預設；燭身讀引擎 OverlayPoint.haOpen/haClose、影線用原始高低）；
@@ -686,7 +686,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     );
   }, [dailyKlines, activeData, timeframe]);
 
-  // QQP v1.2＋b10 模型頂／底層（純顯示——唔改任何引擎／交易判定）：
+  // QQP v1.2＋tfdr55 模型頂／底層（純顯示——唔改任何引擎／交易判定）：
   // 日線圖用日線 K 線計 D 模型（入面聚合週線做一致），週線圖用週線 K 線計 W 模型
   // （月線一致由日線聚合傳入）；月線圖無模型，唔顯示。
   // 訊號點先按日期對返 activeData 嘅 index（replay 切片下，未來訊號自動唔見）。
@@ -892,11 +892,9 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     const startIdx = Math.max(0, viewRange?.start ?? Math.max(0, activeData.length - 80));
     // 即日棒：睇緊尾段嗰陣（viewRange 尾＝最後一支烘焙棒），endIdx 伸多一格包埋即日棒；
     // 已經向左平移咗嘅話唔伸，唔好將未完成棒畫入歷史窗口。
+    // （同撳格／滑桿共用 displayEndIdx，保證三者用同一條顯示長度。）
     const baseEnd = viewRange?.end ?? activeData.length - 1;
-    const endIdx = Math.min(
-      displayBars.length - 1,
-      baseEnd + (liveBar && baseEnd >= activeData.length - 1 ? 1 : 0)
-    );
+    const endIdx = displayEndIdx(baseEnd, !!liveBar, activeData.length, displayBars.length);
     const visibleBars = displayBars.slice(startIdx, endIdx + 1);
     const visibleTfdr = tfdrSeries.slice(startIdx, endIdx + 1);
 
@@ -1044,40 +1042,6 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       ctx.lineWidth = 1.4;
       ctx.stroke();
       ctx.setLineDash([]);
-
-      // MA20 平均線（日線＋CLASSIC 先畫；TFDR 模式按現有設計收起均線）：
-      // 收市價 20 日平均，線尾標「MA20」。純顯示，唔入任何計算。
-      // 只做方向參考（收市企線之上＝升勢、之下＝跌勢），唔係支持位買入訊號。
-      if (ma20Series.length > 0) {
-        ctx.beginPath();
-        ctx.setLineDash([]);
-        let hasMaPoint = false;
-        let lastMaIdx = -1;
-        let lastMaVal = NaN;
-        visibleBars.forEach((bar, i) => {
-          const ma = ma20Series[startIdx + i];
-          if (ma == null || !Number.isFinite(ma)) return;
-          const x = getX(i);
-          const y = getY(ma);
-          if (!hasMaPoint) {
-            ctx.moveTo(x, y);
-            hasMaPoint = true;
-          } else {
-            ctx.lineTo(x, y);
-          }
-          lastMaIdx = i;
-          lastMaVal = ma;
-        });
-        ctx.strokeStyle = '#38bdf8';
-        ctx.lineWidth = 1.6;
-        ctx.stroke();
-        if (lastMaIdx >= 0) {
-          ctx.fillStyle = '#38bdf8';
-          ctx.font = 'bold 10px sans-serif';
-          ctx.textAlign = 'right';
-          ctx.fillText('MA20', getX(lastMaIdx) - 4, getY(lastMaVal) - 6);
-        }
-      }
     } else if (visibleTfdr.length > 0) {
       // TFDR 動態展開奇點軌道：
       // - 安全中區 (20 < score < 80)：極簡雙邊界線（僅頂部 85 壓力線 + 底部 15 支撐線）
@@ -1631,7 +1595,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       });
     }
 
-    // 8b. QQP v1.2＋b10 模型頂／底顯示層（純顯示）：快訊號＝空心三角（早期預警），
+    // 8b. QQP v1.2＋tfdr55 模型頂／底顯示層（純顯示）：快訊號＝空心三角（早期預警），確認頂反轉棒 TFDR>55 跳過沽；
     // 確認訊號＝實心三角＋「確認頂／確認底」標籤（武裝後 10 棒內有 HA 梯級反轉先確認，訊號精確約 0.64）。
     // 同一棒同時係快＋確認嗰陣只畫確認標記，唔重疊。月線圖無模型，qqpModelLayer 係 null。
     if (showModelSignals && qqpModelLayer) {
@@ -1740,6 +1704,42 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           lastConfLowX = drawModelLabel(pt, false, '確認底', 'rgba(6, 78, 59, 0.92)', '#059669', '#d1fae5', lastConfLowX);
         }
       });
+    }
+    // MA20 平均線（日線＋CLASSIC 先畫；TFDR 模式按現有設計收起均線）：
+    // 收市價 20 日平均，線尾標「MA20」。純顯示，唔入任何計算。
+    // 只做方向參考（收市企線之上＝升勢、之下＝跌勢），唔係支持位買入訊號。
+    // 【修復】一定要喺燭（第 5 節）＋標記（第 6／7 節）之後先畫：之前喺燭之前畫，
+    // 1.6px 天藍線俾不透明燭身遮咗 ~90%，「MA20」線尾標籤又俾最後幾支燭遮住，
+    // 所以圖上完全見唔到（code 喺 bundle 入面，畫咗等於冇畫）。
+    if (chartMode === 'CLASSIC' && ma20Series.length > 0) {
+      ctx.beginPath();
+      ctx.setLineDash([]);
+      let hasMaPoint = false;
+      let lastMaIdx = -1;
+      let lastMaVal = NaN;
+      visibleBars.forEach((bar, i) => {
+        const ma = ma20Series[startIdx + i];
+        if (ma == null || !Number.isFinite(ma)) return;
+        const x = getX(i);
+        const y = getY(ma);
+        if (!hasMaPoint) {
+          ctx.moveTo(x, y);
+          hasMaPoint = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
+        lastMaIdx = i;
+        lastMaVal = ma;
+      });
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+      if (lastMaIdx >= 0) {
+        ctx.fillStyle = '#38bdf8';
+        ctx.font = 'bold 10px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText('MA20', getX(lastMaIdx) - 4, getY(lastMaVal) - 6);
+      }
     }
     // 9. Interactive Crosshair & Tooltip (支援點擊空白處或白色數據條立即隱藏 / 再點一下重新查看)
     const activePointer =
@@ -1953,16 +1953,18 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       const marginLeft = 10;
       const marginRight = 65;
       const plotW = Math.max(1, canvasWidth - marginLeft - marginRight);
-      const visibleCount = Math.max(1, viewRange.end - viewRange.start + 1);
-      const stepX = plotW / visibleCount;
+      // 撳格對齊畫圖：用同一條 displayEndIdx 計可見格數（烘焙棒＋即日棒），
+      // 唔再用 viewRange（烘焙）長度——之前撳即日棒嗰格會跌返最後一支烘焙棒。
+      const endIdx = displayEndIdx(viewRange.end, !!liveBar, activeData.length, displayBars.length);
+      const visibleCount = Math.max(1, endIdx - viewRange.start + 1);
       const relX = Math.max(0, Math.min(plotW - 1, localX - marginLeft));
-      const localIdx = Math.min(visibleCount - 1, Math.max(0, Math.floor(relX / stepX)));
+      const barIdx = clickBarIndex(viewRange.start, relX, plotW, visibleCount);
 
       setCrosshairDismissed(false);
-      setSelectedBar({ barIdx: viewRange.start + localIdx, x: localX, y: localY });
+      setSelectedBar({ barIdx, x: localX, y: localY });
       setMousePos({ x: localX, y: localY });
     },
-    [crosshairDismissed, selectedBar, mousePos, viewRange, activeData.length]
+    [crosshairDismissed, selectedBar, mousePos, viewRange, activeData.length, liveBar, displayBars]
   );
 
   // Mouse Drag / Pan
@@ -2211,9 +2213,15 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     const leftPct = (viewRange.start / total) * 100;
     const widthPct = Math.max(4, ((viewRange.end - viewRange.start + 1) / total) * 100);
     const startDate = activeData[viewRange.start]?.date?.split(' ')[0] || '--';
-    const endDate = activeData[viewRange.end]?.date?.split(' ')[0] || '--';
+    // 區間尾日期：即日棒喺視野尾嗰陣顯示即日日期，唔係停喺烘焙日期。
+    const endDate = sliderRangeEndDate(
+      viewRange.end,
+      activeData.length,
+      activeData[viewRange.end]?.date?.split(' ')[0] || '--',
+      liveBar ? (liveBar.date || '').slice(0, 10) : null
+    );
     return { leftPct, widthPct, startDate, endDate };
-  }, [viewRange, activeData]);
+  }, [viewRange, activeData, liveBar]);
 
   return (
     <div className="w-full bg-[#111] rounded-lg mb-1 relative border border-[#333] overflow-hidden flex flex-col">
@@ -2279,7 +2287,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           <button
             onClick={() => setShowModelSignals(prev => !prev)}
             className="px-2 py-1 text-xs font-bold rounded bg-[#222] hover:bg-[#333] text-gray-200 border border-[#444] transition"
-            title="顯示／隱藏 QQP v1.2＋b10 模型頂／底層：空心三角＝快訊號（早期預警），實心三角＝確認訊號（武裝後 10 棒內 HA 梯級反轉確認）。純顯示，唔影響任何交易判定；月線圖無模型"
+            title="顯示／隱藏 QQP v1.2＋tfdr55 模型頂／底層：空心三角＝快訊號（早期預警），實心三角＝確認訊號（武裝後 10 棒內 HA 梯級反轉確認；確認頂反轉棒 TFDR>55 跳過沽）。純顯示，唔影響任何交易判定；月線圖無模型"
           >
             {`模型頂/底: ${showModelSignals ? '顯示' : '隱藏'}`}
           </button>
@@ -2312,7 +2320,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
               </span>
               <span
                 className="flex items-center gap-1 font-bold"
-                title="QQP v1.2＋b10 確認訊號：武裝後 10 棒內有 HA 梯級反轉先確認，訊號精確約 0.64；快訊號轉確認平均要等 11–12 日"
+                title="QQP v1.2＋tfdr55 確認訊號：武裝後 10 棒內有 HA 梯級反轉先確認，訊號精確約 0.64；確認頂反轉棒 TFDR>55 跳過沽；快訊號轉確認平均要等 11–12 日"
               >
                 <span className="text-[#dc2626]">▼</span>
                 <span className="text-[#059669]">▲</span>
