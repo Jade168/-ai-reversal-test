@@ -10,7 +10,8 @@ import {
   PuzzleState
 } from '../services/puzzleDecisionEngine';
 import { computeEnginePeriodSingularityLabels } from '../services/enginePeriodLabels';
-import { computeQqpModelLayer, QqpModelLayer } from '../services/qqpModelSignals';
+import { computeQqpModelLayer, QqpModelLayer, aggregateMonthlyBars } from '../services/qqpModelSignals';
+import { movingAverage } from '../services/chartMath';
 import { ZoomIn, ZoomOut, RotateCcw, ChevronDown, ChevronUp } from 'lucide-react';
 
 // L1 季線白/淺藍半透明箱體 + 50% 虛線 ｜ L2 月線黑 K 棒 + 50% 橫槓 ｜ L3 週線綠 K 棒 + 50% 橫槓 ｜ L4 日線黃色 HA K 棒 + 金星買點
@@ -514,7 +515,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
   // 奇點文字標籤顯示開關：只隱藏 TFDR 模式下「奇點買／奇點沽」細字標籤（小三角箭頭保留），K 線本身不受影響
   const [showSingularityLabels, setShowSingularityLabels] = useState<boolean>(true);
 
-  // QQP R7 模型頂／底顯示層開關（v5 應用版，純顯示）：快訊號空心三角＋確認訊號實心三角
+  // QQP v1.2＋b10 模型頂／底顯示層開關（純顯示）：快訊號空心三角＋確認訊號實心三角
   const [showModelSignals, setShowModelSignals] = useState<boolean>(true);
 
   // 主圖燭體來源：HA＝引擎單層平均K（預設；燭身讀引擎 OverlayPoint.haOpen/haClose、影線用原始高低）；
@@ -585,6 +586,17 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     () => (liveBar ? [...activeData, toLiveModelBar(liveBar)] : activeData),
     [activeData, liveBar]
   );
+
+  // 【平均線・顯示專用】MA20（日收市價計）：只限日線圖，烘焙收市價＋即日棒現價一齊計，
+  // 條線畫到最右邊；純顯示，唔入任何引擎／模型／TFDR／回測計算。
+  // 只做方向參考（收市企 MA 之上＝升勢、跌穿之下＝跌勢），唔係支持位買入訊號——
+  // MA 支持研究已驗：掂到率高但守得住率近零（MA20 8%、MA50／MA100 0%），買掂到全部輸錢；
+  // 入場仍然要等 HA 梯級反轉，唔可以用 MA 代替確認。
+  const ma20Series = useMemo(() => {
+    const tf = String(timeframe || '1d').toLowerCase();
+    if (tf !== 'daily' && tf !== '1d') return [] as number[];
+    return movingAverage(displayBars.map(b => b.c), 20);
+  }, [displayBars, timeframe]);
 
   // 引擎對齊數據（純讀取引擎輸出，唔改任何數據管線）：以原始 OHLC 跑一次 buildFullPuzzleTimeline，取得
   // (1) 每日單層 HA 開/收（主圖 HA 燭身，與 PiP L4 層同一來源）、(2) 引擎奇點武裝點、扣扳機參考線區間、
@@ -674,8 +686,9 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     );
   }, [dailyKlines, activeData, timeframe]);
 
-  // QQP R7 模型頂／底層（v5 應用版，純顯示——唔改任何引擎／交易判定）：
-  // 日線圖用日線 K 線計 D 模型，週線圖用週線 K 線計 W 模型；月線圖無 R7 模型，唔顯示。
+  // QQP v1.2＋b10 模型頂／底層（純顯示——唔改任何引擎／交易判定）：
+  // 日線圖用日線 K 線計 D 模型（入面聚合週線做一致），週線圖用週線 K 線計 W 模型
+  // （月線一致由日線聚合傳入）；月線圖無模型，唔顯示。
   // 訊號點先按日期對返 activeData 嘅 index（replay 切片下，未來訊號自動唔見）。
   // 數據唔夠（<70 棒）或者計唔到就回 null，唔顯示、唔報錯。
   const qqpModelLayer = useMemo((): QqpModelLayer | null => {
@@ -685,6 +698,20 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       ? (dailyKlines.length > 0 ? dailyKlines : (activeData as unknown as RawKline[]))
       : (activeData as unknown as RawKline[]);
     if (!base || base.length === 0 || activeData.length === 0) return null;
+    // 週線圖：月線一致由完整日線聚合（無日線就當無一致，訊號照過）
+    const monthlyForW =
+      period === 'W' && dailyKlines.length > 0
+        ? aggregateMonthlyBars(
+            dailyKlines.map(b => ({
+              date: (b.date || '').slice(0, 10),
+              o: Number(b.o),
+              h: Number(b.h),
+              l: Number(b.l),
+              c: Number(b.c),
+              vol: b.vol
+            }))
+          )
+        : null;
     const layer = computeQqpModelLayer(
       base.map(b => ({
         date: (b.date || '').slice(0, 10),
@@ -694,7 +721,8 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
         c: Number(b.c),
         vol: b.vol
       })),
-      period
+      period,
+      monthlyForW
     );
     if (!layer) return null;
     const idxByDate = new Map<string, number>();
@@ -1016,6 +1044,40 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       ctx.lineWidth = 1.4;
       ctx.stroke();
       ctx.setLineDash([]);
+
+      // MA20 平均線（日線＋CLASSIC 先畫；TFDR 模式按現有設計收起均線）：
+      // 收市價 20 日平均，線尾標「MA20」。純顯示，唔入任何計算。
+      // 只做方向參考（收市企線之上＝升勢、之下＝跌勢），唔係支持位買入訊號。
+      if (ma20Series.length > 0) {
+        ctx.beginPath();
+        ctx.setLineDash([]);
+        let hasMaPoint = false;
+        let lastMaIdx = -1;
+        let lastMaVal = NaN;
+        visibleBars.forEach((bar, i) => {
+          const ma = ma20Series[startIdx + i];
+          if (ma == null || !Number.isFinite(ma)) return;
+          const x = getX(i);
+          const y = getY(ma);
+          if (!hasMaPoint) {
+            ctx.moveTo(x, y);
+            hasMaPoint = true;
+          } else {
+            ctx.lineTo(x, y);
+          }
+          lastMaIdx = i;
+          lastMaVal = ma;
+        });
+        ctx.strokeStyle = '#38bdf8';
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+        if (lastMaIdx >= 0) {
+          ctx.fillStyle = '#38bdf8';
+          ctx.font = 'bold 10px sans-serif';
+          ctx.textAlign = 'right';
+          ctx.fillText('MA20', getX(lastMaIdx) - 4, getY(lastMaVal) - 6);
+        }
+      }
     } else if (visibleTfdr.length > 0) {
       // TFDR 動態展開奇點軌道：
       // - 安全中區 (20 < score < 80)：極簡雙邊界線（僅頂部 85 壓力線 + 底部 15 支撐線）
@@ -1569,8 +1631,8 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       });
     }
 
-    // 8b. QQP R7 模型頂／底顯示層（v5 應用版，純顯示）：快訊號＝空心三角（早期預警），
-    // 確認訊號＝實心三角＋「確認頂／確認底」標籤（R7＋C3b，滯後 6 棒、假穿率約 1%、漏 7 個底）。
+    // 8b. QQP v1.2＋b10 模型頂／底顯示層（純顯示）：快訊號＝空心三角（早期預警），
+    // 確認訊號＝實心三角＋「確認頂／確認底」標籤（武裝後 10 棒內有 HA 梯級反轉先確認，訊號精確約 0.64）。
     // 同一棒同時係快＋確認嗰陣只畫確認標記，唔重疊。月線圖無模型，qqpModelLayer 係 null。
     if (showModelSignals && qqpModelLayer) {
       const confHighIdx = new Set(qqpModelLayer.confirmedHighs.map(p => p.index));
@@ -1759,6 +1821,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     activeData,
     displayBars,
     liveBar,
+    ma20Series,
     viewRange,
     boxMarkers,
     hologramLine,
@@ -2216,7 +2279,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           <button
             onClick={() => setShowModelSignals(prev => !prev)}
             className="px-2 py-1 text-xs font-bold rounded bg-[#222] hover:bg-[#333] text-gray-200 border border-[#444] transition"
-            title="顯示／隱藏 QQP R7 模型頂／底層：空心三角＝快訊號（早期預警），實心三角＝確認訊號（R7＋C3b，滯後6棒，假穿率約1%，漏7個底）。純顯示，唔影響任何交易判定；月線圖無模型"
+            title="顯示／隱藏 QQP v1.2＋b10 模型頂／底層：空心三角＝快訊號（早期預警），實心三角＝確認訊號（武裝後 10 棒內 HA 梯級反轉確認）。純顯示，唔影響任何交易判定；月線圖無模型"
           >
             {`模型頂/底: ${showModelSignals ? '顯示' : '隱藏'}`}
           </button>
@@ -2242,18 +2305,18 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           </span>
           {qqpModelLayer && (
             <>
-              <span className="flex items-center gap-1 font-bold" title="QQP R7 快訊號：早期預警，空心三角">
+              <span className="flex items-center gap-1 font-bold" title="QQP v1.2 快訊號：早期預警，空心三角，未經 HA 反轉確認">
                 <span className="text-[#f87171]">▽</span>
                 <span className="text-[#4ade80]">△</span>
                 <span className="text-slate-300">快頂/快底</span>
               </span>
               <span
                 className="flex items-center gap-1 font-bold"
-                title="QQP R7＋C3b 確認訊號：分型窗口外 i+4..i+6 無新極值先確認，訊號滯後 6 棒，假穿率約 1%，代價係漏 7 個底（全部係底，頂一個都冇漏）"
+                title="QQP v1.2＋b10 確認訊號：武裝後 10 棒內有 HA 梯級反轉先確認，訊號精確約 0.64；快訊號轉確認平均要等 11–12 日"
               >
                 <span className="text-[#dc2626]">▼</span>
                 <span className="text-[#059669]">▲</span>
-                <span className="text-slate-300">確認頂/確認底（滯後6棒，漏7個底，假穿率約1%）</span>
+                <span className="text-slate-300">確認頂/確認底（HA 反轉確認）</span>
               </span>
             </>
           )}
@@ -2268,6 +2331,11 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
               <span className="flex items-center gap-1 text-[#f59e0b]">
                 <span className="w-3 h-0.5 inline-block border-b border-dashed border-[#f59e0b]"></span> 強阻
               </span>
+              {(timeframe === 'daily' || timeframe === '1d') && (
+                <span className="flex items-center gap-1 text-[#38bdf8] font-bold" title="MA20 方向參考：收市企 MA 之上＝升勢、跌穿之下＝跌勢。只做方向參考，唔係支持位買入訊號（研究：MA 掂到守得住率 MA20 8%、MA50／MA100 0%，買掂到全部輸錢；入場要等 HA 梯級反轉）。顯示專用，唔入任何引擎／模型計算">
+                  <span className="w-3 h-0.5 inline-block bg-[#38bdf8]"></span> MA20
+                </span>
+              )}
             </>
           ) : (
             <>

@@ -547,7 +547,8 @@ export const App: React.FC = () => {
       sentiment,
       globalHotNews,
       tfdr,
-      latestTfdrPoint
+      latestTfdrPoint,
+      displayLiveBar
     };
     const report = generateZeroTokenDiagnosis(context);
     if (!report) {

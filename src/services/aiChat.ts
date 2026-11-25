@@ -1,6 +1,6 @@
 import { ModelBar, SymbolInfo, BacktestStats, BatchScanResult, NewsItem, RawKline } from '../types/quant';
 import { MultiTimeframeTFDR, TFDRPoint } from './tfdrIndicator';
-import { generatePuzzleExpertReport } from './localQuantAnalyst';
+import { generatePuzzleExpertReport, DisplayQuote } from './localQuantAnalyst';
 
 export interface QuantContext {
   symbolInfo: SymbolInfo | null;
@@ -13,6 +13,8 @@ export interface QuantContext {
   globalHotNews: NewsItem[];
   tfdr?: MultiTimeframeTFDR | null;
   latestTfdrPoint?: TFDRPoint | null;
+  /** 【即日價・顯示專用】合資格即日棒（App 已閘好：日線＋非回放＋新過烘焙棒）；淨係用嚟顯示零流量診斷報告 header 現價＋最新一日 OHLC */
+  displayLiveBar?: RawKline | null;
 }
 
 export function generateZeroTokenDiagnosis(context: QuantContext): string | null {
@@ -31,7 +33,18 @@ export function generateZeroTokenDiagnosis(context: QuantContext): string | null
     close: Number(bar.c)
   }));
 
-  return generatePuzzleExpertReport(symbolInfo.symbol, dailyData) || null;
+  // 【即日價・顯示專用】即日棒日期新過烘焙最後一棒＋OHLC 合理先用嚟顯示報告 header／最新一日；
+  // 唔合資格就當無，報告行烘焙價。dailyData 本身唔加即日棒（引擎／指令／水平繼續食烘焙版）。
+  const live = context.displayLiveBar;
+  const liveDate = (live?.date || '').slice(0, 10);
+  const bakedDate = (sourceKlines[sourceKlines.length - 1]?.date || '').slice(0, 10);
+  const displayQuote: DisplayQuote | undefined =
+    live && liveDate && bakedDate && liveDate > bakedDate &&
+    [live.o, live.h, live.l, live.c].every(v => Number.isFinite(v) && (v as number) > 0)
+      ? { date: liveDate, o: live.o, h: live.h, l: live.l, c: live.c }
+      : undefined;
+
+  return generatePuzzleExpertReport(symbolInfo.symbol, dailyData, displayQuote) || null;
 }
 
 // ===================== 本地 AI 大腦 (秒級響應，純正粵語) =====================

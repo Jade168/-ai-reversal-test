@@ -37,6 +37,19 @@ export interface LocalExpertSummary {
 }
 
 /**
+ * 【即日價・顯示專用】即日棒顯示報價（日期＋完整 OHLC）：只用嚟顯示專家報告
+ * header 現價同「最新一日」OHLC，唔入任何引擎／指令／水平／TFDR／回測計算。
+ * 呼叫方負責閘好（即日棒日期新過烘焙最後一棒先傳入），否則傳 undefined 當烘焙。
+ */
+export interface DisplayQuote {
+  date: string;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+}
+
+/**
  * HA 趨勢結構上下文（2026-11-22 新增）：全部數字直接讀取決策引擎 buildFullPuzzleTimeline 嘅輸出
  * （單層 HA overlay + 最新一日裁決），唔另行發明任何公式。目的係令 AI 專家看板同圖表、引擎三者
  * 睇住同一套 HA 轉折結構，同時將真實市場價位（原始 OHLC）分開標註，建議可以直接按真實價掛單。
@@ -111,9 +124,16 @@ export function buildHaStructureContext(dailyData: OHLCBar[]): HaStructureContex
 
 export function formatHaStructureBlocks(
   ctx: HaStructureContext,
-  zones: { buyLow: number; buyHigh: number; tpLow: number; tpHigh: number }
+  zones: { buyLow: number; buyHigh: number; tpLow: number; tpHigh: number },
+  displayQuote?: DisplayQuote | null
 ): string[] {
   const fmt = (x: number): number => Number(x.toFixed(2));
+  // 【即日價・顯示專用】有即日棒嗰陣，「最新一日」嗰行顯示即日棒日期／OHLC＋「即日」；
+  // 低吸區／高拋區（烘焙水平）唔郁。
+  const lb = displayQuote
+    ? { date: displayQuote.date, open: displayQuote.o, high: displayQuote.h, low: displayQuote.l, close: displayQuote.c }
+    : ctx.lastBar;
+  const liveTag = displayQuote ? ' 即日' : '';
   const turnParts: string[] = [];
   if (ctx.flippedBull || ctx.justBrokeUp) turnParts.push('今日 HA 由陰轉陽／破梯向上（低買轉折）');
   if (ctx.flippedBear || ctx.justBrokeDown) turnParts.push('今日 HA 由陽轉陰／破梯向下（高沽轉折）');
@@ -134,7 +154,7 @@ export function formatHaStructureBlocks(
   return [
     `• 【HA 趨勢結構・單層平均K（引擎推導）】${ctx.haBull ? '連陽' : '連陰'}第 ${ctx.haStreak} 根（HA 開 $${ctx.haOpen}／HA 收 $${ctx.haClose}）｜近3日 HA 梯級低位 ${stepsText}・${stepsLabel}｜${turnText}`,
     `• 【奇點武裝・引擎觸發位（真實價）】${armText}${ctx.invalidationPrice != null ? `｜失效位 $${fmt(ctx.invalidationPrice)}` : ''}`,
-    `• 【真實執行價位・原始 OHLC（可直接掛單）】最新一日（${ctx.lastBar.date}）開 $${fmt(ctx.lastBar.open)}／高 $${fmt(ctx.lastBar.high)}／低 $${fmt(ctx.lastBar.low)}／收 $${fmt(ctx.lastBar.close)}｜低吸區 $${fmt(zones.buyLow)}–$${fmt(zones.buyHigh)}｜高拋區 $${fmt(zones.tpLow)}–$${fmt(zones.tpHigh)}｜註：全部價位均為真實市場價，引擎以次日開市價執行`
+    `• 【真實執行價位・原始 OHLC（可直接掛單）】最新一日（${lb.date}${liveTag}）開 $${fmt(lb.open)}／高 $${fmt(lb.high)}／低 $${fmt(lb.low)}／收 $${fmt(lb.close)}｜低吸區 $${fmt(zones.buyLow)}–$${fmt(zones.buyHigh)}｜高拋區 $${fmt(zones.tpLow)}–$${fmt(zones.tpHigh)}｜註：全部價位均為真實市場價，引擎以次日開市價執行`
   ];
 }
 
@@ -156,7 +176,7 @@ export function calculateKaufmanER(closes: number[], period: number = 14): numbe
 /**
  * 純模板插值：嚴格讀取 computePuzzleDecision 輸出的 PuzzleState JSON 物件，不另行重算任何數值
  */
-export function evaluatePuzzleExpertSummary(puzzle: PuzzleState): LocalExpertSummary {
+export function evaluatePuzzleExpertSummary(puzzle: PuzzleState, displayQuote?: DisplayQuote | null): LocalExpertSummary {
   const { D } = puzzle.timeframes;
   const tsp = puzzle.timeSpacePrompt;
 
@@ -191,7 +211,8 @@ export function evaluatePuzzleExpertSummary(puzzle: PuzzleState): LocalExpertSum
   const coreAction = `${tsp.actionTitle}。月50中間線 $${tsp.m50Line}｜季50中間線 $${tsp.q50Line}（${tsp.haDirectionSummary}）。低吸埋伏 $${tsp.buyZone.low}–$${tsp.buyZone.high}，高拋警戒 $${tsp.takeProfitZone.low}–$${tsp.takeProfitZone.high}，50線分水嶺 $${tsp.invalidationPrice}。`;
 
   const fullReport = [
-    `📊 【${puzzle.symbol} 最新時空提示單】(${tsp.triggerDate} | 現價 $${puzzle.currentPrice})`,
+    // 【即日價・顯示專用】有即日棒嗰陣 header 顯示即日日期／現價＋「即日」；指令／水平／TFDR 行唔郁。
+    `📊 【${puzzle.symbol} 最新時空提示單】(${displayQuote ? `${displayQuote.date} | 現價 $${displayQuote.c.toFixed(2)} 即日` : `${tsp.triggerDate} | 現價 $${puzzle.currentPrice}`})`,
     `${confidenceTag}`,
     `• 大勢定性：${tsp.trendBannerLabel}（月50 $${tsp.m50Line} / 季50 $${tsp.q50Line}）`,
     `• 日/週平均K破梯：${tsp.haDirectionSummary}｜${trendQuality}`,
@@ -212,10 +233,10 @@ export function evaluatePuzzleExpertSummary(puzzle: PuzzleState): LocalExpertSum
   };
 }
 
-export function generatePuzzleExpertReport(symbol: string, dailyData: OHLCBar[]): string {
+export function generatePuzzleExpertReport(symbol: string, dailyData: OHLCBar[], displayQuote?: DisplayQuote | null): string {
   if (!dailyData || dailyData.length === 0) return '';
   const puzzle = computePuzzleDecision(symbol, dailyData, dailyData.length - 1);
-  const summary = evaluatePuzzleExpertSummary(puzzle);
+  const summary = evaluatePuzzleExpertSummary(puzzle, displayQuote);
   // (v5 應用版第 4 項，純文字標記——唔改任何決策欄位／閾值／數字／verdict)：
   // 最新一個引擎沽出日／買入日喺 ±5 日內撞到模型頂／底嗰陣，加一行「模型確認」標記
   // （確認頂／底做主標記，快頂／底做輔助）；撞唔到就唔加行。計唔到就當無事發生。
@@ -245,7 +266,7 @@ export function generatePuzzleExpertReport(symbol: string, dailyData: OHLCBar[])
     buyHigh: puzzle.levels.buyZone.high,
     tpLow: puzzle.levels.takeProfitZone.low,
     tpHigh: puzzle.levels.takeProfitZone.high
-  });
+  }, displayQuote);
   return withOverlap([...summary.fullReport.split('\n'), ...blocks].join('\n'));
 }
 
