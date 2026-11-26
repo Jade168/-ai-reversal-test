@@ -21,6 +21,7 @@ import {
 } from './services/quantCalculations';
 import {
   fetchMarketData,
+  fetchFullBakedDailyKlines,
   fetchLiveTodayBar,
   fetchSymbolNews,
   analyzeNewsSentiment,
@@ -344,7 +345,15 @@ export const App: React.FC = () => {
       setFourier(zAxisResult);
 
       // TFDR 3-Timeframe Singularity Resonance Matrix (from daily data aggregated to 5-bar weekly & 21-bar monthly)
-      const tfdrMatrix = computeMultiTimeframeTFDRFromDaily(dailyKlinesForTfdr);
+      // 改用未截斷全系列計（選項 a）：切分錨定系列開頭，全系列先唔會因截斷移位（NVDA 月線 3→15 穩定值）；其他嘢繼續用 5000 支上限。顯示專用，唔入引擎／回測。
+      let tfdrDailyBars = dailyKlinesForTfdr;
+      try {
+        const fullDaily = await fetchFullBakedDailyKlines(sym);
+        if (fullDaily && fullDaily.length > 0) tfdrDailyBars = fullDaily;
+      } catch {
+        tfdrDailyBars = dailyKlinesForTfdr;
+      }
+      const tfdrMatrix = computeMultiTimeframeTFDRFromDaily(tfdrDailyBars);
       setTfdr(tfdrMatrix);
 
       const chartTfdrSeries = calculateTFDRSeries(

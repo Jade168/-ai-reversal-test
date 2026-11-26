@@ -49,7 +49,7 @@ function normalizeBakedCode(cleanSym: string): string | null {
  * 對 1986 呢類真・高波動細價股會誤截（實測 1986 全史畀守衛截走 884 棒，
  * 2015–2019 段係真波動唔係腐爛；其餘 15 隻零作用、MSFT 誤剔 1 棒）。
  */
-async function fetchBakedDailyKlines(cleanSym: string): Promise<RawKline[] | null> {
+async function fetchBakedDailyKlines(cleanSym: string, maxBars = 5000): Promise<RawKline[] | null> {
   const code = normalizeBakedCode(cleanSym);
   if (!code) return null;
   try {
@@ -73,10 +73,21 @@ async function fetchBakedDailyKlines(cleanSym: string): Promise<RawKline[] | nul
     console.info(
       `[數據源] ${cleanSym} 日線：Yahoo 烘焙檔（烘焙時間 ${json?.bakedAt || '—'}，最後一棒 ${lastBarDate}，共 ${clean.length} 棒）`
     );
-    return clean.slice(-5000);
+    return maxBars > 0 ? clean.slice(-maxBars) : clean;
   } catch {
     return null;
   }
+}
+
+/**
+ * TFDR 矩陣專用：讀未截斷嘅全系列日線（唔做 slice(-5000)）。月／週 TFDR 係由系列開頭
+ * 每 21／5 支切一格，截斷會改起點令成個網格移位（NVDA 11-25 月線全檔 15、截斷 3）。
+ * 只供 TFDR 矩陣用；其他嘢（圖表／回測／引擎）繼續用 5000 支上限。烘焙檔過期／唔喺清單回 null，
+ * 呼叫方用返截斷系列（即係現行行為）。
+ */
+export async function fetchFullBakedDailyKlines(symbol: string): Promise<RawKline[] | null> {
+  const cleanSym = symbol.trim().toUpperCase().replace('.US', '').replace('.HK', '').replace('.N', '').replace('.O', '');
+  return fetchBakedDailyKlines(cleanSym, 0);
 }
 
 /**
