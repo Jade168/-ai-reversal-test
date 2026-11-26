@@ -1,14 +1,17 @@
-// QQP v1.2＋tfdr55 模型頂／底顯示層（2026-11-26，取代已死嘅 R7 版；純顯示——唔參與任何交易判定）
+// QQP v1.3（D3W2M2）＋tfdr55 模型頂／底顯示層（2026-11-27，由 v1.2 升級；純顯示——唔參與任何交易判定）
 // （2026-11-26 第二輪：b10 升級做 tfdr55——反轉棒 TFDR proxy >55 跳過嗰次沽；買入唔郁。）
 //
-// 基底 v1.2（同 Python qqp-fit-v3 一字不差，TS 交叉檢查 508 個訊號 0 差異）：
+// 基底 v1.3＝v1.2 只改一格：日線圖週 Donchian 深度 3→2（D3W2M2；
+//   驗證 ~/workspace/verify/qqp-fit-v5-refine-2026-11-26.md：414 標籤 374/414（90.3%），
+//   精確 0.643，命中 +15、精確 +0.005；LOSO 最差留出 327/365 @ 0.621 仲贏 v1.2 同口徑；
+//   10 分法 10/10 兩邊齊贏。週線圖本身已經係 W3M2，唔郁。）
 //   hl3 日線（頂 ×0.98／底 ×1.02）＋週線 price-agree（±1 週、移咗價差 ≤5%）＋C3b 確認（+6 棒）
 //   週線圖：hl3 週線（頂 ×0.98／底 ×1.02）＋月線 hl2 price-agree（月頂 ×1.01／月底 ×1.03，±1 月、≤5%）＋C3b
 //   月線圖無模型，唔顯示。knownDate＝max（訊號棒+6 日，滿足一致嘅最遲高一級棒收市日）。
 // 確認層 b10（同 qqp-why-loses-q3-test.ts 一字不差）：訊號只做武裝，武裝棒起計 10 支棒內
 //   （含武裝棒）等第一支 HA 梯級反轉棒（買：haHigh 破上支高；沽：haLow 破上支低，引擎定義，
 //   唔加陰陽條件）先確認；10 棒內無反轉就作廢，唔顯示。顯示出嚟嘅確認頂／底全部係 HA 確認過嘅，
-//   唔會早沽早買。快訊號＝v1.2 武裝訊號（早期預警，未經 HA 確認）。
+//   唔會早沽早買。快訊號＝v1.3 武裝訊號（早期預警，未經 HA 確認）。
 // 確認頂再加 tfdr55 過濾（同 qqp-b10-followup-test.ts 一字不差，OOS 最穩嗰個；唔用 45，
 //   45 係 in-sample 掃描最高值）：反轉棒嗰陣 TFDR proxy >55 就跳過嗰次沽——價錢未跌返
 //   20 日 HA 中線，唔好喺強勢腿入面沽局部頂。TFDR proxy＝raw 公式（中線＝20 日 HA 中線
@@ -483,7 +486,8 @@ export function computeQqpModelLayer(
     let sigs: V12Sig[];
     if (period === 'D') {
       const w = weeklyBars(bars);
-      sigs = computeV12Signals(bars, w, 3, 3, 0.98, 1.02, 0.98, 1.02).sigs;
+      // v1.3 D3W2M2：週深度 3→2（higherWin 2），日深度 3 不變。
+      sigs = computeV12Signals(bars, w, 3, 2, 0.98, 1.02, 0.98, 1.02).sigs;
     } else {
       const h = higherBars && higherBars.bars.length > 0 ? higherBars : null;
       sigs = computeV12Signals(bars, h, 3, 2, 0.98, 1.02, 1.01, 1.03).sigs;

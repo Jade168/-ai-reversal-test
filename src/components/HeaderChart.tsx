@@ -515,7 +515,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
   // 奇點文字標籤顯示開關：只隱藏 TFDR 模式下「奇點買／奇點沽」細字標籤（小三角箭頭保留），K 線本身不受影響
   const [showSingularityLabels, setShowSingularityLabels] = useState<boolean>(true);
 
-  // QQP v1.2＋tfdr55 模型頂／底顯示層開關（純顯示）：快訊號空心三角＋確認訊號實心三角
+  // QQP v1.3＋tfdr55 模型頂／底顯示層開關（純顯示）：快訊號空心三角＋確認訊號實心三角
   const [showModelSignals, setShowModelSignals] = useState<boolean>(true);
 
   // 主圖燭體來源：HA＝引擎單層平均K（預設；燭身讀引擎 OverlayPoint.haOpen/haClose、影線用原始高低）；
@@ -714,7 +714,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     );
   }, [dailyKlines, activeData, timeframe]);
 
-  // QQP v1.2＋tfdr55 模型頂／底層（純顯示——唔改任何引擎／交易判定）：
+  // QQP v1.3＋tfdr55 模型頂／底層（純顯示——唔改任何引擎／交易判定）：
   // 日線圖用日線 K 線計 D 模型（入面聚合週線做一致），週線圖用週線 K 線計 W 模型
   // （月線一致由日線聚合傳入）；月線圖無模型，唔顯示。
   // 訊號點先按日期對返 activeData 嘅 index（replay 切片下，未來訊號自動唔見）。
@@ -1654,7 +1654,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       });
     }
 
-    // 8b. QQP v1.2＋tfdr55 模型頂／底顯示層（純顯示）：快訊號＝空心三角（早期預警），確認頂反轉棒 TFDR>55 跳過沽；
+    // 8b. QQP v1.3＋tfdr55 模型頂／底顯示層（純顯示）：快訊號＝空心三角（早期預警），確認頂反轉棒 TFDR>55 跳過沽；
     // 確認訊號＝實心三角＋「確認頂／確認底」標籤（武裝後 10 棒內有 HA 梯級反轉先確認，訊號精確約 0.64）。
     // 同一棒同時係快＋確認嗰陣只畫確認標記，唔重疊。月線圖無模型，qqpModelLayer 係 null。
     if (showModelSignals && qqpModelLayer) {
@@ -2348,7 +2348,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           <button
             onClick={() => setShowModelSignals(prev => !prev)}
             className="px-2 py-1 text-xs font-bold rounded bg-[#222] hover:bg-[#333] text-gray-200 border border-[#444] transition"
-            title="顯示／隱藏 QQP v1.2＋tfdr55 模型頂／底層：空心三角＝快訊號（早期預警），實心三角＝確認訊號（武裝後 10 棒內 HA 梯級反轉確認；確認頂反轉棒 TFDR>55 跳過沽）。純顯示，唔影響任何交易判定；月線圖無模型"
+            title="顯示／隱藏 QQP v1.3＋tfdr55 模型頂／底層：空心三角＝快訊號（早期預警），實心三角＝確認訊號（武裝後 10 棒內 HA 梯級反轉確認；確認頂反轉棒 TFDR>55 跳過沽）。純顯示，唔影響任何交易判定；月線圖無模型"
           >
             {`模型頂/底: ${showModelSignals ? '顯示' : '隱藏'}`}
           </button>
@@ -2374,14 +2374,14 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           </span>
           {qqpModelLayer && (
             <>
-              <span className="flex items-center gap-1 font-bold" title="QQP v1.2 快訊號：早期預警，空心三角，未經 HA 反轉確認">
+              <span className="flex items-center gap-1 font-bold" title="QQP v1.3 快訊號：早期預警，空心三角，未經 HA 反轉確認">
                 <span className="text-[#f87171]">▽</span>
                 <span className="text-[#4ade80]">△</span>
                 <span className="text-slate-300">快頂/快底</span>
               </span>
               <span
                 className="flex items-center gap-1 font-bold"
-                title="QQP v1.2＋tfdr55 確認訊號：武裝後 10 棒內有 HA 梯級反轉先確認，訊號精確約 0.64；確認頂反轉棒 TFDR>55 跳過沽；快訊號轉確認平均要等 11–12 日"
+                title="QQP v1.3＋tfdr55 確認訊號：武裝後 10 棒內有 HA 梯級反轉先確認，訊號精確約 0.64；確認頂反轉棒 TFDR>55 跳過沽；快訊號轉確認平均要等 11–12 日"
               >
                 <span className="text-[#dc2626]">▼</span>
                 <span className="text-[#059669]">▲</span>

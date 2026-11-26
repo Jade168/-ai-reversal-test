@@ -381,6 +381,21 @@ export const App: React.FC = () => {
     }
   };
 
+  // 【顯示修復 2026-11-27】切換週／月線自動重新載入數據：之前 period 掣只改
+  // state，modelData 仲係上一個周期嘅，週／月平均線會用日線收市計錯位（約 $153
+  // 而唔係 $200.52）。依家撳周期即刻跑返同一套分析（同手動撳「重新分析」一樣），
+  // 平均線永遠跟正確周期。開頁嗰次由 init effect 跑，呢度跳過第一次，唔會重複
+  // 跑兩次。runQuantAnalysis 本身唔改 period，所以唔會自循環。
+  const periodAutoReloadSkippedRef = useRef(false);
+  useEffect(() => {
+    if (!periodAutoReloadSkippedRef.current) {
+      periodAutoReloadSkippedRef.current = true;
+      return;
+    }
+    runQuantAnalysis();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [period]);
+
   // Replay feature
   const handleStartReplay = () => {
     if (modelData.length === 0) {
