@@ -10,8 +10,8 @@ import {
   PuzzleState
 } from '../services/puzzleDecisionEngine';
 import { computeEnginePeriodSingularityLabels } from '../services/enginePeriodLabels';
-import { computeQqpModelLayer, QqpModelLayer, aggregateMonthlyBars } from '../services/qqpModelSignals';
-import { movingAverage, displayEndIdx, clickBarIndex, sliderRangeEndDate } from '../services/chartMath';
+import { computeQqpModelLayer, QqpModelLayer, QqpLeg, aggregateMonthlyBars, computeMonthlyLeg } from '../services/qqpModelSignals';
+import { movingAverage, priorMovingAverage, displayEndIdx, clickBarIndex, sliderRangeEndDate } from '../services/chartMath';
 import { ZoomIn, ZoomOut, RotateCcw, ChevronDown, ChevronUp } from 'lucide-react';
 
 // L1 季線白/淺藍半透明箱體 + 50% 虛線 ｜ L2 月線黑 K 棒 + 50% 橫槓 ｜ L3 週線綠 K 棒 + 50% 橫槓 ｜ L4 日線黃色 HA K 棒 + 金星買點
@@ -587,15 +587,41 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     [activeData, liveBar]
   );
 
-  // 【平均線・顯示專用】MA20（日收市價計）：只限日線圖，烘焙收市價＋即日棒現價一齊計，
-  // 條線畫到最右邊；純顯示，唔入任何引擎／模型／TFDR／回測計算。
-  // 只做方向參考（收市企 MA 之上＝升勢、跌穿之下＝跌勢），唔係支持位買入訊號——
+  // 【平均線・顯示專用】各時間框架一條平均線（方向參考，唔係支持位買入訊號）：
+  // 日線 MA20（收市價 20 日平均）、週線 MA10（10 週收市平均）、月線 M10（之前 10 個
+  // 已完結月份嘅月尾收市平均，唔包而家呢個月——數值同決策面板「月均線」一致，
+  // NVDA 2026-11 係 $200.52）。5 分鐘圖唔畫。烘焙收市價＋即日棒現價一齊計
+  // （即日棒只限日線圖），條線畫到最右邊；純顯示，唔入任何引擎／模型／TFDR／回測計算。
   // MA 支持研究已驗：掂到率高但守得住率近零（MA20 8%、MA50／MA100 0%），買掂到全部輸錢；
   // 入場仍然要等 HA 梯級反轉，唔可以用 MA 代替確認。
-  const ma20Series = useMemo(() => {
+  const maLine = useMemo((): { label: string | null; values: number[]; title: string } => {
     const tf = String(timeframe || '1d').toLowerCase();
-    if (tf !== 'daily' && tf !== '1d') return [] as number[];
-    return movingAverage(displayBars.map(b => b.c), 20);
+    const closes = displayBars.map(b => b.c);
+    if (tf === 'weekly') {
+      return {
+        label: 'MA10（週）',
+        values: movingAverage(closes, 10),
+        title:
+          'MA10（週）方向參考：週收市企 MA 之上＝升勢、跌穿之下＝跌勢。只做方向參考，唔係支持位買入訊號（研究：MA 掂到守得住率近零，買掂到全部輸錢；入場要等 HA 梯級反轉）。顯示專用，唔入任何引擎／模型計算'
+      };
+    }
+    if (tf === 'monthly') {
+      return {
+        label: 'M10（月）',
+        values: priorMovingAverage(closes, 10),
+        title:
+          'M10（月）方向參考：月收市企 M10 之上＝升勢、跌穿之下＝跌勢。數值同決策面板「月均線」一致（之前 10 個已完結月份平均，唔包而家呢個月）。只做方向參考，唔係支持位買入訊號。顯示專用，唔入任何引擎／模型計算'
+      };
+    }
+    if (tf === 'daily' || tf === '1d') {
+      return {
+        label: 'MA20',
+        values: movingAverage(closes, 20),
+        title:
+          'MA20 方向參考：收市企 MA 之上＝升勢、跌穿之下＝跌勢。只做方向參考，唔係支持位買入訊號（研究：MA 掂到守得住率 MA20 8%、MA50／MA100 0%，買掂到全部輸錢；入場要等 HA 梯級反轉）。顯示專用，唔入任何引擎／模型計算'
+      };
+    }
+    return { label: null, values: [], title: '' };
   }, [displayBars, timeframe]);
 
   // 引擎對齊數據（純讀取引擎輸出，唔改任何數據管線）：以原始 OHLC 跑一次 buildFullPuzzleTimeline，取得
@@ -742,6 +768,37 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       confirmedHighs: remap(layer.confirmedHighs),
       confirmedLows: remap(layer.confirmedLows)
     };
+  }, [dailyKlines, activeData, timeframe]);
+
+  // 【大周期・顯示專用】月線 25% zigzag 腿向：日線腿向一日 V 形反彈就翻得轉
+  // （NVDA 2026-11-23 一日 +32% 確認底即翻上升腿，同版面其他向下訊號撞晒）；
+  // 改用月線腿向——一個月先確認一次，唔會俾一日反彈翻轉。唔改 qqpModelLayer
+  // 嘅日線／週線腿向（模型層其他地方繼續用）。月線由完整日線聚合；
+  // 無日線嗰陣月線圖直接用 activeData（本身就係月線棒）。
+  const monthlyLeg = useMemo((): { leg: QqpLeg; pivotDate: string | null; pivotPrice: number | null } | null => {
+    const base: RawKline[] =
+      dailyKlines.length > 0
+        ? dailyKlines
+        : timeframe === 'monthly'
+          ? (activeData as unknown as RawKline[])
+          : [];
+    if (!base || base.length === 0) return null;
+    try {
+      const monthly = aggregateMonthlyBars(
+        base.map(b => ({
+          date: (b.date || '').slice(0, 10),
+          o: Number(b.o),
+          h: Number(b.h),
+          l: Number(b.l),
+          c: Number(b.c),
+          vol: b.vol
+        }))
+      );
+      if (!monthly || !monthly.bars || monthly.bars.length < 2) return null;
+      return computeMonthlyLeg(monthly.bars);
+    } catch {
+      return null;
+    }
   }, [dailyKlines, activeData, timeframe]);
 
   // 從完整日線（fallback 至 activeData）構建無未來函數一年期 (~250日) L1~L4 嵌套 50% 平衡切線拼圖
@@ -1044,7 +1101,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
       ctx.setLineDash([]);
     } else if (visibleTfdr.length > 0) {
       // TFDR 動態展開奇點軌道：
-      // - 安全中區 (20 < score < 80)：極簡雙邊界線（僅頂部 85 壓力線 + 底部 15 支撐線）
+      // - 安全中區 (20 < score < 80)：極簡雙邊界線（僅頂部 TFDR 85 邊界線 + 底部 TFDR 15 邊界線；係 TFDR 包絡線，唔係平均線／支持位）
       // - 衝入 >= 80 紅色高危區：動態展開頂部 3 條紅軌 (85 / 90 / 95) + 紅帶陰影，底部維持單線
       // - 跌入 <= 20 綠色奇點區：動態展開底部 3 條綠軌 (20/25 / 15 / 10) + 綠帶陰影，頂部維持單線
       ctx.save();
@@ -1147,7 +1204,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           drawEndTag(y90, '90 危險', '#f87171', 'rgba(69, 10, 10, 0.84)');
           drawEndTag(y85, '85 警戒', '#fca5a5', 'rgba(69, 10, 10, 0.78)');
         } else {
-          drawEndTag(getY(rightMostTfdr.band85), '85 壓力邊界', '#fca5a5', 'rgba(69, 10, 10, 0.72)');
+          drawEndTag(getY(rightMostTfdr.band85), 'TFDR 85 邊界', '#fca5a5', 'rgba(69, 10, 10, 0.72)');
         }
 
         if (expandBottomBands) {
@@ -1155,10 +1212,10 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           const y15 = Math.min(y10 - 14, getY(rightMostTfdr.band15));
           const y25 = Math.min(y15 - 14, getY(rightMostTfdr.band25));
           drawEndTag(y25, '25 警戒', '#86efac', 'rgba(5, 46, 22, 0.78)');
-          drawEndTag(y15, '15 黃金底', '#4ade80', 'rgba(5, 46, 22, 0.84)');
+          drawEndTag(y15, '15 邊界', '#4ade80', 'rgba(5, 46, 22, 0.84)');
           drawEndTag(y10, '10 極底', '#22c55e', 'rgba(5, 46, 22, 0.88)');
         } else {
-          drawEndTag(getY(rightMostTfdr.band15), '15 支撐邊界', '#4ade80', 'rgba(5, 46, 22, 0.72)');
+          drawEndTag(getY(rightMostTfdr.band15), 'TFDR 15 邊界', '#4ade80', 'rgba(5, 46, 22, 0.72)');
         }
       }
       ctx.restore();
@@ -1428,7 +1485,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           ctx.stroke();
           ctx.setLineDash([]);
 
-          const labelText = `TFDR 15 黃金底 (${lastTfdr.band15})`;
+          const labelText = `TFDR 15 邊界 (${lastTfdr.band15})`;
           ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
           const textW = ctx.measureText(labelText).width;
           const boxW = textW + 10;
@@ -1705,20 +1762,22 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
         }
       });
     }
-    // MA20 平均線（日線＋CLASSIC 先畫；TFDR 模式按現有設計收起均線）：
-    // 收市價 20 日平均，線尾標「MA20」。純顯示，唔入任何計算。
+    // 平均線（各時間框架一條：日線 MA20／週線 MA10／月線 M10；CLASSIC 同 TFDR 模式都畫）：
+    // 收市價簡單平均，線尾標周期＋框架。純顯示，唔入任何計算。
     // 只做方向參考（收市企線之上＝升勢、之下＝跌勢），唔係支持位買入訊號。
     // 【修復】一定要喺燭（第 5 節）＋標記（第 6／7 節）之後先畫：之前喺燭之前畫，
     // 1.6px 天藍線俾不透明燭身遮咗 ~90%，「MA20」線尾標籤又俾最後幾支燭遮住，
     // 所以圖上完全見唔到（code 喺 bundle 入面，畫咗等於冇畫）。
-    if (chartMode === 'CLASSIC' && ma20Series.length > 0) {
+    // 【修復】TFDR 模式唔好再收起均線：Peter 睇 TFDR 模式嗰陣預期見到平均線，
+    // 收起咗佢就會誤認 TFDR 15 邊界做平均線。
+    if (maLine.label && maLine.values.length > 0) {
       ctx.beginPath();
       ctx.setLineDash([]);
       let hasMaPoint = false;
       let lastMaIdx = -1;
       let lastMaVal = NaN;
       visibleBars.forEach((bar, i) => {
-        const ma = ma20Series[startIdx + i];
+        const ma = maLine.values[startIdx + i];
         if (ma == null || !Number.isFinite(ma)) return;
         const x = getX(i);
         const y = getY(ma);
@@ -1738,7 +1797,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
         ctx.fillStyle = '#38bdf8';
         ctx.font = 'bold 10px sans-serif';
         ctx.textAlign = 'right';
-        ctx.fillText('MA20', getX(lastMaIdx) - 4, getY(lastMaVal) - 6);
+        ctx.fillText(maLine.label, getX(lastMaIdx) - 4, getY(lastMaVal) - 6);
       }
     }
     // 9. Interactive Crosshair & Tooltip (支援點擊空白處或白色數據條立即隱藏 / 再點一下重新查看)
@@ -1821,7 +1880,7 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
     activeData,
     displayBars,
     liveBar,
-    ma20Series,
+    maLine,
     viewRange,
     boxMarkers,
     hologramLine,
@@ -2233,8 +2292,8 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
             : puzzleState?.timeSpacePrompt.singularityStatus === 'UPPER_EXPANSION'
             ? '目前顯示：TFDR 動態奇點軌道 ⚠️ 上方三線展開 (85/90/95 警戒)'
             : puzzleState?.timeSpacePrompt.singularityStatus === 'LOWER_EXPANSION'
-            ? '目前顯示：TFDR 動態奇點軌道 🟢 下方三線展開 (25/15/10 黃金底)'
-            : '目前顯示：TFDR 動態奇點軌道 (安全中區雙線邊界：85 壓力 · 15 支撐)'}
+            ? '目前顯示：TFDR 動態奇點軌道 🟢 下方三線展開 (25/15/10 邊界)'
+            : '目前顯示：TFDR 動態奇點軌道 (安全中區雙線邊界：TFDR 85 · TFDR 15)'}
         </div>
         <div className="flex items-center gap-2">
           {/* Zoom controls */}
@@ -2339,20 +2398,25 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
               <span className="flex items-center gap-1 text-[#f59e0b]">
                 <span className="w-3 h-0.5 inline-block border-b border-dashed border-[#f59e0b]"></span> 強阻
               </span>
-              {(timeframe === 'daily' || timeframe === '1d') && (
-                <span className="flex items-center gap-1 text-[#38bdf8] font-bold" title="MA20 方向參考：收市企 MA 之上＝升勢、跌穿之下＝跌勢。只做方向參考，唔係支持位買入訊號（研究：MA 掂到守得住率 MA20 8%、MA50／MA100 0%，買掂到全部輸錢；入場要等 HA 梯級反轉）。顯示專用，唔入任何引擎／模型計算">
-                  <span className="w-3 h-0.5 inline-block bg-[#38bdf8]"></span> MA20
+              {maLine.label && (
+                <span className="flex items-center gap-1 text-[#38bdf8] font-bold" title={maLine.title}>
+                  <span className="w-3 h-0.5 inline-block bg-[#38bdf8]"></span> {maLine.label}
                 </span>
               )}
             </>
           ) : (
             <>
               <span className="flex items-center gap-1 text-[#fca5a5]">
-                <span className="w-3 h-0.5 inline-block border-b border-dotted border-[#fca5a5]"></span> 85壓力邊界
+                <span className="w-3 h-0.5 inline-block border-b border-dotted border-[#fca5a5]"></span> TFDR 85 邊界
               </span>
               <span className="flex items-center gap-1 text-[#4ade80]">
-                <span className="w-3 h-0.5 inline-block border-b border-dashed border-[#4ade80]"></span> 15支撐邊界
+                <span className="w-3 h-0.5 inline-block border-b border-dashed border-[#4ade80]"></span> TFDR 15 邊界
               </span>
+              {maLine.label && (
+                <span className="flex items-center gap-1 text-[#38bdf8] font-bold" title={maLine.title}>
+                  <span className="w-3 h-0.5 inline-block bg-[#38bdf8]"></span> {maLine.label}
+                </span>
+              )}
               <span className="text-slate-400 text-[10px]">
                 (進入 ≥80 / ≤20 動態展開三線奇點帶)
               </span>
@@ -2362,24 +2426,24 @@ export const HeaderChart: React.FC<HeaderChartProps> = ({
           )}
         </div>
         <div className="text-[10px] text-gray-500 font-mono flex items-center gap-2">
-          {qqpModelLayer && (
+          {monthlyLeg && (
             <span
               className={`px-1.5 py-0.5 rounded font-bold ${
-                qqpModelLayer.leg === 'up'
+                monthlyLeg.leg === 'up'
                   ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/60'
-                  : qqpModelLayer.leg === 'down'
+                  : monthlyLeg.leg === 'down'
                   ? 'bg-red-500/20 text-red-300 border border-red-400/60'
                   : 'bg-slate-500/20 text-slate-300 border border-slate-400/60'
               }`}
-              title={`大周期腿向（25% zigzag，只做牛熊定性，唔做預測過濾）${
-                qqpModelLayer.legPivotDate
-                  ? `；最新確認拐點 ${qqpModelLayer.legPivotDate} @ $${qqpModelLayer.legPivotPrice}`
+              title={`大周期腿向（月線 25% zigzag 最近確認拐點，只做牛熊定性，唔做預測過濾）${
+                monthlyLeg.pivotDate
+                  ? `；最新確認拐點 ${monthlyLeg.pivotDate} @ $${monthlyLeg.pivotPrice}`
                   : ''
               }`}
             >
-              {qqpModelLayer.leg === 'up'
+              {monthlyLeg.leg === 'up'
                 ? '▲ 大周期：上升腿'
-                : qqpModelLayer.leg === 'down'
+                : monthlyLeg.leg === 'down'
                 ? '▼ 大周期：下跌腿'
                 : '大周期：腿向未明'}
             </span>

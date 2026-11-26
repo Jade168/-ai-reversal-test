@@ -27,6 +27,38 @@ export function movingAverage(values: number[], period: number): number[] {
   return out;
 }
 
+/**
+ * 前 N 期平均（唔包而家呢格）：out[i] ＝ values[i-period..i-1] 嘅平均，
+ * i < period 嗰陣回 NaN。月線 M10 專用——同決策面板「月均線」一致：
+ * 之前 10 個已完結月份嘅月尾收市平均，唔包而家呢個月（未收市）。
+ * 例如 2026-11 嗰格＝2026-01..10 月尾收市平均＝$200.52。
+ */
+export function priorMovingAverage(values: number[], period: number): number[] {
+  const out: number[] = new Array(values.length).fill(NaN);
+  if (period <= 0) return out;
+  let sum = 0;
+  let valid = 0;
+  for (let i = 0; i < values.length; i++) {
+    // 滑入 values[i-1]（上一格），滑出 values[i-period-1]（窗口之外）
+    if (i - 1 >= 0) {
+      const v = values[i - 1];
+      if (Number.isFinite(v)) {
+        sum += v;
+        valid++;
+      }
+    }
+    if (i - period - 1 >= 0) {
+      const old = values[i - period - 1];
+      if (Number.isFinite(old)) {
+        sum -= old;
+        valid--;
+      }
+    }
+    if (valid === period) out[i] = sum / period;
+  }
+  return out;
+}
+
 // ── 即日棒・顯示專用：畫圖／撳格／滑桿共用同一條「顯示長度」（烘焙棒＋即日棒）──
 // 之前畫圖用 displayBars 長度計 endIdx，撳格用 viewRange（烘焙）長度計，
 // 滑桿尾日期又用烘焙棒——三者唔一致，先至撳即日棒嗰格會選中最後一支烘焙棒、

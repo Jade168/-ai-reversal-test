@@ -396,6 +396,34 @@ function legAt(idx: number, pivots: ZigPivot[]): { leg: QqpLeg; pivot: ZigPivot 
   return { leg: last.side === 'low' ? 'up' : 'down', pivot: last };
 }
 
+/**
+ * 月線 25% zigzag 腿向（「大周期」chip 專用，純顯示）：
+ * 同 computeQqpModelLayer 入面嗰套 zigzagPivots／legAt，但用月線棒計。
+ * 日線腿向一日 V 形反彈就翻得轉（NVDA 2026-11-23 一日 +32% 確認底即翻上升腿，
+ * 同版面其他向下訊號撞晒）；月線腿向一個月先確認一次，唔會俾一日反彈翻轉。
+ * 唔改任何模型訊號——日線／週線模型層繼續用自己嘅 leg。
+ */
+export function computeMonthlyLeg(monthlyBars: QqpBar[]): {
+  leg: QqpLeg;
+  pivotDate: string | null;
+  pivotPrice: number | null;
+} {
+  if (!monthlyBars || monthlyBars.length === 0) {
+    return { leg: 'unknown', pivotDate: null, pivotPrice: null };
+  }
+  const bars = [...monthlyBars]
+    .filter(b => b && Number.isFinite(b.o) && Number.isFinite(b.h) && Number.isFinite(b.l) && Number.isFinite(b.c) && b.h > 0 && b.c > 0)
+    .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  if (bars.length === 0) return { leg: 'unknown', pivotDate: null, pivotPrice: null };
+  const pivots = zigzagPivots(bars, 0.25);
+  const { leg, pivot } = legAt(bars.length - 1, pivots);
+  return {
+    leg,
+    pivotDate: pivot ? (bars[pivot.idx].date || '').slice(0, 10) : null,
+    pivotPrice: pivot ? pivot.price : null
+  };
+}
+
 // ---------------------------------------------------------------- 週線聚合（W-MON，同 Python weekly_bars；只供驗證腳本用）
 export function aggregateWeeklyMonday(dailyBars: QqpBar[]): QqpBar[] {
   const sorted = [...dailyBars].sort((a, b) => a.date.localeCompare(b.date));
